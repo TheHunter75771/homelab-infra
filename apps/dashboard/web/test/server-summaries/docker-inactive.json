@@ -1,0 +1,1158 @@
+{
+  "schema": 1,
+  "generatedAt": "2026-10-24T14:08:00.004Z",
+  "server": {
+    "name": "testhost",
+    "version": "2.0.0",
+    "timeZone": "UTC"
+  },
+  "access": "tailnet",
+  "rehearsal": false,
+  "helper": {
+    "reachable": true,
+    "error": null
+  },
+  "docker": {
+    "state": "inactive"
+  },
+  "gate": {
+    "status": "ok",
+    "line": "Drive found, checked and mounted at /media (Oct 21 06:01). Apps released.",
+    "since": null,
+    "powercycled": false,
+    "attempts": 0,
+    "mediaStopped": false,
+    "mountPath": "/media",
+    "currentBoot": "4e1c",
+    "lastPassAt": "2026-10-21T06:01:22.000Z",
+    "retryMinutes": 5,
+    "nextRetryAt": null,
+    "canRerun": false,
+    "rerunLock": "The drive is verified and mounted. A re-run only acts when it has failed or been lost.",
+    "history": [
+      {
+        "boot": "4e1c",
+        "current": true,
+        "startedAt": "2026-10-21T06:01:22.000Z",
+        "events": [
+          {
+            "ts": "2026-10-21T06:01:22.000Z",
+            "event": "pass",
+            "detail": "fsck clean, mounted",
+            "waitSeconds": 0
+          }
+        ]
+      },
+      {
+        "boot": "77b0",
+        "current": false,
+        "startedAt": "2026-10-20T03:16:02.000Z",
+        "events": [
+          {
+            "ts": "2026-10-20T03:21:40.000Z",
+            "event": "retry-pass",
+            "detail": "Mounted on retry 2 after power-cycle",
+            "waitSeconds": 300
+          },
+          {
+            "ts": "2026-10-20T03:16:38.000Z",
+            "event": "powercycle",
+            "detail": "USB port 2 power-cycled",
+            "waitSeconds": 30
+          },
+          {
+            "ts": "2026-10-20T03:16:02.000Z",
+            "event": "fail",
+            "detail": "sdb not present after 30 s",
+            "waitSeconds": 30
+          }
+        ]
+      },
+      {
+        "boot": "5a12",
+        "current": false,
+        "startedAt": "2026-10-12T06:00:48.000Z",
+        "events": [
+          {
+            "ts": "2026-10-12T06:01:10.000Z",
+            "event": "pass",
+            "detail": "fsck clean, mounted",
+            "waitSeconds": 0
+          },
+          {
+            "ts": "2026-10-12T06:00:48.000Z",
+            "event": "repair",
+            "detail": "fsck fixed 2 errors on sdb1",
+            "waitSeconds": 0
+          }
+        ]
+      }
+    ],
+    "action": null
+  },
+  "apps": [
+    {
+      "name": "cloudflared",
+      "label": "cloudflared",
+      "purpose": "Public tunnel for /watch",
+      "open": null,
+      "stack": "edge",
+      "mediaGated": false,
+      "status": "stopped",
+      "stoppedReason": "docker-down",
+      "state": null,
+      "health": null,
+      "startedAt": null,
+      "restartCount": null,
+      "image": null,
+      "tag": "1.0.0",
+      "pinned": "example/cloudflared:1.0.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pinnedTag": "1.0.0",
+      "updateAvailable": false,
+      "localBuild": false,
+      "action": null,
+      "locks": {
+        "restart": "Docker isn't running.",
+        "stop": "Docker isn't running.",
+        "start": "Docker isn't running.",
+        "update": "Docker isn't running.",
+        "logs": "Docker isn't running."
+      }
+    },
+    {
+      "name": "jellyfin",
+      "label": "Jellyfin",
+      "purpose": "Streams the library to TVs, phones and the web",
+      "open": {
+        "port": 8444,
+        "path": "/watch"
+      },
+      "stack": "media",
+      "mediaGated": true,
+      "status": "stopped",
+      "stoppedReason": "docker-down",
+      "state": null,
+      "health": null,
+      "startedAt": null,
+      "restartCount": null,
+      "image": null,
+      "tag": "1.0.0",
+      "pinned": "example/jellyfin:1.0.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pinnedTag": "1.0.0",
+      "updateAvailable": false,
+      "localBuild": false,
+      "action": null,
+      "locks": {
+        "restart": "Docker isn't running.",
+        "stop": "Docker isn't running.",
+        "start": "Docker isn't running.",
+        "update": "Docker isn't running.",
+        "logs": "Docker isn't running."
+      }
+    },
+    {
+      "name": "jellyseerr",
+      "label": "Jellyseerr",
+      "purpose": "Takes requests for new movies and shows",
+      "open": {
+        "port": 8443,
+        "path": "/"
+      },
+      "stack": "media",
+      "mediaGated": true,
+      "status": "stopped",
+      "stoppedReason": "docker-down",
+      "state": null,
+      "health": null,
+      "startedAt": null,
+      "restartCount": null,
+      "image": null,
+      "tag": "1.0.0",
+      "pinned": "example/jellyseerr:1.0.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pinnedTag": "1.0.0",
+      "updateAvailable": false,
+      "localBuild": false,
+      "action": null,
+      "locks": {
+        "restart": "Docker isn't running.",
+        "stop": "Docker isn't running.",
+        "start": "Docker isn't running.",
+        "update": "Docker isn't running.",
+        "logs": "Docker isn't running."
+      }
+    },
+    {
+      "name": "prowlarr",
+      "label": "Prowlarr",
+      "purpose": "Manages the indexers for Sonarr and Radarr",
+      "open": {
+        "port": 8444,
+        "path": "/prowlarr"
+      },
+      "stack": "media",
+      "mediaGated": true,
+      "status": "stopped",
+      "stoppedReason": "docker-down",
+      "state": null,
+      "health": null,
+      "startedAt": null,
+      "restartCount": null,
+      "image": null,
+      "tag": "1.0.0",
+      "pinned": "example/prowlarr:1.0.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pinnedTag": "1.0.0",
+      "updateAvailable": false,
+      "localBuild": false,
+      "action": null,
+      "locks": {
+        "restart": "Docker isn't running.",
+        "stop": "Docker isn't running.",
+        "start": "Docker isn't running.",
+        "update": "Docker isn't running.",
+        "logs": "Docker isn't running."
+      }
+    },
+    {
+      "name": "radarr",
+      "label": "Radarr",
+      "purpose": "Finds and grabs movies",
+      "open": {
+        "port": 8444,
+        "path": "/radarr"
+      },
+      "stack": "media",
+      "mediaGated": true,
+      "status": "stopped",
+      "stoppedReason": "docker-down",
+      "state": null,
+      "health": null,
+      "startedAt": null,
+      "restartCount": null,
+      "image": null,
+      "tag": "1.0.0",
+      "pinned": "example/radarr:1.0.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pinnedTag": "1.0.0",
+      "updateAvailable": false,
+      "localBuild": false,
+      "action": null,
+      "locks": {
+        "restart": "Docker isn't running.",
+        "stop": "Docker isn't running.",
+        "start": "Docker isn't running.",
+        "update": "Docker isn't running.",
+        "logs": "Docker isn't running."
+      }
+    },
+    {
+      "name": "sabnzbd",
+      "label": "SABnzbd",
+      "purpose": "Downloads from Usenet",
+      "open": {
+        "port": 8444,
+        "path": "/sabnzbd"
+      },
+      "stack": "media",
+      "mediaGated": true,
+      "status": "stopped",
+      "stoppedReason": "docker-down",
+      "state": null,
+      "health": null,
+      "startedAt": null,
+      "restartCount": null,
+      "image": null,
+      "tag": "1.0.0",
+      "pinned": "example/sabnzbd:1.0.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pinnedTag": "1.0.0",
+      "updateAvailable": false,
+      "localBuild": false,
+      "action": null,
+      "locks": {
+        "restart": "Docker isn't running.",
+        "stop": "Docker isn't running.",
+        "start": "Docker isn't running.",
+        "update": "Docker isn't running.",
+        "logs": "Docker isn't running."
+      }
+    },
+    {
+      "name": "sonarr",
+      "label": "Sonarr",
+      "purpose": "Finds and grabs TV episodes",
+      "open": {
+        "port": 8444,
+        "path": "/sonarr"
+      },
+      "stack": "media",
+      "mediaGated": true,
+      "status": "stopped",
+      "stoppedReason": "docker-down",
+      "state": null,
+      "health": null,
+      "startedAt": null,
+      "restartCount": null,
+      "image": null,
+      "tag": "1.0.0",
+      "pinned": "example/sonarr:1.0.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pinnedTag": "1.0.0",
+      "updateAvailable": false,
+      "localBuild": false,
+      "action": null,
+      "locks": {
+        "restart": "Docker isn't running.",
+        "stop": "Docker isn't running.",
+        "start": "Docker isn't running.",
+        "update": "Docker isn't running.",
+        "logs": "Docker isn't running."
+      }
+    },
+    {
+      "name": "wol-relay",
+      "label": "wol-relay",
+      "purpose": "Wakes the gaming PC from the tailnet",
+      "open": null,
+      "stack": "utils",
+      "mediaGated": false,
+      "status": "stopped",
+      "stoppedReason": "docker-down",
+      "state": null,
+      "health": null,
+      "startedAt": null,
+      "restartCount": null,
+      "image": null,
+      "tag": "1.0.0",
+      "pinned": "example/wol-relay:1.0.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pinnedTag": "1.0.0",
+      "updateAvailable": false,
+      "localBuild": false,
+      "action": null,
+      "locks": {
+        "restart": "Docker isn't running.",
+        "stop": "Docker isn't running.",
+        "start": "Docker isn't running.",
+        "update": "Docker isn't running.",
+        "logs": "Docker isn't running."
+      }
+    }
+  ],
+  "host": {
+    "name": "testhost",
+    "load": [
+      0.42,
+      0.38,
+      0.35
+    ],
+    "memTotal": 16642998272,
+    "memUsed": 5469372416,
+    "rootTotal": 100000002048,
+    "rootUsed": 41000001536,
+    "rootUsedPct": 41,
+    "bootedAt": "2026-10-21T06:08:00.000Z",
+    "rebootRequired": false,
+    "rebootPackages": []
+  },
+  "drive": {
+    "mountPath": "/media",
+    "mounted": true,
+    "stale": false,
+    "lastKnownAt": null,
+    "error": null,
+    "total": 4000000000000,
+    "used": 1360000000000,
+    "free": 2640000000000,
+    "usedPct": 34,
+    "warnPct": 90,
+    "warn": false,
+    "split": {
+      "tv": 812000000000,
+      "movies": 486000000000,
+      "downloads": 62000000000,
+      "computedAt": "2026-10-24T03:00:00Z",
+      "stale": false
+    },
+    "samples": [
+      {
+        "date": "2026-09-14",
+        "used": 1120000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-09-15",
+        "used": 1126000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-09-16",
+        "used": 1132000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-09-17",
+        "used": 1138000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-09-18",
+        "used": 1144000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-09-19",
+        "used": 1150000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-09-20",
+        "used": 1156000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-09-21",
+        "used": 1162000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-09-22",
+        "used": 1168000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-09-23",
+        "used": 1174000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-09-24",
+        "used": 1180000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-09-25",
+        "used": 1186000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-09-26",
+        "used": 1192000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-09-27",
+        "used": 1198000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-09-28",
+        "used": 1204000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-09-29",
+        "used": 1210000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-09-30",
+        "used": 1216000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-01",
+        "used": 1222000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-02",
+        "used": 1228000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-03",
+        "used": 1234000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-04",
+        "used": 1240000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-05",
+        "used": 1246000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-06",
+        "used": 1252000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-07",
+        "used": 1258000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-08",
+        "used": 1264000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-09",
+        "used": 1270000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-10",
+        "used": 1276000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-11",
+        "used": 1282000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-12",
+        "used": 1288000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-13",
+        "used": 1294000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-14",
+        "used": 1300000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-15",
+        "used": 1306000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-16",
+        "used": 1312000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-17",
+        "used": 1318000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-18",
+        "used": 1324000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-19",
+        "used": 1330000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-20",
+        "used": 1336000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-21",
+        "used": 1342000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-22",
+        "used": 1348000000000,
+        "total": 4000000000000
+      },
+      {
+        "date": "2026-10-23",
+        "used": 1354000000000,
+        "total": 4000000000000
+      }
+    ],
+    "forecast": {
+      "method": "least-squares",
+      "windowDays": 30,
+      "samplesInWindow": 29,
+      "slopeBytesPerDay": 6000000000,
+      "full": {
+        "date": "2028-01-07",
+        "inDays": 440,
+        "reached": false
+      },
+      "at90": {
+        "date": "2027-11-02",
+        "inDays": 374,
+        "reached": false
+      },
+      "at97": {
+        "date": "2027-12-18",
+        "inDays": 420,
+        "reached": false
+      }
+    },
+    "forecastReason": null,
+    "samplesInWindow": 29
+  },
+  "backups": {
+    "maxAgeHours": 36,
+    "lastPull": "2026-10-23T21:40:00.000Z",
+    "status": "ok",
+    "lastOk": "2026-10-24T03:12:00.000Z",
+    "archive": "appdata-20261024T031200Z.tar",
+    "sizeBytes": 18400000000,
+    "lastRunOk": true
+  },
+  "uptime": {
+    "box": {
+      "source": "boots",
+      "pct30d": 99.97,
+      "days": [
+        {
+          "date": "2026-09-25",
+          "pct": null
+        },
+        {
+          "date": "2026-09-26",
+          "pct": null
+        },
+        {
+          "date": "2026-09-27",
+          "pct": null
+        },
+        {
+          "date": "2026-09-28",
+          "pct": null
+        },
+        {
+          "date": "2026-09-29",
+          "pct": null
+        },
+        {
+          "date": "2026-09-30",
+          "pct": null
+        },
+        {
+          "date": "2026-10-01",
+          "pct": null
+        },
+        {
+          "date": "2026-10-02",
+          "pct": null
+        },
+        {
+          "date": "2026-10-03",
+          "pct": null
+        },
+        {
+          "date": "2026-10-04",
+          "pct": null
+        },
+        {
+          "date": "2026-10-05",
+          "pct": null
+        },
+        {
+          "date": "2026-10-06",
+          "pct": null
+        },
+        {
+          "date": "2026-10-07",
+          "pct": null
+        },
+        {
+          "date": "2026-10-08",
+          "pct": null
+        },
+        {
+          "date": "2026-10-09",
+          "pct": null
+        },
+        {
+          "date": "2026-10-10",
+          "pct": null
+        },
+        {
+          "date": "2026-10-11",
+          "pct": null
+        },
+        {
+          "date": "2026-10-12",
+          "pct": 100
+        },
+        {
+          "date": "2026-10-13",
+          "pct": 100
+        },
+        {
+          "date": "2026-10-14",
+          "pct": 100
+        },
+        {
+          "date": "2026-10-15",
+          "pct": 100
+        },
+        {
+          "date": "2026-10-16",
+          "pct": 100
+        },
+        {
+          "date": "2026-10-17",
+          "pct": 100
+        },
+        {
+          "date": "2026-10-18",
+          "pct": 100
+        },
+        {
+          "date": "2026-10-19",
+          "pct": 100
+        },
+        {
+          "date": "2026-10-20",
+          "pct": 99.72
+        },
+        {
+          "date": "2026-10-21",
+          "pct": 99.93
+        },
+        {
+          "date": "2026-10-22",
+          "pct": 100
+        },
+        {
+          "date": "2026-10-23",
+          "pct": 100
+        },
+        {
+          "date": "2026-10-24",
+          "pct": 100
+        }
+      ],
+      "downs": [
+        {
+          "start": "2026-10-21T05:59:00.000Z",
+          "end": "2026-10-21T06:00:00.000Z",
+          "seconds": 60,
+          "reason": "Reboot or power loss"
+        },
+        {
+          "start": "2026-10-20T03:12:00.000Z",
+          "end": "2026-10-20T03:16:00.000Z",
+          "seconds": 240,
+          "reason": "Reboot or power loss"
+        }
+      ]
+    },
+    "apps": [
+      {
+        "name": "cloudflared",
+        "months": [
+          {
+            "month": "2026-05",
+            "pct": null
+          },
+          {
+            "month": "2026-06",
+            "pct": null
+          },
+          {
+            "month": "2026-07",
+            "pct": null
+          },
+          {
+            "month": "2026-08",
+            "pct": null
+          },
+          {
+            "month": "2026-09",
+            "pct": null
+          },
+          {
+            "month": "2026-10",
+            "pct": null
+          }
+        ]
+      },
+      {
+        "name": "jellyfin",
+        "months": [
+          {
+            "month": "2026-05",
+            "pct": null
+          },
+          {
+            "month": "2026-06",
+            "pct": null
+          },
+          {
+            "month": "2026-07",
+            "pct": null
+          },
+          {
+            "month": "2026-08",
+            "pct": null
+          },
+          {
+            "month": "2026-09",
+            "pct": null
+          },
+          {
+            "month": "2026-10",
+            "pct": null
+          }
+        ]
+      },
+      {
+        "name": "jellyseerr",
+        "months": [
+          {
+            "month": "2026-05",
+            "pct": null
+          },
+          {
+            "month": "2026-06",
+            "pct": null
+          },
+          {
+            "month": "2026-07",
+            "pct": null
+          },
+          {
+            "month": "2026-08",
+            "pct": null
+          },
+          {
+            "month": "2026-09",
+            "pct": null
+          },
+          {
+            "month": "2026-10",
+            "pct": null
+          }
+        ]
+      },
+      {
+        "name": "prowlarr",
+        "months": [
+          {
+            "month": "2026-05",
+            "pct": null
+          },
+          {
+            "month": "2026-06",
+            "pct": null
+          },
+          {
+            "month": "2026-07",
+            "pct": null
+          },
+          {
+            "month": "2026-08",
+            "pct": null
+          },
+          {
+            "month": "2026-09",
+            "pct": null
+          },
+          {
+            "month": "2026-10",
+            "pct": null
+          }
+        ]
+      },
+      {
+        "name": "radarr",
+        "months": [
+          {
+            "month": "2026-05",
+            "pct": null
+          },
+          {
+            "month": "2026-06",
+            "pct": null
+          },
+          {
+            "month": "2026-07",
+            "pct": null
+          },
+          {
+            "month": "2026-08",
+            "pct": null
+          },
+          {
+            "month": "2026-09",
+            "pct": null
+          },
+          {
+            "month": "2026-10",
+            "pct": null
+          }
+        ]
+      },
+      {
+        "name": "sabnzbd",
+        "months": [
+          {
+            "month": "2026-05",
+            "pct": null
+          },
+          {
+            "month": "2026-06",
+            "pct": null
+          },
+          {
+            "month": "2026-07",
+            "pct": null
+          },
+          {
+            "month": "2026-08",
+            "pct": null
+          },
+          {
+            "month": "2026-09",
+            "pct": null
+          },
+          {
+            "month": "2026-10",
+            "pct": null
+          }
+        ]
+      },
+      {
+        "name": "sonarr",
+        "months": [
+          {
+            "month": "2026-05",
+            "pct": null
+          },
+          {
+            "month": "2026-06",
+            "pct": null
+          },
+          {
+            "month": "2026-07",
+            "pct": null
+          },
+          {
+            "month": "2026-08",
+            "pct": null
+          },
+          {
+            "month": "2026-09",
+            "pct": null
+          },
+          {
+            "month": "2026-10",
+            "pct": null
+          }
+        ]
+      },
+      {
+        "name": "wol-relay",
+        "months": [
+          {
+            "month": "2026-05",
+            "pct": null
+          },
+          {
+            "month": "2026-06",
+            "pct": null
+          },
+          {
+            "month": "2026-07",
+            "pct": null
+          },
+          {
+            "month": "2026-08",
+            "pct": null
+          },
+          {
+            "month": "2026-09",
+            "pct": null
+          },
+          {
+            "month": "2026-10",
+            "pct": null
+          }
+        ]
+      }
+    ],
+    "driveFailures": [
+      {
+        "month": "2026-05",
+        "count": 0
+      },
+      {
+        "month": "2026-06",
+        "count": 0
+      },
+      {
+        "month": "2026-07",
+        "count": 0
+      },
+      {
+        "month": "2026-08",
+        "count": 0
+      },
+      {
+        "month": "2026-09",
+        "count": 0
+      },
+      {
+        "month": "2026-10",
+        "count": 1
+      }
+    ]
+  },
+  "media": {
+    "jellyfin": {
+      "state": "stopped",
+      "message": "Jellyfin is stopped."
+    },
+    "sabnzbd": {
+      "state": "stopped",
+      "message": "SABnzbd is stopped."
+    },
+    "jellyseerr": {
+      "state": "stopped",
+      "message": "Jellyseerr is stopped."
+    },
+    "prowlarr": {
+      "state": "stopped",
+      "message": "Prowlarr is stopped."
+    },
+    "sonarr": {
+      "state": "stopped",
+      "message": "Sonarr is stopped."
+    },
+    "radarr": {
+      "state": "stopped",
+      "message": "Radarr is stopped."
+    },
+    "checks": [
+      {
+        "key": "download-client",
+        "label": "Download client reachable",
+        "status": "idle",
+        "detail": "Stopped"
+      },
+      {
+        "key": "library-folders",
+        "label": "Library folders present",
+        "status": "ok",
+        "detail": "OK"
+      },
+      {
+        "key": "usenet-login",
+        "label": "Usenet login",
+        "status": "idle",
+        "detail": "Unknown"
+      },
+      {
+        "key": "sonarr-health",
+        "label": "Sonarr health",
+        "status": "idle",
+        "detail": "Sonarr is stopped."
+      },
+      {
+        "key": "radarr-health",
+        "label": "Radarr health",
+        "status": "idle",
+        "detail": "Radarr is stopped."
+      }
+    ]
+  },
+  "push": {
+    "devices": [
+      {
+        "id": "c625fad0b2e458ec",
+        "label": "iPhone",
+        "created": "2026-09-30T12:00:00.000Z"
+      },
+      {
+        "id": "3e87cf24b2edca54",
+        "label": "MacBook · Safari",
+        "created": "2026-09-29T12:00:00.000Z"
+      },
+      {
+        "id": "0dc36b4ee66be51f",
+        "label": "test",
+        "created": "2026-09-28T12:00:00.000Z"
+      }
+    ],
+    "storeError": false,
+    "alerts": [
+      {
+        "ts": "2026-10-20T03:21:00.000Z",
+        "title": "Media drive back",
+        "body": "Verified again; docker running.",
+        "tag": "bootgate",
+        "delivered": 3,
+        "failed": 0,
+        "state": "resolved"
+      },
+      {
+        "ts": "2026-10-20T03:12:00.000Z",
+        "title": "Media drive lost",
+        "body": "media apps stopped",
+        "tag": "bootgate",
+        "delivered": 3,
+        "failed": 0,
+        "state": "resolved"
+      },
+      {
+        "ts": "2026-10-19T20:04:00.000Z",
+        "title": "Test push",
+        "body": "Sent from the dashboard.",
+        "tag": "test",
+        "delivered": 3,
+        "failed": 0,
+        "state": "info"
+      }
+    ],
+    "alertsAvailable": true
+  },
+  "subscriptions": [
+    {
+      "key": "usenet",
+      "name": "Usenet provider",
+      "date": "2026-10-29",
+      "daysLeft": 5,
+      "remindOn": "2026-10-22",
+      "reminderDue": true,
+      "reminded": false
+    },
+    {
+      "key": "indexer-a",
+      "name": "Indexer A",
+      "date": "2026-11-16",
+      "daysLeft": 23,
+      "remindOn": "2026-11-09",
+      "reminderDue": false,
+      "reminded": false
+    }
+  ],
+  "settings": {
+    "thresholds": {
+      "diskWarnPct": 90,
+      "backupMaxAgeH": 36
+    }
+  },
+  "links": {
+    "runbooks": []
+  },
+  "issues": [
+    {
+      "severity": "fail",
+      "text": "Docker isn't running.",
+      "target": "apps"
+    },
+    {
+      "severity": "warn",
+      "text": "Usenet provider renews in 5 days.",
+      "target": "settings"
+    }
+  ]
+}

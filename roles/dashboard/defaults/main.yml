@@ -1,0 +1,124 @@
+---
+# Role dashboard (module H): Dashboard v2 as a hardened host service plus its root Docker helper.
+# docs/CONTRACTS.md §11.1/§11.2, ADR 0013 (host service outside Docker), ADR 0014 (tailnet-only).
+# Layout, accounts and the push store come from group_vars (homelab_push_dir, homelab_stacks_dir,
+# homelab_data_dir, media_mount, media_group, backup_pull_user); secrets from the vault.
+
+# Identity. 10101 is fixed by the contract: the push store already belongs to it, so the old
+# push-core account "pushcore" is renamed to "dashboard" and the id never changes.
+dashboard_user: dashboard
+dashboard_uid: 10101
+dashboard_gid: 10101
+dashboard_legacy_user: pushcore
+dashboard_bootgate_group: bootgate
+# Supplementary groups: media (read the *arr/SABnzbd config files for their API keys) and
+# bootgate (touch /run/bootgate/rerun). Never docker: Docker goes through homelab-dockerctl.
+dashboard_groups:
+  - "{{ media_group }}"
+  - "{{ dashboard_bootgate_group }}"
+
+# Packages from the Ubuntu archive (security updates via unattended-upgrades). No npm on the host:
+# the server's dependencies are built on the controller (tasks/build.yml), which must also run
+# Node.js of this major version.
+dashboard_packages:
+  - nodejs
+dashboard_node_major: 22
+
+# App code: root-owned and read-only to the service.
+dashboard_app_dir: /opt/homelab-dashboard
+dashboard_server_dir: "{{ dashboard_app_dir }}/server"
+# The PWA's static files (module G's web/public/), served by the server from this directory.
+dashboard_web_dir: "{{ dashboard_app_dir }}/web"
+# Controller-side paths. The repo root is the parent of playbooks/ (site.yml's directory).
+dashboard_repo_dir: "{{ playbook_dir }}/.."
+# Sources: module D's server, module G's web.
+dashboard_src_dir: "{{ dashboard_repo_dir }}/apps/dashboard"
+dashboard_server_src: "{{ dashboard_src_dir }}/server"
+dashboard_web_src: "{{ dashboard_src_dir }}/web/public"
+# Server entry point, relative to the server directory: package.json "main" (module D's choice).
+dashboard_server_entry: >-
+  {{ (lookup('ansible.builtin.file', dashboard_server_src ~ '/package.json', errors='ignore') | default('{}', true)
+      | from_json).main | default('src/server.js') }}
+# rsync excludes: node_modules and .git anywhere; tests and coverage only at the top of each tree.
+# Excluded paths are also protected from --delete, so the host's node_modules stays.
+dashboard_sync_excludes:
+  - node_modules/
+  - .git/
+  - /coverage/
+  - /test/
+  - /tests/
+# Controller-side build of the server's production dependencies (git-ignored .build/ in the repo).
+# `npm ci` runs only when package.json or package-lock.json changed (or node_modules is gone);
+# the stamp holds their sha256 at the last successful build.
+dashboard_build_dir: "{{ dashboard_repo_dir }}/.build/dashboard-server"
+dashboard_deps_stamp: "{{ dashboard_build_dir }}/.deps-stamp"
+
+# Runtime.
+dashboard_service: homelab-dashboard.service
+dashboard_config_dir: /etc/homelab-dashboard
+# Module D's settings file (apps/dashboard/server/src/config.js keys), passed as DASHBOARD_CONFIG.
+dashboard_config_file: "{{ dashboard_config_dir }}/config.json"
+dashboard_data_dir: /var/lib/homelab-dashboard
+dashboard_display_name: "{{ inventory_hostname }}"
+# Settings > Runbooks: links into this (public) repository. Paths are relative to the repo root.
+dashboard_runbook_base_url: "https://github.com/TheHunter75771/homelab-infra/blob/main/"
+dashboard_runbooks:
+  - { title: Media drive lost or failed, path: docs/runbooks/media-drive-failure.md }
+  - { title: Understanding the boot gate, path: docs/runbooks/failed-boot-gate.md }
+  - { title: Rebuild from scratch, path: docs/runbooks/restore-from-scratch.md }
+  - { title: Rotate a secret, path: docs/runbooks/rotate-a-secret.md }
+  - { title: Cloudflare route, path: docs/runbooks/cloudflare.md }
+  - { title: First-run app setup, path: docs/runbooks/first-run-apps.md }
+dashboard_listen_host: 127.0.0.1
+dashboard_port: 8085            # push-core's port: tailscale_serve keeps pointing / here
+dashboard_log_level: info
+dashboard_remote_enabled: false  # ADR 0014: v2.0 is tailnet-only; turning it on needs its own ADR
+dashboard_memory_max: 512M
+dashboard_tasks_max: 128
+dashboard_healthz_url: "http://{{ dashboard_listen_host }}:{{ dashboard_port }}/healthz"
+# Pinned image per app, from versions.yml only, for while Docker is held (the helper's ps gives
+# the deployed compose pins whenever it can be asked).
+dashboard_pinned_images: >-
+  {{ images | dict2items | rejectattr('key', 'equalto', 'node_base') | items2dict
+     | combine({'wol-relay': local_images.wol_relay}) }}
+
+# What the dashboard reads (owned by other roles; paths fixed by the contract).
+dashboard_bootgate_state_dir: /var/lib/bootgate
+dashboard_bootgate_run_dir: /run/bootgate
+dashboard_bootgate_retry_timer: bootgate-retry.timer
+dashboard_bootgate_retry_service: bootgate-retry.service
+dashboard_bootgate_retry_minutes: "{{ bootgate_retry_minutes | default(5) }}"
+dashboard_reboot_required_file: /run/reboot-required
+dashboard_rehearsal_flag: /etc/homelab/rehearsal
+dashboard_notify_history: /var/lib/homelab-notify/history.jsonl
+dashboard_backup_status: /var/lib/homelab-backup/status.json
+
+# Privileged helper (homelab-dockerctl): socket-activated, one instance per connection.
+dashboard_dockerctl_script: /usr/local/sbin/homelab-dockerctl
+dashboard_dockerctl_socket: /run/homelab-dockerctl.sock
+dashboard_dockerctl_config: "{{ dashboard_config_dir }}/dockerctl.json"
+dashboard_dockerctl_cache_name: homelab-dockerctl   # CacheDirectory= -> /var/cache/homelab-dockerctl
+dashboard_dockerctl_max_connections: 32         # CONTRACTS §11.2: 8 log streams + 1 update + refreshes, with headroom
+dashboard_dockerctl_runtime_max: 40min              # backstop above the 30 min follow limit
+# Stacks the boot gate holds when the media drive is lost: start/restart/update of their apps
+# is refused unless the gate status is "ok" (stop is always allowed).
+dashboard_dockerctl_held_stacks:
+  - media
+dashboard_dockerctl_media_dirs:
+  - tv
+  - movies
+  - downloads
+dashboard_dockerctl_media_sentinel: .homelab-media-sentinel
+dashboard_dockerctl_timeouts:
+  request_timeout: 5
+  send_timeout: 30
+  command_timeout: 30
+  action_timeout: 180
+  logs_timeout: 60
+  follow_max_seconds: 1800
+  pull_timeout: 1200
+  up_timeout: 300
+  health_timeout: 300
+  journal_timeout: 60
+  du_timeout: 1800
+  disk_split_ttl: 86400

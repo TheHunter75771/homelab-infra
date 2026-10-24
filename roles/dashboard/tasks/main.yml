@@ -1,0 +1,25 @@
+---
+# Role dashboard (docs/CONTRACTS.md §11). Runs after role stacks (which retires push-core and so
+# frees port 8085 and every process running as uid 10101) and before tailscale_serve.
+# Nothing here touches Docker: the dashboard must deploy and run while the boot gate holds it.
+
+- name: Preflight checks
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Account (rename pushcore to dashboard, same id)
+  ansible.builtin.import_tasks: user.yml
+
+- name: Push store (contract 4)
+  ansible.builtin.import_tasks: push_store.yml
+
+- name: Server dependencies, built on the controller
+  ansible.builtin.import_tasks: build.yml
+
+- name: App code, dependencies and settings
+  ansible.builtin.import_tasks: app.yml
+
+- name: Privileged Docker helper
+  ansible.builtin.import_tasks: helper.yml
+
+- name: Dashboard service
+  ansible.builtin.import_tasks: service.yml

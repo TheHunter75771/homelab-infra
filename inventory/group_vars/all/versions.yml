@@ -12,6 +12,5 @@ images:
   node_base: "node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914"
 local_images:
   wol_relay: "homelab/wol-relay:2026.07"
-  push_core: "homelab/push-core:0.1.0"
 python_packages:
   pywebpush: "2.5.0"

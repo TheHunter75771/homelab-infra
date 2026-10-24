@@ -30,7 +30,7 @@ This is the single spec for the MVP build. Builders own exactly the paths listed
   data/<app>/                      app config; owner per app (linuxserver apps: 1001:1002, because the images chown /config to PUID:PGID on every start)
   downloads-incomplete/            1001:1002 2775  (SABnzbd scratch, on the NVMe)
   backups/appdata/                 root:backuppull 0750, archives 0640 (role backups)
-  push/                            push-core data (§5), 0750
+  push/                            push store (§5/§11), owned by `dashboard` 10101, 0750
 /media                             media drive (UUID media_uuid), mounted by the boot gate
   .homelab-media-sentinel          sentinel file created by role storage (root 0644)
   tv/ movies/ downloads/complete/  1001:1002 2775
@@ -60,11 +60,11 @@ This is the single spec for the MVP build. Builders own exactly the paths listed
 ## 4. Notifier (module B: role `notifier`)
 - CLI `/usr/local/bin/homelab-notify --title T --body B [--tag TAG] [--test]`. It sends a Web Push to every subscription in `{{ homelab_push_dir }}/subscriptions.json` using `{{ homelab_push_dir }}/vapid.json`.
 - It's a Python venv at `/opt/homelab-notify` with `pywebpush` (pinned). Runs as root. Exit 0 if at least one push was delivered, 2 if there are no subscriptions, 1 on error. It removes subscriptions that return 404/410. Logs to journald (`SyslogIdentifier=homelab-notify`).
-- **Dedupe:** with `--tag`, it doesn't resend the same tag+title within 30 min (state in `/var/lib/homelab-notify/`).
+- **Dedupe:** with `--tag`, it doesn't resend the same tag+title within 30 min (state in `/var/lib/homelab-notify/`). **Amended 2026-10-24:** sending a different title on a tag clears that tag's dedupe entries, so lost → back → lost pushes (and records) the second loss. The clear happens even when that send reached no device (it's still in the history). A suppressed duplicate exits 0, checked before subscriptions (callers treat 0 and 2 alike).
 - **Rehearsal:** when `/etc/homelab/rehearsal` exists, it prefixes the title with `[REHEARSAL]` and sends only to subscriptions whose `label` is `test`.
 - **Alert floor** (role `notifier`): `homelab-alertfloor.timer` every 2 min. For each container labeled `homelab.watch=true` it pushes once per incident on: health `unhealthy` for 2 consecutive checks, state `exited`/`dead` while not intentionally stopped, or restart count rising by 3+ between checks. It pushes "recovered" when the condition clears. Skipped when bootgate status ≠ `ok`.
 
-## 5. Push core (module D: `apps/push-core/`, deployed by module C)
+## 5. Push core (module D). **Superseded by §11:** push-core was absorbed into the Dashboard v2 server (`apps/dashboard/server/`) on 2026-10-24, with the same API, store and port
 - **Contract 4 (push store):** `{{ homelab_push_dir }}/vapid.json` = `{"publicKey": b64url, "privateKey": b64url, "subject": "{{ vapid_subject }}"}` (amended: an https URL, since Apple may reject a localhost mailto) (written by role `stacks` from vault, 0640 root:pushcore). `{{ homelab_push_dir }}/subscriptions.json` = `[{"endpoint": str, "keys": {"p256dh": str, "auth": str}, "label": str, "created": ISO8601}]`, **owned by push-core** (container uid 10101), written atomically (tmp + rename). The notifier only reads it, and only removes dead entries.
 - App: Node 22, **no runtime dependencies except `web-push`** (pinned). It listens on `0.0.0.0:8085` in the container, published to `127.0.0.1:8085` only.
   - `GET /` → PWA page "Homelab alerts": Subscribe button, label input (default device name), a test button, and the list of subscribed devices (label + created).
@@ -87,11 +87,13 @@ This is the single spec for the MVP build. Builders own exactly the paths listed
   - **media:** `jellyfin` (published `{{ lan_ip }}:8096` and `127.0.0.1:8096`; `/dev/dri`; group_add render gid; `/media` → `/data:ro`; BaseUrl `/watch` preset), `sonarr` 127.0.0.1:8989, `radarr` 127.0.0.1:7878, `prowlarr` 127.0.0.1:9696, `sabnzbd` 127.0.0.1:8080 (incomplete → `{{ homelab_incomplete_dir }}`), `jellyseerr` 127.0.0.1:5055. linuxserver apps `PUID={{ mediasvc_uid }} PGID={{ media_gid }} TZ`. `/media` → `/data` (rw for sonarr/radarr/sabnzbd). **Bind-mount propagation `rslave`** on `/media`, so a remount by the gate is visible.
   - **Clean start:** no data restored. Presets are written **only if absent** (`force: false`): *arr `config.xml` with `UrlBase` `/sonarr` `/radarr` `/prowlarr`, `AuthenticationMethod=Forms`, `AuthenticationRequired=Enabled`; sabnzbd `url_base=/sabnzbd` and `host_whitelist` incl. `{{ tailnet_fqdn }}`; jellyfin `network.xml` BaseUrl `/watch` and KnownProxies = `hl-public` subnet.
   - **utils:** `wol-relay` built from `roles/stacks/files/wol-relay/` (source from the old box), `network_mode: host`, token from `.env`.
-  - **push:** `push-core` built from `apps/push-core/` on the host (`docker compose build`, image `local_images.push_core`), `127.0.0.1:8085`, volume `{{ homelab_push_dir }}`.
+  - **push:** retired 2026-10-24. Push-core was absorbed into the Dashboard v2 host service (§11); `stacks` removes the old stack (`tasks/retire_push.yml`).
   - Media dirs `/media/{tv,movies,downloads/complete}` are created by `stacks` with 1001:1002 2775 (after the gate has mounted). Rehearsal: SABnzbd starts paused (`pause_on_start`-equivalent preset) and no tunnel.
 - `tailscale_serve` role (**amended 2026-10-23**): `tailscale serve set-config` only handles `svc:` services in 1.102, not the node. So the role renders the desired config in the shape `tailscale serve status --json` returns, compares it as sorted JSON, and **only on drift** runs `tailscale serve reset` plus one `tailscale serve --bg --yes --https=<port> --set-path=<mount> <backend>` per handler, then re-reads and asserts an exact match. Serve **strips the mount prefix** (`http.StripPrefix`), so backends carry their base path:
-  - HTTPS 443: `/` → `http://127.0.0.1:8085` (push core), `/watch` → `http://127.0.0.1:8096/watch`, `/sonarr` → `…:8989/sonarr`, `/radarr` → `…:7878/radarr`, `/prowlarr` → `…:9696/prowlarr`, `/sabnzbd` → `…:8080/sabnzbd`.
+  - **Amended 2026-10-24 (ADR 0015): the dashboard has its own origin.**
+  - HTTPS 443: `/` → `http://127.0.0.1:8085` (the dashboard) **only**.
   - HTTPS 8443: `/` → `http://127.0.0.1:5055` (jellyseerr).
+  - HTTPS 8444: `/watch` → `http://127.0.0.1:8096/watch`, `/sonarr` → `…:8989/sonarr`, `/radarr` → `…:7878/radarr`, `/prowlarr` → `…:9696/prowlarr`, `/sabnzbd` → `…:8080/sabnzbd`.
   - **Never funnel.**
 - Public Jellyfin: the Cloudflare tunnel's public hostname `{{ public_watch_host }}` path `/watch*` → `http://jellyfin:8096`. That's configured in Cloudflare by Noah (documented in `docs/runbooks/cloudflare.md`, written by module C), not by Ansible.
 
@@ -120,10 +122,10 @@ This is the single spec for the MVP build. Builders own exactly the paths listed
 ## 9. Lead-owned files
 `ansible.cfg`, `requirements.yml`, `inventory/**`, `playbooks/bootstrap.yml`, `playbooks/site.yml`, `docs/CONTRACTS.md`, `README.md`, `CLAUDE.md`, `.github/workflows/ci.yml`, `.gitignore`, lint configs.
 
-`playbooks/site.yml` order (hosts `media_servers`, become): base → users → ssh_hardening → tailscale → dns → watchdog → storage → firewall → docker → bootgate → notifier → stacks → tailscale_serve → backups (firewall moved before docker, review L1).
+`playbooks/site.yml` order (hosts `media_servers`, become): base → users → ssh_hardening → tailscale → dns → watchdog → storage → firewall → docker → bootgate → notifier → stacks → dashboard → tailscale_serve → backups (firewall moved before docker, review L1; dashboard added 2026-10-24, §11.5).
 
 ## 9b. Ownership of shared paths (amended)
-- `{{ homelab_push_dir }}`: owner and mode set **only** by `stacks` (`pushcore` 10101). The notifier, backups and heartbeat read it and never chown or chmod it.
+- `{{ homelab_push_dir }}`: owner and mode set **only** by `dashboard` (user `dashboard` 10101, §11.1; was `stacks`/`pushcore` before 2026-10-24). The notifier, backups and heartbeat read it and never chown or chmod it.
 - Docker publishes with `userland-proxy: false`, so `lan_ip:8096` is a DNAT rule, not a bind. Jellyfin doesn't fail to start if the LAN address is late.
 
 - Handler names are unique across the whole play (roles must not reuse another role's handler name).
@@ -132,7 +134,7 @@ This is the single spec for the MVP build. Builders own exactly the paths listed
 - Python packages are pinned in `versions.yml` → `python_packages` (pywebpush). The notifier and heartbeat both use it.
 
 ## 9c. Review decisions (2026-10-24)
-- **Single writer for `subscriptions.json`: push-core.** The notifier no longer rewrites the file. It prunes dead subscriptions best-effort via `POST http://127.0.0.1:8085/api/unsubscribe` (`X-Homelab: 1`, JSON), and skips pruning if push-core is down. The heartbeat's copy on the VPS is never written back.
+- **Single writer for `subscriptions.json`: the dashboard** (push-core until 2026-10-24). The notifier no longer rewrites the file. It prunes dead subscriptions best-effort via `POST http://127.0.0.1:8085/api/unsubscribe` (`X-Homelab: 1`, JSON), and skips pruning if the dashboard is down. The heartbeat's copy on the VPS is never written back.
 - `tune2fs -m 1` on the media drive is approved (it's in the rebuild plan).
 - The format guard also refuses when a backup ext4 superblock is readable.
 - The push-core `/api/test` is human-triggered and exempt from rehearsal.
@@ -162,5 +164,101 @@ This is the single spec for the MVP build. Builders own exactly the paths listed
 | A host | `roles/{base,users,ssh_hardening,firewall,tailscale,dns,watchdog}/`, `tailscale/policy.example.hujson` |
 | B gate | `roles/{storage,bootgate,notifier}/` |
 | C stacks | `roles/{docker,stacks,tailscale_serve}/`, `docs/runbooks/cloudflare.md`, `docs/runbooks/first-run-apps.md` |
-| D push core | `apps/push-core/` |
+| D dashboard server | `apps/dashboard/server/` (was `apps/push-core/`, retired 2026-10-24) |
+| G dashboard web | `apps/dashboard/web/` |
+| H dashboard host | `roles/dashboard/` |
 | E ops | `roles/backups/`, `playbooks/gaming-pc.yml`, `playbooks/edge.yml`, `roles/heartbeat/`, `roles/backup_pull/` |
+
+## 11. Dashboard v2 (build started 2026-10-24)
+Design: `docs/design/handoff/README.md` (high fidelity), corrected by `docs/design/handoff/CORRECTIONS.md`. Decisions: **host service outside Docker** (ADR 0013), **tailnet-only in v2.0** (ADR 0014). The dashboard **absorbs push-core**: the same port, the push store and every push-core endpoint the notifier and phones use.
+
+### 11.1 Runtime (module H, role `dashboard`)
+- **Node 22 from the Ubuntu repo** (`nodejs` package; security updates via unattended-upgrades). App code at `/opt/homelab-dashboard/`. npm deps are pinned by the lockfile and installed with `npm ci --omit=dev`; `web-push` stays at 3.6.7.
+- **systemd `homelab-dashboard.service`:**
+  - Runs as user and group **`dashboard`, uid/gid 10101**. This replaces `pushcore`: rename it and keep the id, so the existing push store keeps its owner.
+  - Supplementary groups: `media`, to read the *arr and SABnzbd `config.xml`/`sabnzbd.ini` for their API keys, and `bootgate`, to touch `/run/bootgate/rerun`. **Not** in `docker`.
+  - `After=network-online.target`. **No ordering on docker.service or bootgate.service**: it must run while the gate holds Docker.
+  - `Restart=always`.
+  - Hardened: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `ReadWritePaths=/var/lib/homelab-dashboard {{ homelab_push_dir }} -/run/bootgate`, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`, `CapabilityBoundingSet=` (empty), `SystemCallFilter=@system-service`.
+- Listens on **127.0.0.1:8085**, the same port push-core used, so 443 `/` keeps pointing there. Since ADR 0015 it is the **only** handler on 443; the admin apps moved to 8444.
+- Data: `/var/lib/homelab-dashboard/` (0750 dashboard): `settings.json` (0600), `samples.jsonl` (drive samples), `uptime/` (per-app daily rollups).
+- Push store: `{{ homelab_push_dir }}` stays, owned by **`dashboard`** (10101). The contract 4 file formats are unchanged. The **dashboard is the single writer** of `subscriptions.json`; the notifier's prune call (`POST 127.0.0.1:8085/api/unsubscribe`) keeps working.
+
+### 11.2 Privileged helper `homelab-dockerctl` (module H)
+- Root, **socket-activated**, at `/run/homelab-dockerctl.sock` (0660 root:dashboard).
+- It accepts only peers whose `SO_PEERCRED` uid is `dashboard`, and logs every request to journald (`SyslogIdentifier=homelab-dockerctl`).
+- Written in Python stdlib (small, auditable), with timeouts on everything.
+- Protocol: one JSON request per connection → a JSON response, or JSON-lines for streams.
+- **The only operations allowed:**
+  - `ps`: for containers labelled `homelab.watch=true` only: `name, state, health, started_at, restart_count, image` (running ref), `pinned` (the image ref in the deployed compose file), `stack`. No env, no mounts, no raw inspect.
+  - `logs {name, tail≤2000, follow, since}`: a stream for an allowed container; follow ends on client close or after 30 min.
+  - `start|stop|restart {name}`: allowed containers only.
+  - `update {name}`: `docker compose -f {{ homelab_stacks_dir }}/<stack>/compose.yaml up -d --no-deps <service>`, so the pinned image from the deployed compose file is pulled and recreated. Streams the steps `pulling → recreating → waiting-health → done|failed`.
+  - `docker-state`: `active|inactive|failed` of docker.service. **Never calls the docker CLI or socket while docker.service isn't active**: touching the socket would start Docker, and so re-run the gate.
+  - `last-pull`: the time of the last successful `backuppull` SSH session, from the journal.
+  - `disk-split`: sizes of `{{ media_mount }}/{tv,movies,downloads}`, cached for 24 h and computed with `du` under nice/ionice.
+  - `boots`: `journalctl --list-boots` (first/last entry times) for box uptime.
+- **Wire protocol (as built, Builder H):**
+  - **Request:** one JSON line, at most 4 KiB, per connection (`Accept=yes`: one short-lived root process per connection).
+  - **Unary reply:** `{"ok":true,"op","data"}` or `{"ok":false,"error":{"code","message"}}`.
+  - **Streams:** a header `{"ok":true,"op","stream":true}`, then `{"type":"line|step|output",...}` events, always ending with `{"type":"end","ok","reason","message"?}`.
+  - The client never half-closes. Refused peers are dropped before the request is read.
+- **Extra rules (as built):**
+  - start/restart/update of `media`-stack apps are refused unless the gate status is `ok`; stop is always allowed.
+  - `update` refuses locally built images (wol-relay).
+  - `ps` works while Docker is inactive, returning apps declared in the deployed compose files without touching Docker.
+  - **Concurrency (review, 2026-10-24):** the dashboard runs at most **one `update` at a time** (a second request gets 409) and at most 8 log follows; the socket's `MaxConnections` covers that worst case with headroom (32).
+- **The npm footprint:** the host gets only `nodejs`. `npm ci --omit=dev --ignore-scripts` runs on the controller (`.build/`, git-ignored) and `node_modules` is synced; there are no native modules.
+- **Never:** exec, build, arbitrary paths, other containers, image or volume management.
+
+### 11.3 HTTP API (module D, server ↔ module G, web)
+- **Push-core API, kept as-is:** `GET /api/vapid-public-key`, `POST /api/subscribe`, `POST /api/unsubscribe`, `POST /api/test`, `GET /healthz`.
+- **New endpoints:**
+  - `GET /api/summary`, with ETag
+  - `GET /api/events` (SSE pushing summary changes; the client falls back to a 10 s poll)
+  - `GET /api/apps/:name/logs?follow=1&tail=500` (SSE)
+  - `POST /api/apps/:name/{restart|stop|start|update}` (update streams its progress via SSE `GET /api/actions/:id`)
+  - `POST /api/gate/rerun` (touches `/run/bootgate/rerun`; the dashboard then reports status changes)
+  - `GET /api/push/devices` (`{id,label,created}`), `DELETE /api/push/devices/:id`
+  - `GET|PUT /api/settings`
+- **Guards (as in push-core):** every non-GET needs `X-Homelab: 1` and a JSON body ≤ 8 KB. Allowed `Sec-Fetch-Site` values are `same-origin` or `none`; a missing header is allowed.
+- **Access:** `access` is decided server-side. In v2.0 it's always `tailnet`. A `remote_enabled=false` flag and the Access-JWT check path exist but are off. Tailnet-only actions (update, gate rerun) return **403** for `remote`.
+- **Summary schema:** as in the handoff's "State management" section. Sources:
+  - **gate:** `/var/lib/bootgate/{status,attempts,history.jsonl}` (world-readable), plus `systemctl show bootgate-retry.timer` for the next retry time.
+  - **apps:** the helper's `ps` and `docker-state`. When Docker isn't active, every app is "Held by gate" (`failed`) or "Stopped" (other).
+  - **host:** `/proc/loadavg`, `/proc/meminfo`, `statfs /`, `/proc/uptime`, `/run/reboot-required` and `/run/reboot-required.pkgs`.
+  - **drive:** `statfs {{ media_mount }}` (only if the gate status is `ok`, else last-known plus a flag), plus a daily sample appended to `samples.jsonl`. The forecast is a least-squares fit over the last 30 days; fewer than 7 samples gives none. Split from the helper's `disk-split`.
+  - **backups:** `/var/lib/homelab-backup/status.json` (module E) and the helper's `last-pull`.
+  - **uptime:** per-app daily rollups from the dashboard's own 60 s sampling; box uptime from the helper's `boots` (labelled "Box uptime"; the heartbeat log comes later).
+  - **media:** Jellyfin sessions, SABnzbd queue, Jellyseerr pending, Prowlarr indexer status/limits, Sonarr/Radarr health. API keys: *arr/SABnzbd read read-only from their config files; Jellyfin and Jellyseerr entered in Settings (`settings.json`, never returned to the client in full). One app timing out marks only that tile.
+  - **push:** the store, plus `/var/lib/homelab-notify/history.jsonl` (module B) for recent alerts.
+  - **subscriptions:** renewal dates from settings. A reminder push fires 7 days before each, sent by the dashboard itself.
+- **Summary additions (Lead, 2026-10-24):**
+  - `server.timeZone`: the host's IANA zone (config `timezone`, then `/etc/timezone`, then `timedatectl`, then the process zone). The web shows server times in it and falls back to the browser's zone.
+  - `apps[].stoppedReason`: `gate | docker-down | intentional | null`, non-null only for `held`/`stopped`. Only `intentional` counts as "stopped on purpose". A crashed app is `down` with `null`.
+  - `links.runbooks`: `[{title, url}]`, built from the config keys `runbook_base_url` (plain `https://`, ending in `/`) and `runbooks` (`[{title, path}]`, repo-relative `.md`, no `..`). Role H renders both and checks that each file exists; the server drops a bad entry with a warning instead of failing.
+- Secrets never reach the browser or the logs: API keys, VAPID private key, push endpoints.
+  - That includes text copied from the apps (SABnzbd warnings, *arr health messages, queue names, container logs): it's redacted (`apikey=`, `API Key:`, tokens, the configured keys) **before** any truncation, and keys are registered from config files whether or not the app is up.
+- **Resource limits (review, 2026-10-24):** a malformed request URL is a 400, never a crash; every async path is caught, plus a process-level `unhandledRejection` handler. SSE streams (`/api/events`, logs, actions) honour backpressure: a client that stops reading is dropped once about 1 MB is buffered. An `/api/events` slot is reserved before any await and always released on close.
+
+### 11.4 Web (module G)
+- A PWA per the handoff, at `/`. No CDN at runtime: Inter woff2 (OFL) and a Phosphor SVG sprite (MIT) are vendored with their licenses.
+- Small stack: vanilla JS modules or Preact + htm as vendored ESM, with no bundler required at deploy time. If a build step is used, its output is committed and reproducible.
+- **Service worker:** caches the shell and the last `/api/summary` with its timestamp, giving the **offline screen**. It keeps push-core's push and notificationclick behaviour (exact-path window reuse).
+- Accessibility: status is never shown by color alone, focus-visible, reduced-motion respected, 44 px targets on mobile.
+- Tests: unit tests for formatters and state reducers (`node:test`), plus a smoke test that serves the static build and checks that every route renders without errors using fake summaries (normal, bad night, clean, offline).
+
+### 11.5 Changes in other modules
+- **C (stacks):** remove the `push` stack (container, compose, built image). Ownership and mode of `{{ homelab_push_dir }}` and `vapid.json` move to the `dashboard` role. The `pushcore` user is renamed to `dashboard` by role H, not removed.
+- **B (notifier):** append every send to `/var/lib/homelab-notify/history.jsonl` (0644) as `{ts, title, body, tag, delivered, failed}`, trimmed to 90 days. No endpoints in it. Accepted: the state dir is 0755 (the dedupe state stays 0600), and sends that reached no device are recorded too (0 delivered), so the dashboard always shows the alert.
+- **E (backups):** write `/var/lib/homelab-backup/status.json` (dir 0755, file 0644, atomic) on every run, success or failure, as `{ok, last_ok, last_run, archive, size_bytes, error}`. `last_ok`, `archive` and `size_bytes` carry forward on failure. `error` is a short fixed summary with no paths. The failure push uses the same summary.
+- **Lead:** in `site.yml`, `dashboard` goes after `stacks` (push-core gone first, so 8085 is free) and before `tailscale_serve`. Plus versions and ADRs.
+
+### 11.6 Ownership
+| Module | Owns |
+|---|---|
+| D server | `apps/dashboard/server/` (Node; migrates push-core's store, sender, VAPID and guards with their tests) |
+| G web | `apps/dashboard/web/` |
+| H host | `roles/dashboard/` (incl. `files/homelab-dockerctl/` helper + tests) |
+| B, C, E | the changes in §11.5 within their existing roles |
+| Lead | contract, versions, site.yml, ADRs, CI wiring, retiring `apps/push-core/` once D has migrated it |

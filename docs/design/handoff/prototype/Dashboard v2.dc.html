@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="_ds/nocturne-06816440-552b-4804-b5d1-83e6ce3b8b05/styles.css">
+<script src="_ds/nocturne-06816440-552b-4804-b5d1-83e6ce3b8b05/_ds_bundle.js"></script>
+<script src="https://unpkg.com/@phosphor-icons/web@2.1.1"></script>
+<style>
+:root{--ground:#161826;--deep:#0f1119;--surface:#232532;--surface-hover:#2b2d3c;--text:#e9e9ed;--text-2:#cfd3e5;--muted:#9397ab;--faint:#75798c;--disabled:#595d6c;--border:#3f424d;--accent-border:#5d5294;--divider:rgba(233,233,237,0.16);--accent:#9184d9;--accent-text:#d2cefd;--accent-bright:#b5abfc;--accent-pale:#e7e5fe;--tint-hover:rgba(145,132,217,0.10);--tint-active:rgba(145,132,217,0.16);--tint-btn:rgba(145,132,217,0.12);--track:#2b2741;
+--ok:#6cc79a;--ok-bg:rgba(108,199,154,0.13);--warn:#e4b363;--warn-bg:rgba(228,179,99,0.13);--fail:#f08a8a;--fail-bg:rgba(240,138,138,0.14);--info:#86b7e8;--info-bg:rgba(134,183,232,0.13);--idle-bg:rgba(147,151,171,0.14);--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+body{margin:0;background:#0b0c12}
+:root{color-scheme:dark}
+*{scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+a{color:var(--accent-text)}a:hover{color:var(--accent-pale)}
+button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+</style>
+</helmet>
+<div style="min-height:100vh;background:#0b0c12;padding:28px;display:flex;justify-content:flex-start;font-family:var(--font-body);color:var(--text);-webkit-font-smoothing:antialiased">
+<div style="width:{{ fitW }}px;height:{{ fitH }}px;flex:none">
+<div data-screen-label="Dashboard frame" style="transform:scale({{ fitS }});transform-origin:0 0;width:{{ frameW }}px;height:{{ frameH }}px;border-radius:{{ frameR }}px;flex:none;background:var(--ground);overflow:hidden;position:relative;display:flex;box-shadow:var(--shadow-lg)">
+
+<sc-if value="{{ isDesktop }}" hint-placeholder-val="{{ false }}">
+<aside style="width:232px;flex:none;background:var(--deep);border-right:1px solid var(--divider);display:flex;flex-direction:column;gap:2px;padding:18px 12px">
+<div style="display:flex;align-items:center;gap:10px;padding:2px 8px 20px">
+<div style="width:30px;height:30px;border-radius:var(--radius-md);border:1px solid var(--accent-border);display:grid;place-items:center;color:var(--accent-bright);font-size:17px"><i class="ph ph-hard-drives"></i></div>
+<div style="display:flex;flex-direction:column"><span style="font-weight:500;font-size:14px">&lt;host&gt;</span><span style="font-size:12px;color:var(--muted)">Homelab dashboard</span></div>
+</div>
+<sc-for list="{{ sideNav }}" as="n" hint-placeholder-count="7">
+<button onClick="{{ n.go }}" style="display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;border:0;border-radius:var(--radius-sm);background:{{ n.bg }};color:{{ n.color }};font:500 14px var(--font-body);cursor:pointer;text-align:left" style-hover="background:var(--tint-hover)"><i class="ph {{ n.icon }}" style="font-size:18px"></i><span style="flex:1">{{ n.label }}</span><sc-if value="{{ n.hasDot }}"><span style="width:7px;height:7px;border-radius:50%;background:{{ n.dot }}"></span></sc-if></button>
+</sc-for>
+<div style="margin-top:auto;padding:10px;font-size:12px;color:var(--muted);display:flex;flex-direction:column;gap:2px">
+<span style="font-family:var(--mono)">dashboard 2.0.0</span><span>Served at / on this origin</span>
+</div>
+</aside>
+</sc-if>
+
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;position:relative">
+<sc-if value="{{ isMobile }}" hint-placeholder-val="{{ true }}">
+<div style="height:47px;flex:none;display:flex;align-items:flex-end;justify-content:space-between;padding:0 28px 6px;font-size:15px;font-weight:600"><span>{{ clock }}</span><span style="display:flex;gap:5px;font-size:15px"><i class="ph-fill ph-cell-signal-full"></i><i class="ph-fill ph-wifi-high"></i><i class="ph-fill ph-battery-full"></i></span></div>
+</sc-if>
+
+<header style="flex:none;display:flex;align-items:center;gap:10px;padding:{{ headPad }};border-bottom:1px solid var(--divider)">
+<sc-if value="{{ showBack }}" hint-placeholder-val="{{ false }}">
+<button onClick="{{ back }}" aria-label="Back" style="width:{{ btnH }}px;height:{{ btnH }}px;margin-left:-8px;border:0;background:transparent;color:var(--accent-text);font-size:22px;display:grid;place-items:center;cursor:pointer;border-radius:var(--radius-sm)" style-hover="background:var(--tint-hover)"><i class="ph ph-caret-left"></i></button>
+</sc-if>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px">
+<span style="font-size:{{ titleSize }}px;font-weight:500;letter-spacing:-0.015em;line-height:1.15">{{ title }}</span>
+<span style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);white-space:nowrap"><span style="font-family:var(--mono)">&lt;host&gt;</span><span>·</span><span style="width:7px;height:7px;border-radius:50%;background:{{ live.c }}"></span><span style="color:{{ live.c }}">{{ live.label }}</span><span>{{ live.ago }}</span></span>
+</div>
+<span title="{{ acc.why }}" style="display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 9px;border-radius:999px;font-size:12px;font-weight:500;color:{{ acc.c }};background:{{ acc.bg }};border:1px solid {{ acc.b }};white-space:nowrap"><i class="ph {{ acc.i }}" style="font-size:14px"></i>{{ acc.label }}</span>
+</header>
+
+<sc-if value="{{ rehearsal }}" hint-placeholder-val="{{ false }}">
+<div style="flex:none;display:flex;align-items:center;gap:8px;padding:8px 16px;background:var(--info-bg);color:var(--info);font-size:13px;font-weight:500"><i class="ph ph-flask" style="font-size:16px"></i><span style="flex:1">Rehearsal mode is on. Drill pushes go to test devices only.</span></div>
+</sc-if>
+<sc-if value="{{ backendDown }}" hint-placeholder-val="{{ false }}">
+<div style="flex:none;display:flex;align-items:flex-start;gap:8px;padding:9px 16px;background:var(--fail-bg);color:var(--fail);font-size:13px"><i class="ph ph-plugs" style="font-size:16px;margin-top:1px"></i><span style="flex:1"><b style="font-weight:600">Can't reach the dashboard backend.</b> Showing data from {{ stamp }}. Actions are paused. Retrying every 10 s.</span></div>
+</sc-if>
+
+<main style="flex:1;min-height:0;overflow:auto;padding:{{ pad }}px;display:flex;flex-direction:column;gap:12px">
+
+<sc-if value="{{ loading }}" hint-placeholder-val="{{ false }}">
+<div style="display:flex;flex-direction:column;gap:12px">
+<div style="height:76px;border-radius:var(--radius-md);background:var(--surface)"></div>
+<div style="height:52px;border-radius:var(--radius-md);background:var(--surface);opacity:0.8"></div>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:10px">
+<sc-for list="{{ five }}" as="k" hint-placeholder-count="5"><div style="height:132px;border-radius:var(--radius-md);background:var(--surface);padding:14px;display:flex;flex-direction:column;gap:10px;opacity:0.7"><div style="width:50%;height:10px;border-radius:4px;background:var(--surface-hover)"></div><div style="width:70%;height:20px;border-radius:4px;background:var(--surface-hover)"></div><div style="width:90%;height:6px;border-radius:4px;background:var(--surface-hover)"></div><div style="width:40%;height:10px;border-radius:4px;background:var(--surface-hover)"></div></div></sc-for>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ sOverview }}" hint-placeholder-val="{{ true }}">
+<div style="display:flex;flex-direction:column;gap:12px">
+<section style="border-radius:var(--radius-md);background:{{ banner.bg }};padding:14px;display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;align-items:center;gap:12px">
+<div style="width:38px;height:38px;border-radius:50%;flex:none;display:grid;place-items:center;font-size:22px;color:{{ banner.c }};border:1px solid {{ banner.c }}"><i class="ph {{ banner.i }}"></i></div>
+<div style="display:flex;flex-direction:column;gap:2px;min-width:0"><span style="font-size:19px;font-weight:500;color:var(--text)">{{ banner.title }}</span><span style="font-size:13px;color:var(--text-2)">{{ banner.sub }}</span></div>
+</div>
+<sc-for list="{{ banner.issues }}" as="it" hint-placeholder-count="0">
+<button onClick="{{ it.go }}" style="display:flex;align-items:center;gap:10px;min-height:{{ btnH }}px;padding:8px 10px;border:0;border-radius:var(--radius-sm);background:var(--surface);color:var(--text);font:400 14px var(--font-body);text-align:left;cursor:pointer" style-hover="background:var(--surface-hover)"><i class="ph {{ it.i }}" style="font-size:18px;color:{{ it.c }}"></i><span style="flex:1">{{ it.text }}</span><i class="ph ph-caret-right" style="color:var(--muted)"></i></button>
+</sc-for>
+</section>
+
+<button onClick="{{ toDrive }}" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 14px;border:0;border-radius:var(--radius-md);background:var(--surface);color:var(--text);text-align:left;font:400 14px var(--font-body);cursor:pointer" style-hover="background:var(--surface-hover)">
+<span style="font-size:13px;color:var(--muted);font-weight:500">Boot gate</span>
+<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px 2px 6px;border-radius:999px;font:500 12px var(--mono);color:{{ gate.chip.c }};background:{{ gate.chip.bg }}"><i class="ph {{ gate.chip.i }}" style="font-size:14px"></i>{{ gate.chip.label }}</span>
+<span style="flex:1 1 220px;color:var(--text-2);font-size:13px">{{ gate.line }}</span>
+<i class="ph ph-caret-right" style="color:var(--muted)"></i>
+</button>
+
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:10px">
+<button onClick="{{ toDrive }}" style="display:flex;flex-direction:column;gap:8px;padding:14px;border:0;border-radius:var(--radius-md);background:var(--surface);color:var(--text);text-align:left;font:400 13px var(--font-body);cursor:pointer;min-width:0" style-hover="background:var(--surface-hover)">
+<span style="display:flex;align-items:center;gap:6px;color:var(--muted);font-weight:500"><i class="ph ph-hard-drive" style="font-size:16px"></i>Media drive</span>
+<span style="font-size:22px;font-weight:500;letter-spacing:-0.01em">{{ drive.freeLabel }}</span>
+<span style="height:6px;border-radius:3px;background:var(--track);overflow:hidden;display:block"><span style="display:block;height:100%;width:{{ drive.pct }}%;background:{{ drive.barC }}"></span></span>
+<span style="color:var(--text-2)">{{ drive.forecastShort }}</span>
+</button>
+
+<div style="display:flex;flex-direction:column;gap:6px;padding:14px;border-radius:var(--radius-md);background:var(--surface);font-size:13px;min-width:0">
+<span style="display:flex;align-items:center;gap:6px;color:var(--muted);font-weight:500"><i class="ph ph-cpu" style="font-size:16px"></i>Host</span>
+<sc-for list="{{ host.rows }}" as="r" hint-placeholder-count="4"><span style="display:flex;justify-content:space-between;gap:8px"><span style="color:var(--muted)">{{ r.k }}</span><span style="font-family:var(--mono);font-size:12px;color:var(--text-2)">{{ r.v }}</span></span></sc-for>
+<sc-if value="{{ host.reboot }}" hint-placeholder-val="{{ false }}"><span style="align-self:flex-start;display:inline-flex;align-items:center;gap:4px;padding:2px 8px 2px 6px;border-radius:999px;font-size:12px;font-weight:500;color:var(--warn);background:var(--warn-bg)"><i class="ph ph-arrows-clockwise" style="font-size:14px"></i>Reboot needed</span></sc-if>
+</div>
+
+<div style="display:flex;flex-direction:column;gap:6px;padding:14px;border-radius:var(--radius-md);background:var(--surface);font-size:13px;min-width:0">
+<span style="display:flex;align-items:center;gap:6px;color:var(--muted);font-weight:500"><i class="ph ph-archive" style="font-size:16px"></i>Backups</span>
+<span style="display:flex;align-items:center;gap:6px;font-size:15px;font-weight:500"><i class="ph ph-check-circle" style="color:var(--ok);font-size:17px"></i>{{ backup.nightly }}</span>
+<span style="color:var(--text-2)">{{ backup.size }}</span>
+<span style="display:flex;align-items:center;gap:6px;color:var(--text-2)"><i class="ph ph-desktop" style="font-size:15px;color:var(--muted)"></i>{{ backup.pull }}</span>
+</div>
+
+<button onClick="{{ toUptime }}" style="display:flex;flex-direction:column;gap:8px;padding:14px;border:0;border-radius:var(--radius-md);background:var(--surface);color:var(--text);text-align:left;font:400 13px var(--font-body);cursor:pointer;min-width:0" style-hover="background:var(--surface-hover)">
+<span style="display:flex;align-items:center;gap:6px;color:var(--muted);font-weight:500"><i class="ph ph-pulse" style="font-size:16px"></i>Uptime · 30 days</span>
+<span style="font-size:22px;font-weight:500">{{ uptime.box }}</span>
+<span style="display:flex;gap:2px;height:16px;align-items:stretch"><sc-for list="{{ uptime.days }}" as="d" hint-placeholder-count="30"><span style="flex:1;border-radius:1px;background:{{ d.c }}"></span></sc-for></span>
+<span style="color:var(--text-2)">Box heartbeat, off-site</span>
+</button>
+
+<button onClick="{{ toApps }}" style="display:flex;flex-direction:column;gap:8px;padding:14px;border:0;border-radius:var(--radius-md);background:var(--surface);color:var(--text);text-align:left;font:400 13px var(--font-body);cursor:pointer;min-width:0" style-hover="background:var(--surface-hover)">
+<span style="display:flex;align-items:center;gap:6px;color:var(--muted);font-weight:500"><i class="ph ph-squares-four" style="font-size:16px"></i>Apps</span>
+<span style="font-size:22px;font-weight:500">{{ appsSum.big }}</span>
+<span style="display:flex;gap:3px"><sc-for list="{{ apps }}" as="a" hint-placeholder-count="9"><span style="flex:1;height:6px;border-radius:2px;background:{{ a.chip.c }}"></span></sc-for></span>
+<span style="color:var(--text-2)">{{ appsSum.sub }}</span>
+</button>
+</div>
+
+<sc-if value="{{ isDesktop }}" hint-placeholder-val="{{ false }}">
+<div style="display:grid;grid-template-columns:1.1fr 1.3fr 1fr;gap:12px;align-items:start">
+<section style="display:flex;flex-direction:column;gap:2px;padding:14px 16px;border-radius:var(--radius-md);background:var(--surface)">
+<button onClick="{{ toApps }}" style="display:flex;align-items:center;gap:6px;border:0;background:transparent;padding:0 0 8px;color:var(--muted);font:500 13px var(--font-body);cursor:pointer;text-align:left"><span style="flex:1">Apps</span><span style="color:var(--accent-text);font-size:12px">All apps</span><i class="ph ph-caret-right" style="color:var(--accent-text)"></i></button>
+<sc-for list="{{ apps }}" as="a" hint-placeholder-count="9"><button onClick="{{ a.open }}" style="display:flex;align-items:center;gap:10px;min-height:34px;border:0;border-top:1px solid var(--divider);background:transparent;padding:0 4px;color:var(--text);font:400 13px var(--font-body);cursor:pointer;text-align:left" style-hover="background:var(--tint-hover)"><i class="ph {{ a.chip.i }}" style="font-size:16px;color:{{ a.chip.c }}"></i><span style="flex:1">{{ a.name }}</span><span style="font-size:12px;color:{{ a.chip.c }}">{{ a.chip.label }}</span><span style="font:12px var(--mono);color:var(--muted);min-width:56px;text-align:right">{{ a.up }}</span></button></sc-for>
+</section>
+<section style="display:flex;flex-direction:column;gap:2px;padding:14px 16px;border-radius:var(--radius-md);background:var(--surface)">
+<button onClick="{{ toAlerts }}" style="display:flex;align-items:center;gap:6px;border:0;background:transparent;padding:0 0 8px;color:var(--muted);font:500 13px var(--font-body);cursor:pointer;text-align:left"><span style="flex:1">Recent alerts</span><span style="color:var(--accent-text);font-size:12px">All alerts</span><i class="ph ph-caret-right" style="color:var(--accent-text)"></i></button>
+<sc-for list="{{ recentAlerts }}" as="al" hint-placeholder-count="4"><div style="display:flex;gap:10px;padding:9px 0;border-top:1px solid var(--divider)"><i class="ph {{ al.chip.i }}" style="font-size:17px;color:{{ al.chip.c }};margin-top:1px"></i><div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px"><div style="display:flex;gap:8px;justify-content:space-between"><span style="font-size:13px;font-weight:500">{{ al.title }}</span><span style="font:12px var(--mono);color:var(--muted);white-space:nowrap">{{ al.ts }}</span></div><span style="font-size:12px;color:var(--text-2)">{{ al.body }}</span></div></div></sc-for>
+<sc-if value="{{ noAlerts }}" hint-placeholder-val="{{ false }}"><span style="font-size:13px;color:var(--muted);padding:10px 0;border-top:1px solid var(--divider)">No alerts yet.</span></sc-if>
+</section>
+<section style="display:flex;flex-direction:column;gap:10px;padding:14px 16px;border-radius:var(--radius-md);background:var(--surface)">
+<button onClick="{{ toMedia }}" style="display:flex;align-items:center;gap:6px;border:0;background:transparent;padding:0;color:var(--muted);font:500 13px var(--font-body);cursor:pointer;text-align:left"><span style="flex:1">Media</span><span style="color:var(--accent-text);font-size:12px">Details</span><i class="ph ph-caret-right" style="color:var(--accent-text)"></i></button>
+<sc-for list="{{ playing }}" as="np" hint-placeholder-count="1"><div style="display:flex;flex-direction:column;gap:5px;font-size:13px"><span style="display:flex;gap:6px;align-items:center"><i class="ph-fill ph-play-circle" style="font-size:18px;color:var(--accent-bright)"></i><span style="font-weight:500;flex:1">{{ np.title }}</span><span style="color:var(--muted)">{{ np.user }}</span></span><span style="height:3px;border-radius:2px;background:var(--track);display:block"><span style="display:block;height:100%;width:{{ np.pct }}%;background:var(--accent);border-radius:2px"></span></span></div></sc-for>
+<sc-if value="{{ noPlaying }}" hint-placeholder-val="{{ false }}"><span style="font-size:13px;color:var(--muted)">{{ noPlayingText }}</span></sc-if>
+<div style="display:flex;flex-direction:column;gap:7px;padding-top:10px;border-top:1px solid var(--divider);font-size:13px">
+<span style="display:flex;justify-content:space-between"><span style="color:var(--muted)">Downloads</span><span style="font:12px var(--mono);color:var(--text-2)">{{ dlSummary }}</span></span>
+<span style="display:flex;justify-content:space-between"><span style="color:var(--muted)">Requests pending</span><span style="font:12px var(--mono);color:var(--text-2)">{{ reqCount }}</span></span>
+<span style="display:flex;justify-content:space-between;gap:8px"><span style="color:var(--muted)">Media health</span><span style="font-size:12px;color:{{ mhSummary.c }}">{{ mhSummary.label }}</span></span>
+</div>
+</section>
+</div>
+</sc-if>
+<sc-if value="{{ mobilePlaying }}" hint-placeholder-val="{{ true }}">
+<sc-for list="{{ playing }}" as="np" hint-placeholder-count="1">
+<button onClick="{{ toMedia }}" style="display:flex;align-items:center;gap:12px;padding:10px 14px;border:0;border-radius:var(--radius-md);background:var(--surface);color:var(--text);font:400 13px var(--font-body);text-align:left;cursor:pointer" style-hover="background:var(--surface-hover)">
+<i class="ph-fill ph-play-circle" style="font-size:24px;color:var(--accent-bright)"></i>
+<span style="flex:1;min-width:0;display:flex;flex-direction:column;gap:5px"><span style="display:flex;gap:8px;justify-content:space-between"><span style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ np.title }}</span><span style="color:var(--muted);white-space:nowrap">{{ np.user }}</span></span><span style="height:3px;border-radius:2px;background:var(--track);display:block"><span style="display:block;height:100%;width:{{ np.pct }}%;background:var(--accent);border-radius:2px"></span></span></span>
+</button>
+</sc-for>
+</sc-if>
+</div>
+</sc-if>
+
+<sc-if value="{{ sApps }}" hint-placeholder-val="{{ false }}">
+<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:10px">
+<sc-for list="{{ apps }}" as="a" hint-placeholder-count="9">
+<article style="display:flex;flex-direction:column;gap:10px;padding:14px;border-radius:var(--radius-md);background:var(--surface);min-width:0">
+<div style="display:flex;align-items:flex-start;gap:10px">
+<button onClick="{{ a.open }}" style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;border:0;background:transparent;padding:0;color:var(--text);text-align:left;cursor:pointer;font:400 13px var(--font-body)"><span style="font-size:16px;font-weight:500">{{ a.name }}</span><span style="color:var(--muted)">{{ a.desc }}</span></button>
+<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px 2px 6px;border-radius:999px;font-size:12px;font-weight:500;white-space:nowrap;color:{{ a.chip.c }};background:{{ a.chip.bg }}"><i class="ph {{ a.chip.i }}" style="font-size:14px;animation:{{ a.spin }}"></i>{{ a.chip.label }}</span>
+</div>
+<div style="display:flex;flex-wrap:wrap;gap:4px 12px;font:12px var(--mono);color:var(--text-2)"><span>up {{ a.up }}</span><span>{{ a.restartsLabel }}</span><span>{{ a.tag }}</span></div>
+<sc-if value="{{ a.hasNext }}" hint-placeholder-val="{{ false }}"><span style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--accent-text)"><i class="ph ph-arrow-circle-up" style="font-size:15px"></i>Pinned version {{ a.next }} is newer than the running image</span></sc-if>
+<div style="display:flex;flex-wrap:wrap;gap:6px">
+<sc-for list="{{ a.actions }}" as="b" hint-placeholder-count="4">
+<button onClick="{{ b.go }}" disabled="{{ b.dis }}" title="{{ b.why }}" style="display:inline-flex;align-items:center;gap:6px;height:{{ btnH }}px;padding:0 11px;border-radius:var(--radius-sm);border:1px solid {{ b.border }};background:{{ b.bg }};color:{{ b.color }};font:500 13px var(--font-body);cursor:{{ b.cursor }}" style-hover="background:var(--tint-hover)"><i class="ph {{ b.icon }}" style="font-size:15px"></i>{{ b.label }}</button>
+</sc-for>
+</div>
+<sc-if value="{{ a.hasNote }}" hint-placeholder-val="{{ false }}"><span style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)"><i class="ph ph-lock-simple" style="font-size:14px"></i>{{ a.note }}</span></sc-if>
+</article>
+</sc-for>
+</div>
+</sc-if>
+
+<sc-if value="{{ sApp }}" hint-placeholder-val="{{ false }}">
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,380px),1fr));gap:12px;align-items:start">
+<section style="display:flex;flex-direction:column;gap:12px;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="font-size:13px;color:var(--muted);flex:1 1 160px">{{ app.desc }}</span><span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px 2px 6px;border-radius:999px;font-size:12px;font-weight:500;color:{{ app.chip.c }};background:{{ app.chip.bg }}"><i class="ph {{ app.chip.i }}" style="font-size:14px;animation:{{ app.spin }}"></i>{{ app.chip.label }}</span></div>
+<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 16px">
+<sc-for list="{{ app.facts }}" as="f" hint-placeholder-count="6"><div style="display:flex;flex-direction:column;gap:2px"><span style="font-size:12px;color:var(--muted)">{{ f.k }}</span><span style="font:13px var(--mono);color:var(--text);overflow-wrap:anywhere">{{ f.v }}</span></div></sc-for>
+</div>
+<div style="display:flex;flex-wrap:wrap;gap:6px">
+<sc-for list="{{ app.actions }}" as="b" hint-placeholder-count="4">
+<button onClick="{{ b.go }}" disabled="{{ b.dis }}" title="{{ b.why }}" style="display:inline-flex;align-items:center;gap:6px;height:{{ btnH }}px;padding:0 11px;border-radius:var(--radius-sm);border:1px solid {{ b.border }};background:{{ b.bg }};color:{{ b.color }};font:500 13px var(--font-body);cursor:{{ b.cursor }}" style-hover="background:var(--tint-hover)"><i class="ph {{ b.icon }}" style="font-size:15px"></i>{{ b.label }}</button>
+</sc-for>
+</div>
+<sc-if value="{{ app.hasNote }}" hint-placeholder-val="{{ false }}"><span style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)"><i class="ph ph-lock-simple" style="font-size:14px"></i>{{ app.note }}</span></sc-if>
+</section>
+
+<section style="display:flex;flex-direction:column;border-radius:var(--radius-md);background:var(--surface);overflow:hidden;min-width:0">
+<div style="display:flex;align-items:center;gap:6px;padding:10px;flex-wrap:wrap">
+<span style="font-size:13px;font-weight:500;color:var(--muted);padding:0 4px;flex:1 1 auto">Logs</span>
+<button onClick="{{ toggleFollow }}" style="display:inline-flex;align-items:center;gap:6px;height:{{ btnH }}px;padding:0 10px;border-radius:var(--radius-sm);border:1px solid {{ follow.b }};background:{{ follow.bg }};color:{{ follow.c }};font:500 13px var(--font-body);cursor:pointer"><i class="ph {{ follow.i }}" style="font-size:15px"></i>{{ follow.label }}</button>
+<button onClick="{{ copyLogs }}" aria-label="Copy" style="display:inline-flex;align-items:center;gap:6px;height:{{ btnH }}px;padding:0 10px;border-radius:var(--radius-sm);border:1px solid var(--border);background:transparent;color:var(--text-2);font:500 13px var(--font-body);cursor:pointer" style-hover="background:var(--tint-hover)"><i class="ph ph-copy" style="font-size:15px"></i>Copy</button>
+<input class="input" value="{{ q }}" onChange="{{ onQ }}" placeholder="Filter lines (e.g. ERR, health)" style="flex:1 1 100%;font-family:var(--mono);font-size:13px;min-height:{{ btnH }}px">
+</div>
+<div style="background:var(--deep);padding:10px 12px;height:{{ logH }}px;overflow:auto;display:flex;flex-direction:column;gap:3px;font:12px/1.5 var(--mono)">
+<sc-for list="{{ logs }}" as="l" hint-placeholder-count="12"><div style="display:flex;gap:10px;white-space:pre-wrap"><span style="color:var(--faint);flex:none">{{ l.t }}</span><span style="color:{{ l.c }};flex:none;width:28px">{{ l.lv }}</span><span style="color:var(--text-2);overflow-wrap:anywhere">{{ l.m }}</span></div></sc-for>
+<sc-if value="{{ noLogs }}" hint-placeholder-val="{{ false }}"><span style="color:var(--muted)">No lines match “{{ q }}”.</span></sc-if>
+</div>
+<div style="padding:7px 12px;font-size:12px;color:var(--muted);display:flex;justify-content:space-between"><span>{{ logCount }}</span><span>{{ follow.status }}</span></div>
+</section>
+</div>
+</sc-if>
+
+<sc-if value="{{ sDrive }}" hint-placeholder-val="{{ false }}">
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,440px),1fr));gap:12px;align-items:start">
+<div style="display:flex;flex-direction:column;gap:12px">
+<section style="display:flex;flex-direction:column;gap:12px;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<div style="display:flex;align-items:center;gap:10px"><span style="font-size:13px;color:var(--muted);font-weight:500;flex:1">Current state</span><span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px 3px 7px;border-radius:999px;font:500 13px var(--mono);color:{{ gate.chip.c }};background:{{ gate.chip.bg }}"><i class="ph {{ gate.chip.i }}" style="font-size:15px"></i>{{ gate.chip.label }}</span></div>
+<span style="font-size:17px;font-weight:500;line-height:1.35;text-wrap:pretty">{{ gate.line }}</span>
+<div style="display:flex;align-items:center;gap:8px;padding:10px 12px;border-radius:var(--radius-sm);background:var(--deep);font-size:13px;color:var(--text-2)"><i class="ph {{ gate.nextIcon }}" style="font-size:17px;color:var(--accent-bright)"></i><span style="flex:1">{{ gate.nextLabel }}</span><span style="font:500 15px var(--mono);color:var(--text)">{{ gate.next }}</span></div>
+<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px">
+<sc-for list="{{ gate.facts }}" as="f" hint-placeholder-count="3"><div style="display:flex;flex-direction:column;gap:2px"><span style="font-size:12px;color:var(--muted)">{{ f.k }}</span><span style="font:13px var(--mono)">{{ f.v }}</span></div></sc-for>
+</div>
+<div style="display:flex;flex-direction:column;gap:6px;align-items:flex-start">
+<button onClick="{{ rerun.go }}" disabled="{{ rerun.dis }}" title="{{ rerun.why }}" style="display:inline-flex;align-items:center;gap:6px;height:{{ btnH }}px;padding:0 14px;border-radius:var(--radius-sm);border:1px solid {{ rerun.border }};background:{{ rerun.bg }};color:{{ rerun.color }};font:500 14px var(--font-body);cursor:{{ rerun.cursor }}" style-hover="background:var(--tint-active)"><i class="ph {{ rerun.icon }}" style="font-size:16px"></i>Re-run check now</button>
+<sc-if value="{{ rerun.dis }}" hint-placeholder-val="{{ false }}"><span style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)"><i class="ph ph-lock-simple" style="font-size:14px"></i>{{ rerun.why }}</span></sc-if>
+</div>
+</section>
+<section style="display:flex;flex-direction:column;gap:12px;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<span style="font-size:13px;color:var(--muted);font-weight:500">Usage split</span>
+<div style="display:flex;height:10px;border-radius:5px;overflow:hidden;background:var(--track);gap:2px"><sc-for list="{{ drive.split }}" as="u" hint-placeholder-count="3"><span style="width:{{ u.w }}%;background:{{ u.c }}"></span></sc-for></div>
+<sc-for list="{{ drive.split }}" as="u" hint-placeholder-count="3"><div style="display:flex;align-items:center;gap:8px;font-size:13px"><span style="width:9px;height:9px;border-radius:2px;background:{{ u.c }}"></span><span style="flex:1">{{ u.k }}</span><span style="font:12px var(--mono);color:var(--text-2)">{{ u.v }}</span></div></sc-for>
+</section>
+</div>
+
+<section style="display:flex;flex-direction:column;gap:12px;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<div style="display:flex;flex-direction:column;gap:2px"><span style="font-size:13px;color:var(--muted);font-weight:500">Space forecast</span><span style="font-size:17px;font-weight:500">{{ drive.forecastLong }}</span><span style="font-size:13px;color:var(--text-2)">{{ drive.usedLine }}</span></div>
+<sc-if value="{{ drive.hasChart }}" hint-placeholder-val="{{ true }}">
+<div style="position:relative;height:180px;margin:8px 64px 22px 30px">
+<svg viewBox="0 0 600 180" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%;overflow:visible">
+<line x1="0" x2="600" y1="180" y2="180" style="stroke:var(--border);stroke-width:1;vector-effect:non-scaling-stroke"></line>
+<line x1="0" x2="600" y1="90" y2="90" style="stroke:var(--divider);stroke-width:1;vector-effect:non-scaling-stroke"></line>
+<line x1="0" x2="600" y1="{{ ch.y90 }}" y2="{{ ch.y90 }}" style="stroke:var(--warn);stroke-width:1;stroke-dasharray:3 4;vector-effect:non-scaling-stroke"></line>
+<line x1="0" x2="600" y1="{{ ch.y97 }}" y2="{{ ch.y97 }}" style="stroke:var(--fail);stroke-width:1;stroke-dasharray:3 4;vector-effect:non-scaling-stroke"></line>
+<line x1="{{ ch.todayX }}" x2="{{ ch.todayX }}" y1="0" y2="180" style="stroke:var(--divider);stroke-width:1;vector-effect:non-scaling-stroke"></line>
+<polygon points="{{ ch.area }}" style="fill:var(--tint-active)"></polygon>
+<polyline points="{{ ch.used }}" style="fill:none;stroke:var(--accent-bright);stroke-width:2;vector-effect:non-scaling-stroke"></polyline>
+<polyline points="{{ ch.proj }}" style="fill:none;stroke:var(--accent);stroke-width:1.5;stroke-dasharray:5 5;vector-effect:non-scaling-stroke"></polyline>
+</svg>
+<span style="position:absolute;right:-64px;top:{{ ch.l90 }}px;font:11px var(--mono);color:var(--warn)">90% {{ ch.d90 }}</span>
+<span style="position:absolute;right:-64px;top:{{ ch.l97 }}px;font:11px var(--mono);color:var(--fail)">97% {{ ch.d97 }}</span>
+<span style="position:absolute;left:-30px;top:-7px;font:11px var(--mono);color:var(--muted)">100%</span>
+<span style="position:absolute;left:-30px;top:83px;font:11px var(--mono);color:var(--muted)">50%</span>
+<span style="position:absolute;left:0;bottom:-20px;font:11px var(--mono);color:var(--muted)">{{ ch.start }}</span>
+<span style="position:absolute;left:{{ ch.todayPct }}%;top:-16px;transform:translateX(-50%);font:11px var(--mono);color:var(--text-2)">today</span>
+<span style="position:absolute;right:0;bottom:-20px;font:11px var(--mono);color:var(--accent-text)">full {{ ch.full }}</span>
+</div>
+<div style="display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--muted)"><span style="display:flex;align-items:center;gap:6px"><span style="width:14px;height:2px;background:var(--accent-bright)"></span>Daily used space</span><span style="display:flex;align-items:center;gap:6px"><span style="width:14px;border-top:2px dashed var(--accent)"></span>Projection</span></div>
+</sc-if>
+<sc-if value="{{ drive.noChart }}" hint-placeholder-val="{{ false }}"><div style="padding:22px 14px;border-radius:var(--radius-sm);background:var(--deep);color:var(--muted);font-size:13px;display:flex;gap:8px;align-items:center"><i class="ph ph-chart-line-up" style="font-size:18px"></i>The forecast starts after 7 days of samples. No media on the drive yet.</div></sc-if>
+</section>
+
+<section style="grid-column:1/-1;display:flex;flex-direction:column;gap:14px;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap"><span style="font-size:13px;color:var(--muted);font-weight:500;flex:1">Gate history</span><span style="font-size:12px;color:var(--muted)">Newest first · grouped by boot · wait in seconds</span></div>
+<sc-for list="{{ history }}" as="g" hint-placeholder-count="3">
+<div style="display:flex;flex-direction:column;gap:4px">
+<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);padding-bottom:4px;border-bottom:1px solid var(--divider)"><i class="ph ph-power" style="font-size:14px"></i><span style="font-family:var(--mono);color:var(--text-2)">boot {{ g.boot }}</span><span>started {{ g.started }}</span><sc-if value="{{ g.current }}"><span style="color:var(--accent-text)">· current</span></sc-if></div>
+<sc-for list="{{ g.rows }}" as="r" hint-placeholder-count="2">
+<div style="display:grid;grid-template-columns:{{ histCols }};gap:4px 12px;align-items:center;padding:7px 8px;border-radius:var(--radius-sm);background:{{ r.rowBg }};border:{{ r.rowBorder }}">
+<span style="font:12px var(--mono);color:var(--text-2)">{{ r.t }}</span>
+<span style="justify-self:start;display:inline-flex;align-items:center;gap:4px;padding:2px 8px 2px 6px;border-radius:999px;font:500 12px var(--mono);color:{{ r.chip.c }};background:{{ r.chip.bg }}"><i class="ph {{ r.chip.i }}" style="font-size:14px"></i>{{ r.chip.label }}</span>
+<span style="font-size:13px;color:var(--text);grid-column:{{ detailCol }}">{{ r.detail }}</span>
+<span style="font:12px var(--mono);color:var(--muted);text-align:right">{{ r.wait }}</span>
+</div>
+</sc-for>
+</div>
+</sc-for>
+</section>
+</div>
+</sc-if>
+
+<sc-if value="{{ sMedia }}" hint-placeholder-val="{{ false }}">
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:12px;align-items:start">
+<div style="display:flex;flex-direction:column;gap:12px">
+<section style="display:flex;flex-direction:column;gap:10px;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<span style="font-size:13px;color:var(--muted);font-weight:500;display:flex;gap:6px;align-items:center"><i class="ph ph-play-circle" style="font-size:16px"></i>Now playing</span>
+<sc-for list="{{ playing }}" as="np" hint-placeholder-count="1">
+<div style="display:flex;flex-direction:column;gap:6px">
+<div style="display:flex;justify-content:space-between;gap:10px"><span style="font-size:15px;font-weight:500">{{ np.title }}</span><span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:500;white-space:nowrap;color:{{ np.mode.c }};background:{{ np.mode.bg }}"><i class="ph {{ np.mode.i }}" style="font-size:14px"></i>{{ np.mode.label }}</span></div>
+<span style="font-size:13px;color:var(--text-2)">{{ np.user }} · {{ np.device }}</span>
+<span style="height:4px;border-radius:2px;background:var(--track);display:block"><span style="display:block;height:100%;width:{{ np.pct }}%;background:var(--accent);border-radius:2px"></span></span>
+<span style="font:12px var(--mono);color:var(--muted)">{{ np.time }}</span>
+</div>
+</sc-for>
+<sc-if value="{{ noPlaying }}" hint-placeholder-val="{{ false }}"><span style="font-size:13px;color:var(--muted)">{{ noPlayingText }}</span></sc-if>
+</section>
+
+<section style="display:flex;flex-direction:column;gap:10px;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<div style="display:flex;align-items:center;gap:8px"><span style="font-size:13px;color:var(--muted);font-weight:500;display:flex;gap:6px;align-items:center;flex:1"><i class="ph ph-download-simple" style="font-size:16px"></i>Downloads</span><sc-if value="{{ dl.ok }}"><span style="font:500 13px var(--mono);color:var(--text)">{{ dl.speed }}</span></sc-if></div>
+<sc-if value="{{ dl.err }}" hint-placeholder-val="{{ false }}"><div style="display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:var(--radius-sm);background:var(--fail-bg);color:var(--fail);font-size:13px"><span style="display:flex;gap:6px;align-items:center;font-weight:600"><i class="ph ph-plugs" style="font-size:16px"></i>SABnzbd isn't answering</span><span style="color:var(--text-2)">Timed out after 5 s at 14:19. The container is running, so this may clear on its own.</span><button onClick="{{ retrySab }}" style="align-self:flex-start;display:inline-flex;align-items:center;gap:6px;height:{{ btnH }}px;padding:0 11px;border-radius:var(--radius-sm);border:1px solid var(--border);background:transparent;color:var(--text-2);font:500 13px var(--font-body);cursor:pointer"><i class="ph ph-arrow-clockwise"></i>Retry</button></div></sc-if>
+<sc-for list="{{ dl.items }}" as="q" hint-placeholder-count="3">
+<div style="display:flex;flex-direction:column;gap:5px"><div style="display:flex;justify-content:space-between;gap:10px;font-size:13px"><span style="font-family:var(--mono);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ q.name }}</span><span style="font:12px var(--mono);color:var(--muted);white-space:nowrap">{{ q.eta }}</span></div><span style="height:4px;border-radius:2px;background:var(--track);display:block"><span style="display:block;height:100%;width:{{ q.pct }}%;background:{{ q.c }};border-radius:2px"></span></span></div>
+</sc-for>
+<sc-if value="{{ dl.empty }}" hint-placeholder-val="{{ false }}"><span style="font-size:13px;color:var(--muted)">{{ dl.emptyText }}</span></sc-if>
+</section>
+</div>
+
+<section style="display:flex;flex-direction:column;gap:8px;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<span style="font-size:13px;color:var(--muted);font-weight:500;display:flex;gap:6px;align-items:center"><i class="ph ph-first-aid-kit" style="font-size:16px"></i>Media health</span>
+<sc-for list="{{ mhealth }}" as="h" hint-placeholder-count="6"><div style="display:flex;align-items:center;gap:10px;font-size:13px;min-height:28px"><i class="ph {{ h.chip.i }}" style="font-size:17px;color:{{ h.chip.c }}"></i><span style="flex:1">{{ h.k }}</span><span style="font-size:12px;color:{{ h.chip.c }};text-align:right">{{ h.chip.label }}</span></div></sc-for>
+</section>
+
+<div style="display:flex;flex-direction:column;gap:12px">
+<section style="display:flex;flex-direction:column;gap:10px;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<span style="font-size:13px;color:var(--muted);font-weight:500;display:flex;gap:6px;align-items:center"><i class="ph ph-hand-waving" style="font-size:16px"></i>Requests · {{ reqCount }} pending</span>
+<sc-for list="{{ requests }}" as="r" hint-placeholder-count="2"><div style="display:flex;justify-content:space-between;gap:10px;font-size:13px"><span>{{ r.title }}</span><span style="color:var(--muted);white-space:nowrap">{{ r.by }} · {{ r.when }}</span></div></sc-for>
+<sc-if value="{{ noRequests }}" hint-placeholder-val="{{ false }}"><span style="font-size:13px;color:var(--muted)">Nothing waiting for approval.</span></sc-if>
+</section>
+<section style="display:flex;flex-direction:column;gap:8px;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<span style="font-size:13px;color:var(--muted);font-weight:500;display:flex;gap:6px;align-items:center"><i class="ph ph-calendar-check" style="font-size:16px"></i>Subscription renewals</span>
+<sc-for list="{{ subs }}" as="x" hint-placeholder-count="3"><div style="display:flex;align-items:center;gap:10px;font-size:13px;min-height:30px"><span style="flex:1">{{ x.k }}</span><span style="font:12px var(--mono);color:var(--muted)">{{ x.date }}</span><span style="min-width:74px;text-align:right;font-weight:500;color:{{ x.c }}">{{ x.left }}</span></div></sc-for>
+<span style="font-size:12px;color:var(--muted)">A reminder push fires 7 days before each date. Edit dates in Settings.</span>
+</section>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ sAlerts }}" hint-placeholder-val="{{ false }}">
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,380px),1fr));gap:12px;align-items:start">
+<section style="display:flex;flex-direction:column;gap:2px;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<span style="font-size:13px;color:var(--muted);font-weight:500;padding-bottom:6px">Recent alerts</span>
+<sc-for list="{{ alerts }}" as="al" hint-placeholder-count="4">
+<div style="display:flex;gap:10px;padding:10px 0;border-top:1px solid var(--divider)">
+<i class="ph {{ al.chip.i }}" style="font-size:18px;color:{{ al.chip.c }};margin-top:1px"></i>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px">
+<div style="display:flex;gap:8px;align-items:baseline;justify-content:space-between"><span style="font-size:14px;font-weight:500">{{ al.title }}</span><span style="font:12px var(--mono);color:var(--muted);white-space:nowrap">{{ al.ts }}</span></div>
+<span style="font-size:13px;color:var(--text-2)">{{ al.body }}</span>
+<div style="display:flex;gap:6px;align-items:center"><span style="font:11px var(--mono);color:var(--muted);padding:1px 6px;border-radius:4px;border:1px solid var(--border)">{{ al.tag }}</span><span style="font-size:12px;font-weight:500;color:{{ al.chip.c }}">{{ al.chip.label }}</span></div>
+</div>
+</div>
+</sc-for>
+<sc-if value="{{ noAlerts }}" hint-placeholder-val="{{ false }}"><div style="display:flex;flex-direction:column;gap:4px;padding:18px 0;border-top:1px solid var(--divider)"><span style="font-size:14px">No alerts yet</span><span style="font-size:13px;color:var(--muted)">When the host or the off-site heartbeat raises something, it lands here and on your devices.</span></div></sc-if>
+</section>
+
+<div style="display:flex;flex-direction:column;gap:12px">
+<section style="display:flex;flex-direction:column;gap:10px;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<div style="display:flex;align-items:center;gap:8px"><span style="font-size:13px;color:var(--muted);font-weight:500;flex:1">Devices</span><span style="font-size:12px;color:var(--muted)">{{ devCount }}</span></div>
+<sc-if value="{{ showInstallHint }}" hint-placeholder-val="{{ false }}"><div style="display:flex;gap:10px;padding:10px 12px;border-radius:var(--radius-sm);background:var(--info-bg);font-size:13px;color:var(--text-2)"><i class="ph ph-export" style="font-size:18px;color:var(--info)"></i><span>On iPhone, pushes need the app on your Home Screen. Tap <b style="font-weight:600;color:var(--text)">Share</b>, then <b style="font-weight:600;color:var(--text)">Add to Home Screen</b>, and open it from there.</span></div></sc-if>
+<sc-for list="{{ devices }}" as="dv" hint-placeholder-count="3">
+<div style="display:flex;align-items:center;gap:10px;min-height:{{ btnH }}px;border-top:1px solid var(--divider);padding-top:8px">
+<i class="ph {{ dv.icon }}" style="font-size:20px;color:var(--text-2)"></i>
+<div style="flex:1;display:flex;flex-direction:column;gap:1px"><span style="font-size:14px;display:flex;gap:6px;align-items:center">{{ dv.label }}<sc-if value="{{ dv.test }}"><span style="font-size:11px;padding:1px 6px;border-radius:999px;color:var(--info);background:var(--info-bg)">test</span></sc-if><sc-if value="{{ dv.me }}"><span style="font-size:11px;padding:1px 6px;border-radius:999px;color:var(--accent-text);background:var(--tint-btn)">this device</span></sc-if></span><span style="font:12px var(--mono);color:var(--muted)">added {{ dv.added }}</span></div>
+<button onClick="{{ dv.remove }}" disabled="{{ actionsPaused }}" style="height:{{ btnH }}px;padding:0 10px;border-radius:var(--radius-sm);border:1px solid var(--border);background:transparent;color:var(--fail);font:500 13px var(--font-body);cursor:pointer" style-hover="background:var(--fail-bg)">Remove</button>
+</div>
+</sc-for>
+<sc-if value="{{ noDevices }}" hint-placeholder-val="{{ false }}"><div style="display:flex;flex-direction:column;gap:4px;padding:6px 0"><span style="font-size:15px;font-weight:500">Subscribe this phone to get alerts</span><span style="font-size:13px;color:var(--muted)">No devices get pushes yet. If the drive fails, nobody will hear about it.</span></div></sc-if>
+<sc-if value="{{ canSubscribe }}" hint-placeholder-val="{{ false }}">
+<button onClick="{{ subscribe }}" style="align-self:flex-start;display:inline-flex;align-items:center;gap:6px;height:{{ btnH }}px;padding:0 14px;border-radius:var(--radius-sm);border:1px solid var(--accent-border);background:var(--tint-btn);color:var(--accent-text);font:500 14px var(--font-body);cursor:pointer" style-hover="background:var(--tint-active)"><i class="ph ph-bell-ringing" style="font-size:16px"></i>Subscribe this device</button>
+</sc-if>
+</section>
+
+<section style="display:flex;flex-direction:column;gap:10px;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<span style="font-size:13px;color:var(--muted);font-weight:500">Test</span>
+<span style="font-size:13px;color:var(--text-2)">{{ testLine }}</span>
+<button onClick="{{ testPush }}" disabled="{{ testDis }}" style="align-self:flex-start;display:inline-flex;align-items:center;gap:6px;height:{{ btnH }}px;padding:0 14px;border-radius:var(--radius-sm);border:1px solid var(--accent-border);background:transparent;color:var(--accent-text);font:500 14px var(--font-body);cursor:pointer;opacity:{{ testOp }}" style-hover="background:var(--tint-hover)"><i class="ph ph-paper-plane-tilt" style="font-size:16px"></i>Send test push</button>
+<sc-if value="{{ rehearsal }}"><span style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--info)"><i class="ph ph-flask" style="font-size:14px"></i>Rehearsal mode: only test devices receive drill pushes</span></sc-if>
+</section>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ sUptime }}" hint-placeholder-val="{{ false }}">
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:12px;align-items:start">
+<section style="grid-column:1/-1;display:flex;flex-direction:column;gap:10px;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap"><span style="font-size:13px;color:var(--muted);font-weight:500;flex:1">Box heartbeat · off-site, every 2 min</span><span style="font-size:22px;font-weight:500">{{ uptime.box }}</span></div>
+<div style="display:flex;gap:3px;height:34px"><sc-for list="{{ uptime.days }}" as="d" hint-placeholder-count="30"><span title="{{ d.tip }}" style="flex:1;border-radius:2px;background:{{ d.c }}"></span></sc-for></div>
+<div style="display:flex;justify-content:space-between;font:11px var(--mono);color:var(--muted)"><span>Sep 25</span><span>today</span></div>
+<sc-for list="{{ uptime.downs }}" as="dn" hint-placeholder-count="2"><div style="display:flex;gap:10px;font-size:13px;align-items:center"><i class="ph ph-arrow-down" style="color:var(--fail)"></i><span style="font:12px var(--mono);color:var(--text-2);min-width:110px">{{ dn.t }}</span><span style="flex:1">{{ dn.why }}</span><span style="font:12px var(--mono);color:var(--muted)">{{ dn.dur }}</span></div></sc-for>
+</section>
+
+<section style="display:flex;flex-direction:column;gap:8px;padding:16px;border-radius:var(--radius-md);background:var(--surface);min-width:0">
+<span style="font-size:13px;color:var(--muted);font-weight:500">Monthly uptime per app</span>
+<div style="display:grid;grid-template-columns:88px repeat(6,minmax(0,1fr));gap:3px;font:11px var(--mono)">
+<span></span><sc-for list="{{ months }}" as="m" hint-placeholder-count="6"><span style="color:var(--muted);text-align:center;padding-bottom:3px">{{ m }}</span></sc-for>
+<sc-for list="{{ heat }}" as="hr" hint-placeholder-count="9"><span style="color:var(--text-2);font-family:var(--font-body);font-size:12px;align-self:center">{{ hr.name }}</span><sc-for list="{{ hr.cells }}" as="c" hint-placeholder-count="6"><span style="height:24px;border-radius:3px;background:{{ c.bg }};color:{{ c.c }};display:grid;place-items:center">{{ c.v }}</span></sc-for></sc-for>
+</div>
+<span style="font-size:12px;color:var(--muted)">Percent of the month the container was healthy. Time held by the gate counts as down.</span>
+</section>
+
+<div style="display:flex;flex-direction:column;gap:12px">
+<section style="display:flex;flex-direction:column;gap:10px;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<span style="font-size:13px;color:var(--muted);font-weight:500">Media-drive failures per month</span>
+<div style="display:flex;gap:10px;align-items:flex-end;height:110px">
+<sc-for list="{{ fails }}" as="f" hint-placeholder-count="6"><div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;justify-content:flex-end;height:100%"><span style="font:12px var(--mono);color:var(--text-2)">{{ f.n }}</span><span style="width:100%;max-width:36px;height:{{ f.h }}px;border-radius:3px 3px 0 0;background:{{ f.c }}"></span><span style="font:11px var(--mono);color:var(--muted)">{{ f.m }}</span></div></sc-for>
+</div>
+</section>
+<section style="display:flex;flex-direction:column;gap:8px;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<div style="display:flex;align-items:center;gap:8px"><span style="font-size:13px;color:var(--muted);font-weight:500;flex:1">Last restore drill</span><span style="font-size:11px;padding:1px 7px;border-radius:999px;color:var(--muted);border:1px solid var(--border)">later</span></div>
+<div style="display:flex;align-items:center;gap:10px"><i class="ph ph-check-circle" style="font-size:22px;color:var(--ok)"></i><span style="font-size:15px;font-weight:500;flex:1">Passed</span><span style="font:12px var(--mono);color:var(--text-2)">Sep 28 · 14 m 02 s</span></div>
+<span style="font-size:12px;color:var(--muted)">Restored last night's archive to a scratch volume and started Jellyfin against it.</span>
+</section>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ sSettings }}" hint-placeholder-val="{{ false }}">
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,380px),1fr));gap:12px;align-items:start">
+<section style="display:flex;flex-direction:column;gap:12px;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<span style="font-size:13px;color:var(--muted);font-weight:500">Thresholds</span>
+<sc-for list="{{ thresholds }}" as="t" hint-placeholder-count="2"><label class="field" style="display:flex;flex-direction:column;gap:5px"><span style="font-size:13px;color:var(--text-2)">{{ t.label }}</span><span style="display:flex;align-items:center;gap:8px"><input class="input" type="number" value="{{ t.value }}" onChange="{{ t.set }}" style="max-width:110px;font-family:var(--mono);min-height:{{ btnH }}px"><span style="font-size:13px;color:var(--muted)">{{ t.unit }}</span></span></label></sc-for>
+</section>
+<section style="display:flex;flex-direction:column;gap:12px;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<span style="font-size:13px;color:var(--muted);font-weight:500">Subscription renewal dates</span>
+<sc-for list="{{ subs }}" as="x" hint-placeholder-count="3"><label style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="font-size:13px;color:var(--text-2);flex:1 1 140px">{{ x.k }}</span><input class="input" type="date" value="{{ x.iso }}" onChange="{{ x.set }}" style="max-width:170px;font-family:var(--mono);min-height:{{ btnH }}px;color-scheme:dark"><span style="min-width:70px;text-align:right;font-size:13px;font-weight:500;color:{{ x.c }}">{{ x.left }}</span></label></sc-for>
+</section>
+<section style="display:flex;flex-direction:column;gap:6px;padding:16px;border-radius:var(--radius-md);background:var(--surface);min-width:0">
+<span style="font-size:13px;color:var(--muted);font-weight:500;padding-bottom:4px">Pinned versions</span>
+<sc-for list="{{ apps }}" as="a" hint-placeholder-count="9"><div style="display:flex;gap:10px;font-size:13px;padding:5px 0;border-top:1px solid var(--divider)"><span style="flex:1">{{ a.name }}</span><span style="font:12px var(--mono);color:var(--text-2);overflow-wrap:anywhere;text-align:right">{{ a.tag }}</span></div></sc-for>
+<span style="font-size:12px;color:var(--muted);padding-top:4px">Pins live in the compose repo. Renovate will propose bumps later.</span>
+</section>
+<section style="display:flex;flex-direction:column;gap:2px;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<span style="font-size:13px;color:var(--muted);font-weight:500;padding-bottom:6px">Runbooks</span>
+<sc-for list="{{ runbooks }}" as="rb" hint-placeholder-count="4"><a href="#" style="display:flex;align-items:center;gap:10px;min-height:{{ btnH }}px;font-size:14px;text-decoration:none;border-top:1px solid var(--divider)"><i class="ph ph-book-open" style="font-size:17px"></i><span style="flex:1">{{ rb }}</span><i class="ph ph-arrow-up-right" style="color:var(--muted)"></i></a></sc-for>
+</section>
+</div>
+</sc-if>
+
+<sc-if value="{{ sMore }}" hint-placeholder-val="{{ false }}">
+<section style="display:flex;flex-direction:column;border-radius:var(--radius-md);background:var(--surface);overflow:hidden">
+<sc-for list="{{ moreNav }}" as="n" hint-placeholder-count="3"><button onClick="{{ n.go }}" style="display:flex;align-items:center;gap:12px;min-height:52px;padding:0 14px;border:0;border-bottom:1px solid var(--divider);background:transparent;color:var(--text);font:400 15px var(--font-body);text-align:left;cursor:pointer" style-hover="background:var(--surface-hover)"><i class="ph {{ n.icon }}" style="font-size:20px;color:var(--accent-bright)"></i><span style="flex:1">{{ n.label }}</span><sc-if value="{{ n.hasDot }}"><span style="width:7px;height:7px;border-radius:50%;background:{{ n.dot }}"></span></sc-if><i class="ph ph-caret-right" style="color:var(--muted)"></i></button></sc-for>
+</section>
+</sc-if>
+</main>
+
+<sc-if value="{{ isMobile }}" hint-placeholder-val="{{ true }}">
+<nav style="flex:none;display:flex;border-top:1px solid var(--divider);background:var(--deep);padding:6px 6px 28px">
+<sc-for list="{{ tabs }}" as="n" hint-placeholder-count="5">
+<button onClick="{{ n.go }}" style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;min-height:48px;padding-top:4px;border:0;background:transparent;color:{{ n.color }};font:500 11px var(--font-body);cursor:pointer;position:relative"><i class="ph {{ n.icon }}" style="font-size:23px"></i>{{ n.label }}<sc-if value="{{ n.hasDot }}"><span style="position:absolute;top:3px;left:calc(50% + 8px);width:8px;height:8px;border-radius:50%;background:{{ n.dot }};border:2px solid var(--deep)"></span></sc-if></button>
+</sc-for>
+</nav>
+</sc-if>
+
+<sc-if value="{{ hasToast }}" hint-placeholder-val="{{ false }}">
+<div role="status" style="position:absolute;left:16px;right:16px;bottom:{{ toastBottom }}px;display:flex;justify-content:center;pointer-events:none">
+<div style="display:flex;align-items:center;gap:10px;max-width:440px;padding:11px 14px;border-radius:var(--radius-md);background:var(--surface-hover);box-shadow:var(--shadow-md);font-size:14px;color:var(--text)"><i class="ph {{ toast.i }}" style="font-size:19px;color:{{ toast.c }}"></i><span>{{ toast.text }}</span></div>
+</div>
+</sc-if>
+</div>
+
+<sc-if value="{{ hasDialog }}" hint-placeholder-val="{{ false }}">
+<div style="position:absolute;inset:0;background:rgba(15,17,25,0.74);display:flex;align-items:{{ dlgAlign }};justify-content:center;padding:{{ dlgPad }}">
+<div role="dialog" style="width:100%;max-width:420px;display:flex;flex-direction:column;gap:12px;padding:20px;padding-bottom:{{ dlgBottom }}px;border-radius:var(--radius-lg);background:var(--surface);box-shadow:var(--shadow-lg)">
+<div style="display:flex;align-items:center;gap:10px"><i class="ph {{ dlg.icon }}" style="font-size:24px;color:{{ dlg.c }}"></i><span style="font-size:18px;font-weight:500">{{ dlg.title }}</span></div>
+<span style="font-size:14px;line-height:1.5;color:var(--text-2)">{{ dlg.body }}</span>
+<sc-if value="{{ dlg.progress }}" hint-placeholder-val="{{ false }}"><div style="display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:var(--radius-sm);background:var(--deep)"><sc-for list="{{ dlg.steps }}" as="st" hint-placeholder-count="3"><div style="display:flex;align-items:center;gap:8px;font-size:13px;color:{{ st.c }}"><i class="ph {{ st.i }}" style="font-size:16px;animation:{{ st.spin }}"></i>{{ st.label }}</div></sc-for></div></sc-if>
+<sc-if value="{{ dlg.confirming }}" hint-placeholder-val="{{ true }}">
+<div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;padding-top:4px">
+<button onClick="{{ closeDlg }}" style="height:{{ btnH }}px;padding:0 14px;border-radius:var(--radius-sm);border:1px solid var(--border);background:transparent;color:var(--text-2);font:500 14px var(--font-body);cursor:pointer" style-hover="background:var(--tint-hover)">Cancel</button>
+<button onClick="{{ confirmDlg }}" style="height:{{ btnH }}px;padding:0 16px;border-radius:var(--radius-sm);border:1px solid {{ dlg.c }};background:{{ dlg.bg }};color:{{ dlg.c }};font:500 14px var(--font-body);cursor:pointer">{{ dlg.confirm }}</button>
+</div>
+</sc-if>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ offline }}" hint-placeholder-val="{{ false }}">
+<div style="position:absolute;inset:0;background:var(--ground);display:flex;flex-direction:column;padding:{{ offPad }};gap:16px;overflow:auto">
+<div style="display:flex;flex-direction:column;gap:16px;max-width:520px">
+<div style="width:52px;height:52px;border-radius:50%;border:1px solid var(--border);display:grid;place-items:center;font-size:26px;color:var(--muted)"><i class="ph ph-cloud-slash"></i></div>
+<div style="display:flex;flex-direction:column;gap:6px"><span style="font-size:26px;font-weight:500;letter-spacing:-0.015em">Can't reach the server</span><span style="font-size:15px;color:var(--text-2);line-height:1.45">{{ off.line }}</span></div>
+<div style="display:flex;flex-direction:column;gap:8px;padding:14px;border-radius:var(--radius-md);background:var(--surface)">
+<span style="font-size:12px;color:var(--muted);display:flex;gap:6px;align-items:center"><i class="ph ph-clock-counter-clockwise"></i>Saved on this device · {{ stamp }}</span>
+<sc-for list="{{ off.rows }}" as="r" hint-placeholder-count="3"><div style="display:flex;align-items:center;gap:10px;font-size:14px"><i class="ph {{ r.chip.i }}" style="font-size:17px;color:{{ r.chip.c }}"></i><span style="flex:1">{{ r.k }}</span><span style="font:12px var(--mono);color:var(--text-2)">{{ r.v }}</span></div></sc-for>
+</div>
+<div style="display:flex;gap:10px;padding:12px 14px;border-radius:var(--radius-md);background:var(--info-bg);font-size:13px;color:var(--text-2);line-height:1.45"><i class="ph ph-bell-ringing" style="font-size:18px;color:var(--info)"></i><span>Alerts still arrive by push. They come from the host and an off-site heartbeat, not from this dashboard.</span></div>
+<span style="font-size:13px;color:var(--muted);line-height:1.45">This is expected while the boot gate holds Docker down: the dashboard runs in Docker too. It will come back on its own when the drive passes the check.</span>
+<button onClick="{{ retryOffline }}" style="align-self:flex-start;display:inline-flex;align-items:center;gap:6px;height:44px;padding:0 16px;border-radius:var(--radius-sm);border:1px solid var(--accent-border);background:var(--tint-btn);color:var(--accent-text);font:500 15px var(--font-body);cursor:pointer"><i class="ph ph-arrow-clockwise" style="font-size:17px"></i>Try again</button>
+</div>
+</div>
+</sc-if>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;device&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;mobile&quot;,&quot;desktop&quot;],&quot;default&quot;:&quot;mobile&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;View&quot;},&quot;scenario&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;normal&quot;,&quot;bad&quot;],&quot;default&quot;:&quot;normal&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;View&quot;},&quot;access&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;tailnet&quot;,&quot;remote&quot;],&quot;default&quot;:&quot;tailnet&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;View&quot;},&quot;state&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;live&quot;,&quot;loading&quot;,&quot;backend&quot;,&quot;offline&quot;,&quot;sab&quot;,&quot;clean&quot;],&quot;default&quot;:&quot;live&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;States&quot;},&quot;rehearsal&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;States&quot;}}">
+const ST={ok:['var(--ok)','var(--ok-bg)','ph-check-circle'],warn:['var(--warn)','var(--warn-bg)','ph-warning'],fail:['var(--fail)','var(--fail-bg)','ph-x-circle'],info:['var(--info)','var(--info-bg)','ph-info'],idle:['var(--text-2)','var(--idle-bg)','ph-pause-circle']};
+const chip=(k,label,i)=>({c:ST[k][0],bg:ST[k][1],i:i||ST[k][2],label});
+const APPS=[
+ ['jellyfin','Jellyfin','Streams the library to TVs and phones','/watch','jellyfin/jellyfin','10.10.3',true],
+ ['jellyseerr','Jellyseerr','Takes requests for new shows and films',null,'fallenbagel/jellyseerr','2.1.0',true],
+ ['sonarr','Sonarr','Finds and grabs TV episodes','/sonarr','linuxserver/sonarr','4.0.11',true],
+ ['radarr','Radarr','Finds and grabs films','/radarr','linuxserver/radarr','5.16.3',true,'5.17.2'],
+ ['prowlarr','Prowlarr','Keeps the indexers in one place','/prowlarr','linuxserver/prowlarr','1.28.2',false],
+ ['sabnzbd','SABnzbd','Downloads from Usenet','/sabnzbd','linuxserver/sabnzbd','4.4.1',true],
+ ['caddy','Caddy','Routes every path on this origin',null,'caddy','2.8.4',false],
+ ['cloudflared','cloudflared','Tunnel for the public /watch route',null,'cloudflare/cloudflared','2024.12.1',false],
+ ['dashboard','Dashboard','This app, plus the push sender',null,'homelab/dashboard','2.0.0',false],
+].map(([id,name,desc,path,image,ver,gated,next])=>({id,name,desc,path,image,ver,gated,next}));
+const AS={healthy:['ok','Healthy'],unhealthy:['warn','Unhealthy'],starting:['info','Starting','ph-circle-notch'],updating:['info','Updating','ph-circle-notch'],held:['idle','Held by gate'],stopped:['idle','Stopped on purpose'],down:['fail','Down']};
+const EV={pass:['ok','ph-check'],repair:['info','ph-wrench'],powercycle:['warn','ph-lightning'],fail:['fail','ph-x'],'retry-pass':['ok','ph-arrow-clockwise'],'media-lost':['fail','ph-plugs']};
+const ev=(t,e,detail,wait)=>({t,detail,wait,chip:chip(EV[e][0],e,EV[e][1]),rowBg:e==='powercycle'?'var(--warn-bg)':'transparent',rowBorder:e==='powercycle'?'1px dashed rgba(228,179,99,0.45)':'1px solid transparent'});
+const TODAY=new Date('2026-10-24T12:00:00');
+class Component extends DCLogic {
+  state={screen:'overview',appId:'sonarr',dialog:null,toast:null,ov:{},follow:true,q:'',cd:222,ago:12,extra:0,removed:{},subbed:false,disk:90,backupAge:36,exp:{a:'2026-11-16',b:'2027-03-02',u:'2026-11-01'}};
+  componentDidMount(){this.onRs=()=>this.setState({vw:window.innerWidth,vh:window.innerHeight});window.addEventListener('resize',this.onRs);this.onRs();this.iv=setInterval(()=>this.setState(s=>({cd:s.cd<=0?300:s.cd-1,ago:s.ago>=29?2:s.ago+1,extra:s.follow&&s.screen==='app'?Math.min(s.extra+1,60):s.extra})),1500);}
+  componentWillUnmount(){clearInterval(this.iv);clearTimeout(this.tt);clearInterval(this.pi);}
+  go(screen,appId){this.setState(s=>({screen,appId:appId||s.appId,q:''}));}
+  toast(k,text,i){clearTimeout(this.tt);this.setState({toast:{k,text,i}});this.tt=setTimeout(()=>this.setState({toast:null}),3800);}
+  setOv(id,v){this.setState(s=>({ov:{...s.ov,[id]:v}}));}
+  restart(a){this.setOv(a.id,'starting');this.toast('info',`Restarting ${a.name}…`,'ph-arrow-clockwise');setTimeout(()=>{this.setOv(a.id,'healthy');this.toast('ok',`${a.name} is healthy again`);},2600);}
+  confirm(){const d=this.state.dialog;if(!d)return;const a=APPS.find(x=>x.id===d.id);const bad=(this.props.scenario??'normal')==='bad';
+    if(d.kind==='stop'){this.setOv(a.id,'stopped');this.setState({dialog:null});this.toast('ok',`${a.name} stopped. It stays down until you start it.`);return;}
+    if(d.kind==='start'){this.setState({dialog:null});this.restart(a);return;}
+    if(d.kind==='remove'){this.setState(s=>({dialog:null,removed:{...s.removed,[d.id]:true}}));this.toast('ok','Device removed. It will stop getting pushes.');return;}
+    this.setState({dialog:{...d,phase:'progress',step:0}});if(d.kind==='update')this.setOv(a.id,'updating');
+    clearInterval(this.pi);this.pi=setInterval(()=>{const cur=this.state.dialog;if(!cur){clearInterval(this.pi);return;}
+      if(cur.step>=2){clearInterval(this.pi);this.setState({dialog:null});
+        if(d.kind==='update'){this.setOv(a.id,'healthy');this.setOv(a.id+'-up',true);this.toast('ok',`${a.name} updated to ${a.next} and healthy`);}
+        else if(bad)this.toast('fail','Check failed: drive not detected. Next automatic retry in 5 min.');
+        else this.toast('ok','Check passed. Drive mounted at /mnt/media.');
+        return;}
+      this.setState({dialog:{...cur,step:cur.step+1}});},1100);}
+  renderVals(){
+    const p=this.props,s=this.state;
+    const mobile=(p.device??'mobile')==='mobile',remote=(p.access??'tailnet')==='remote',bad=(p.scenario??'normal')==='bad';
+    const mode=p.state??'live';const clean=mode==='clean'&&!bad,loading=mode==='loading',backendDown=mode==='backend',offline=mode==='offline',sabDown=mode==='sab';
+    const rehearsal=!!p.rehearsal;const btnH=mobile?44:32;const go=(sc,id)=>()=>this.go(sc,id);
+    const paused=backendDown?'Backend unreachable. Actions are paused':null;
+    const btn=(label,icon,fn,o={})=>{const dis=!!o.why;return{label,icon:dis&&o.lock?'ph-lock-simple':icon,go:dis?undefined:fn,dis,why:o.why||'',color:dis?'var(--disabled)':o.primary?'var(--accent-text)':'var(--text-2)',border:dis?'var(--border)':o.primary?'var(--accent-border)':'var(--border)',bg:o.primary&&!dis?'var(--tint-btn)':'transparent',cursor:dis?'not-allowed':'pointer'};};
+    const tailnetOnly='Only available on the tailnet';
+    // apps
+    const apps=APPS.map(a=>{let st=bad&&a.gated?'held':'healthy';if(s.ov[a.id])st=s.ov[a.id];if(bad&&a.gated&&st!=='held'&&s.ov[a.id]==='healthy')st='held';
+      const m=AS[st];const held=st==='held',stopped=st==='stopped',busy=st==='starting'||st==='updating';
+      const up=held||stopped?'—':bad?'4h 12m':a.id==='sabnzbd'?'1d 2h':'3d 8h';const restarts=a.id==='sabnzbd'?1:0;
+      const heldWhy=held?'Held by the boot gate until the drive is back':null;
+      const actions=[a.path?btn('Open','ph-arrow-square-out',()=>this.toast('info',`Opening ${a.path} in a new tab`,'ph-arrow-square-out')):null,
+        btn('Restart','ph-arrow-clockwise',()=>this.restart(a),{why:paused||heldWhy||(stopped?'Stopped. Start it instead':null)||(busy?'Busy':null)}),
+        stopped?btn('Start','ph-play',()=>this.setState({dialog:{kind:'start',id:a.id,phase:'confirm'}}),{why:paused}):btn('Stop','ph-stop',()=>this.setState({dialog:{kind:'stop',id:a.id,phase:'confirm'}}),{why:paused||heldWhy||(a.id==='dashboard'?"The dashboard can't stop itself":null)||(busy?'Busy':null)}),
+        btn('Logs','ph-scroll',go('app',a.id)),
+        a.next&&st!=='updating'&&!s.ov[a.id+'-up']?btn(`Update to ${a.next}`,'ph-arrow-circle-up',()=>this.setState({dialog:{kind:'update',id:a.id,phase:'confirm'}}),{primary:true,lock:remote,why:remote?tailnetOnly:paused||heldWhy}):null].filter(Boolean);
+      const note=held?'Held by the boot gate until the media drive is back.':(remote&&a.next?'Update is only available on the tailnet.':'');
+      return{...a,st,chip:chip(m[0],m[1],m[2]),spin:busy?'spin 1s linear infinite':'none',up,restarts,restartsLabel:`${restarts} restart${restarts===1?'':'s'}`,tag:`${a.image}:${a.ver}`,hasNext:!!a.next&&!s.ov[a.id+'-up'],actions,note,hasNote:!!note,open:go('app',a.id)};});
+    const healthyN=apps.filter(a=>a.st==='healthy').length,heldN=apps.filter(a=>a.st==='held').length,stoppedN=apps.filter(a=>a.st==='stopped').length;
+    const appsSum={big:`${healthyN} / 9 healthy`,sub:heldN?`${heldN} held by the gate`:stoppedN?`${stoppedN} stopped on purpose`:'All containers up'};
+    // gate
+    const mmss=`${Math.floor(s.cd/60)}:${String(s.cd%60).padStart(2,'0')}`;
+    const gate=bad?{chip:chip('fail','failed'),line:'Media drive missing since 02:41. Apps stopped. Retrying every 5 min.',nextIcon:'ph-timer',nextLabel:'Next automatic retry',next:mmss,facts:[{k:'Mounted',v:'no'},{k:'Attempts',v:'3 + retries'},{k:'Apps held',v:String(heldN)}]}
+      :{chip:chip('ok','ok'),line:'Drive found, checked and mounted at boot (Oct 21 06:01). Apps released.',nextIcon:'ph-power',nextLabel:'Next check',next:'next boot',facts:[{k:'Mounted',v:'/mnt/media'},{k:'Last fsck',v:'clean'},{k:'Boot',v:'a91f'}]};
+    const rerun=btn('Re-run','ph-arrow-clockwise',()=>this.setState({dialog:{kind:'rerun',phase:'confirm'}}),{primary:true,lock:remote,why:remote?tailnetOnly:paused});
+    // drive
+    const pct=clean?0.4:34;const drive={pct,barC:pct>=90?'var(--warn)':'var(--accent)',freeLabel:clean?'3.98 TB free':bad?'2.64 TB free*':'2.64 TB free',
+      forecastShort:clean?'No media yet':bad?'Last known · drive offline':'Full in ~63 weeks',
+      forecastLong:clean?'Not enough data yet':'Full around Jan 6, 2028 (~63 weeks)',usedLine:clean?'16 GB used of 4.0 TB':`1.36 TB used of 4.0 TB (34%) · +6 GB a day${bad?' · last sample Oct 23':''}`,
+      hasChart:!clean,noChart:clean,
+      split:clean?[{k:'TV',v:'0 GB',w:0,c:'var(--accent-bright)'},{k:'Movies',v:'0 GB',w:0,c:'var(--accent)'},{k:'Downloads',v:'16 GB',w:100,c:'var(--accent-border)'}]
+        :[{k:'TV',v:'812 GB',w:59.7,c:'var(--accent-bright)'},{k:'Movies',v:'486 GB',w:35.7,c:'var(--accent)'},{k:'Downloads',v:'62 GB',w:4.6,c:'var(--accent-border)'}]};
+    const X=d=>((d+60)/510*600).toFixed(1),Y=v=>(180-v*1.8).toFixed(1);const pts=[];for(let d=-60;d<=0;d++)pts.push(`${X(d)},${Y(25+0.15*(d+60)+Math.sin(d*1.7)*0.35)}`);
+    const ch={used:pts.join(' '),area:`${X(-60)},180 ${pts.join(' ')} ${X(0)},180`,proj:`${X(0)},${Y(34)} ${X(440)},${Y(100)}`,y90:Y(90),y97:Y(97),l90:+Y(90)-2,l97:+Y(97)-13,todayX:X(0),todayPct:(60/510*100).toFixed(1),d90:'Nov 27',d97:'Dec 27',start:'Aug 25',full:'Jan 28'};
+    // history
+    const older=[{boot:'77b0',started:'Oct 20 03:16',rows:[ev('03:21:40','retry-pass','Mounted on retry 2 after power-cycle','300'),ev('03:16:38','powercycle','USB port 2 power-cycled','30'),ev('03:16:02','fail','sdb not present after 30 s','30')]},{boot:'5a12',started:'Oct 12 06:00',rows:[ev('06:01:10','pass','fsck clean, mounted','0'),ev('06:00:48','repair','fsck fixed 2 errors on sdb1','0')]}];
+    const history=clean?[{boot:'a91f',started:'Oct 21 06:00',current:true,rows:[ev('06:01:22','pass','fsck clean, mounted','0')]}]
+      :bad?[{boot:'4e1c',started:'Oct 24 02:35',current:true,rows:[ev('02:41:03','fail','Gave up after 3 attempts. Holding Docker, retrying every 5 min','—'),ev('02:39:48','fail','sdb detected, fsck exit 4 (uncorrected errors)','0'),ev('02:38:16','powercycle','USB port 2 power-cycled','30'),ev('02:36:41','fail','sdb not present after 90 s','90')]},{boot:'a91f',started:'Oct 21 06:00',rows:[ev('Oct 24 02:31','media-lost','/mnt/media dropped: I/O errors on sdb. Host rebooting','—'),ev('Oct 21 06:01','pass','fsck clean, mounted','0')]},...older]
+      :[{boot:'a91f',started:'Oct 21 06:00',current:true,rows:[ev('06:01:22','pass','fsck clean, mounted','0')]},...older];
+    // host / backups / uptime
+    const host={rows:[{k:'Load',v:bad?'0.21 0.30 0.62':'0.42 0.38 0.35'},{k:'RAM',v:bad?'2.2 / 15.5 GB':'5.1 / 15.5 GB'},{k:'Root disk',v:'41%'},{k:'Uptime',v:bad?'4h 12m':'3d 8h'}],reboot:bad};
+    const backup={nightly:bad?'Nightly OK · 1 d ago':'Nightly OK · 3 h ago',size:bad?'Oct 23 03:10 · 18.3 GB':'03:12 today · 18.4 GB',pull:'Pulled to PC · yesterday 21:40'};
+    const dayC=(st)=>st==='down'?'var(--fail)':st==='part'?'var(--warn)':'var(--ok)';
+    const dstates=Array.from({length:30},(_,i)=>i===4?'part':i===25?'part':(bad&&i===29)?'part':'up');
+    const uptime={box:bad?'99.94%':'99.95%',days:dstates.map((d,i)=>({c:dayC(d),tip:d==='up'?'100% up':'Short outage'})),
+      downs:[...(bad?[{t:'Oct 24 02:33',why:'Reboot after media drive dropped',dur:'3 m'}]:[]),{t:'Oct 20 03:12',why:'Power-cycle reboot',dur:'4 m'},{t:'Sep 29 03:10',why:'Power cut',dur:'14 m'}]};
+    const months=['May','Jun','Jul','Aug','Sep','Oct'];
+    const cell=v=>({v:v>=100?'100':v.toFixed(1),bg:v>=99.9?'rgba(108,199,154,0.30)':v>=99?'var(--ok-bg)':v>=97?'var(--warn-bg)':'var(--fail-bg)',c:v>=99?'var(--ok)':v>=97?'var(--warn)':'var(--fail)'});
+    const heat=APPS.map((a,i)=>({name:a.name,cells:(a.gated?[100,99.4,100,98.6,99.5,bad?98.1:99.7]:[100,100,100,99.9,100,100]).map(v=>cell(i===5&&v<100?v-0.4:v))}));
+    const fcounts=[0,1,0,2,1,bad?2:1];const fails=fcounts.map((n,i)=>({n,m:months[i],h:Math.max(n*34,2),c:n?'var(--fail)':'var(--border)'}));
+    // media
+    const playing=bad||clean?[]:[{title:'Arrival (2016)',user:'Guest 1',device:'Living room TV',pct:62,time:'1:13:20 / 1:56:00',mode:chip('ok','Direct play','ph-lightning')}];
+    const dl={ok:!sabDown&&!bad&&!clean,err:sabDown&&!bad,speed:'38.2 MB/s',items:sabDown||bad||clean?[]:[{name:'Show.S02E05.1080p.WEB',pct:72,eta:'2 min',c:'var(--accent)'},{name:'Show.S02E06.1080p.WEB',pct:12,eta:'6 min',c:'var(--accent)'},{name:'Film.2019.2160p.BluRay',pct:0,eta:'queued',c:'var(--accent)'}]};
+    dl.empty=!dl.err&&!dl.items.length;dl.emptyText=bad?'SABnzbd is held by the gate. Queue resumes when the drive is back.':'Queue is empty.';
+    const requests=clean?[]:[{title:'Dune: Part Two (2024)',by:'Guest 1',when:'2 h ago'},{title:'Shōgun · Season 1',by:'Guest 2',when:'yesterday'}];
+    const mh=bad?[['Indexer A',chip('ok','OK')],['Indexer B',chip('warn','912 / 1000 API calls today')],['Indexer C',chip('fail','Failing since 11:02 · HTTP 503')],['Download client reachable',chip('idle','Held by gate')],['Library folders present',chip('fail','Missing: drive offline')],['Usenet login',chip('ok','OK')]]
+      :[['Indexer A',chip('ok','OK')],['Indexer B',chip('warn','912 / 1000 API calls today')],['Indexer C',chip('ok','OK')],['Download client reachable',sabDown?chip('fail','Not answering'):chip('ok','OK')],['Library folders present',chip('ok','OK')],['Usenet login',chip('ok','OK')]];
+    const daysTo=iso=>Math.round((new Date(iso+'T12:00:00')-TODAY)/864e5);
+    const fmt=iso=>new Date(iso+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+    const subs=[['a','Indexer A'],['b','Indexer B'],['u','Usenet provider']].map(([key,k])=>{const n=daysTo(s.exp[key]);return{k,iso:s.exp[key],date:fmt(s.exp[key]),left:n<0?'expired':n===0?'today':`${n} days`,c:n<=7?'var(--fail)':n<=30?'var(--warn)':'var(--text-2)',set:e=>{const v=e.target.value;if(v)this.setState(st=>({exp:{...st.exp,[key]:v}}));}};});
+    // alerts
+    const A=(title,body,tag,ts,state)=>({title,body,tag,ts,chip:state==='active'?chip('fail','Active','ph-bell-ringing'):state==='info'?chip('info','Info','ph-info'):chip('ok','Resolved','ph-check-circle')});
+    const alerts=clean?[]:[...(bad?[A('Media drive failed','Gate gave up after a power-cycle. 5 apps held. Retrying every 5 min.','drive','Oct 24 02:41','active'),A('Media drive lost','/mnt/media dropped with I/O errors. Host rebooting.','drive','Oct 24 02:31','active'),A('Reboot needed','Kernel and libc updates are waiting.','host','Oct 23 18:05','info')]:[]),
+      A('Media drive back','Mounted on retry 2. Apps released.','drive','Oct 20 03:21','resolved'),A('Media drive lost','/mnt/media dropped. Gate holding Docker.','drive','Oct 20 03:12','resolved'),A('Test push','Sent from the dashboard.','test','Oct 19 20:04','info')];
+    const devAll=clean?(s.subbed?[{id:'me',label:'iPhone',added:'today',icon:'ph-device-mobile',me:true}]:[]):[{id:'me',label:'iPhone',added:'Sep 30 2026',icon:'ph-device-mobile',me:true},{id:'mac',label:'MacBook · Safari',added:'Oct 2 2026',icon:'ph-laptop'},{id:'ipad',label:'iPad',added:'Oct 5 2026',icon:'ph-device-tablet',test:true}];
+    const devices=devAll.filter(d=>!s.removed[d.id]).map(d=>({...d,test:!!d.test,me:!!d.me,remove:()=>this.setState({dialog:{kind:'remove',id:d.id,label:d.label,phase:'confirm'}})}));
+    const testN=rehearsal?devices.filter(d=>d.test).length:devices.length;
+    // dialog
+    const D=s.dialog;let dlg=null;
+    if(D){const a=APPS.find(x=>x.id===D.id)||{};const M={
+      stop:{icon:'ph-stop-circle',k:'warn',title:`Stop ${a.name}?`,body:`${a.name} stays stopped until you start it again. It shows as “stopped on purpose” and won't raise alerts.`,confirm:'Stop'},
+      start:{icon:'ph-play-circle',k:'info',title:`Start ${a.name}?`,body:`Starts the container on its pinned image (${a.image}:${a.ver}).`,confirm:'Start'},
+      update:{icon:'ph-arrow-circle-up',k:'info',title:`Update ${a.name} to ${a.next}?`,body:`Pulls ${a.image}:${a.next}, recreates the container and waits for its health check. ${a.name} is down for about a minute.`,confirm:'Update'},
+      rerun:{icon:'ph-hard-drive',k:'warn',title:'Re-run the media-drive check?',body:'Runs the boot gate now: detect the drive, power-cycle if needed, fsck, mount. Apps stay held until it passes.',confirm:'Run check'},
+      remove:{icon:'ph-bell-slash',k:'fail',title:`Remove ${D.label||''}?`,body:'This device stops getting pushes. You can subscribe it again later.',confirm:'Remove'}}[D.kind];
+      const labels=D.kind==='update'?['Pulling image','Recreating container','Waiting for health check']:['Detecting drive','Checking filesystem','Mounting /mnt/media'];
+      const prog=D.phase==='progress';
+      dlg={...M,c:ST[M.k][0],bg:ST[M.k][1],progress:prog,confirming:!prog,title:prog?(D.kind==='update'?`Updating ${a.name}…`:'Running the check…'):M.title,
+        steps:labels.map((l,i)=>({label:l,i:i<D.step?'ph-check-circle':i===D.step?'ph-circle-notch':'ph-circle',spin:i===D.step?'spin 1s linear infinite':'none',c:i<D.step?'var(--ok)':i===D.step?'var(--text)':'var(--muted)'}))};}
+    // nav
+    const screen=s.screen;
+    const dots={drive:bad?'var(--fail)':null,media:bad||sabDown?'var(--warn)':null,alerts:bad?'var(--fail)':null};
+    const nav=(id,label,icon,dot,act)=>{const active=act?act.includes(screen):screen===id;return{id,label,icon,go:go(id),hasDot:!!dot,dot,active,bg:active?'var(--tint-active)':'transparent',color:active?'var(--accent-pale)':'var(--text-2)',weight:active?'ph-fill':'ph'};};
+    const sideNav=[nav('overview','Overview','ph-gauge'),nav('apps','Apps','ph-squares-four',null,['apps','app']),nav('drive','Drive & Gate','ph-hard-drive',dots.drive),nav('media','Media','ph-film-strip',dots.media),nav('alerts','Alerts','ph-bell',dots.alerts),nav('uptime','Uptime','ph-pulse'),nav('settings','Settings','ph-gear-six')];
+    const tabs=[nav('overview','Overview','ph-gauge'),nav('apps','Apps','ph-squares-four',null,['apps','app']),nav('media','Media','ph-film-strip',dots.media),nav('alerts','Alerts','ph-bell',dots.alerts),nav('more','More','ph-dots-three-outline',dots.drive,['more','drive','uptime','settings'])];
+    const moreNav=[nav('drive','Drive & Gate','ph-hard-drive',dots.drive),nav('uptime','Uptime & drills','ph-pulse'),nav('settings','Settings & about','ph-gear-six')];
+    const curApp=apps.find(a=>a.id===s.appId)||apps[0];
+    const titles={overview:'Overview',apps:'Apps',app:curApp.name,drive:'Drive & Gate',media:'Media',alerts:'Alerts',uptime:'Uptime & drills',settings:'Settings',more:'More'};
+    const parent={app:'apps',drive:mobile?'more':null,uptime:mobile?'more':null,settings:mobile?'more':null}[screen];
+    // logs
+    const base=[['06:00:12','INF',`Starting ${curApp.name} ${curApp.ver}`],['06:00:13','INF','Loaded configuration from /config'],['06:00:14','INF','Listening on :8080'],['06:00:15','DBG','Health endpoint ready'],['06:12:40','INF','Task "Refresh library" started'],['06:14:02','INF','Task "Refresh library" finished in 82 s'],['09:31:55','WRN','Slow response from upstream (2.4 s)'],['11:02:10','ERR','Indexer C request failed: HTTP 503'],['11:02:11','INF','Retrying in 60 s'],['11:03:12','INF','Indexer C request OK'],['13:58:30','DBG','RSS sync: 14 releases, 0 grabbed'],['14:13:30','DBG','RSS sync: 9 releases, 1 grabbed']];
+    for(let i=0;i<s.extra;i++){const m=20+i;base.push([`14:${String(m%60).padStart(2,'0')}:${String((i*17)%60).padStart(2,'0')}`,i%7===3?'WRN':'INF',i%7===3?'Queue item stalled for 30 s':'GET /api/v3/health 200 4ms']);}
+    const LC={INF:'var(--text-2)',DBG:'var(--muted)',WRN:'var(--warn)',ERR:'var(--fail)'};
+    const ql=s.q.trim().toLowerCase();
+    const logs=base.filter(l=>!ql||l.join(' ').toLowerCase().includes(ql)).map(([t,lv,m])=>({t,lv,m,c:LC[lv]}));
+    const shown=s.follow?logs.slice(-40):logs;
+    const app={...curApp,facts:[{k:'Status',v:curApp.chip.label},{k:'Uptime',v:curApp.up},{k:'Restarts',v:String(curApp.restarts)},{k:'Health check',v:curApp.st==='healthy'?'passing · 30 s':'—'},{k:'Image',v:curApp.tag},{k:'Started',v:bad?'Oct 24 02:37':'Oct 21 06:02'}]};
+    // overview banner
+    const issues=[];if(bad){issues.push({i:'ph-x-circle',c:'var(--fail)',text:'Media drive failed after a power-cycle. 5 apps held.',go:go('drive')});issues.push({i:'ph-warning',c:'var(--warn)',text:'Indexer C failing since 11:02 (HTTP 503)',go:go('media')});}
+    if(sabDown)issues.push({i:'ph-warning',c:'var(--warn)',text:"SABnzbd's API isn't answering",go:go('media')});
+    const banner=issues.length?{...(bad?{c:'var(--fail)',bg:'var(--fail-bg)',i:'ph-warning-octagon'}:{c:'var(--warn)',bg:'var(--warn-bg)',i:'ph-warning'}),title:`${issues.length} issue${issues.length>1?'s':''}`,sub:'Tap one to see the cause',issues}
+      :{c:'var(--ok)',bg:'var(--ok-bg)',i:'ph-check',title:'All systems normal',sub:clean?'9 apps healthy · drive empty · first backup tonight':'9 apps healthy · drive 34% · backup 3 h ago',issues:[]};
+    if(clean){backup.nightly='No backup yet';backup.size='First nightly run at 03:00';backup.pull='Not pulled to the PC yet';}
+    const stamp=bad?'02:41':'14:08';
+    const live=loading?{c:'var(--info)',label:'Connecting',ago:''}:backendDown?{c:'var(--warn)',label:'Stale',ago:`· updated ${stamp}`}:{c:'var(--ok)',label:'Live',ago:`· ${s.ago} s ago`};
+    const acc=remote?{label:'Remote',i:'ph-globe-simple',c:'var(--warn)',bg:'var(--warn-bg)',b:'rgba(228,179,99,0.35)',why:'Through Cloudflare Access. Update and Re-run gate are tailnet only.'}:{label:'Tailnet',i:'ph-shield-check',c:'var(--accent-text)',bg:'var(--tint-btn)',b:'var(--accent-border)',why:'Full access'};
+    const off={line:bad?'Last known state at 02:41: media drive failed.':'Last known state at 14:08: all systems normal.',rows:bad?[{k:'Boot gate',v:'failed',chip:chip('fail','')},{k:'Apps',v:'4 running · 5 held',chip:chip('idle','')},{k:'Last backup',v:'Oct 23 03:10',chip:chip('ok','')}]:[{k:'Boot gate',v:'ok',chip:chip('ok','')},{k:'Apps',v:'9 / 9 healthy',chip:chip('ok','')},{k:'Last backup',v:'today 03:12',chip:chip('ok','')}]};
+    const T=s.toast?{...ST[s.toast.k]&&{c:ST[s.toast.k][0]},i:s.toast.i||ST[s.toast.k][2],text:s.toast.text}:{};
+    const show=x=>!loading&&screen===x;
+    const fW=mobile?390:1440,fH=mobile?844:900;const fitS=Math.min(1,((s.vw||1600)-56)/fW,mobile?1:((s.vh||1000)-56)/fH);
+    return {
+      fitS,fitW:Math.round(fW*fitS),fitH:Math.round(fH*fitS),
+      isMobile:mobile,isDesktop:!mobile,frameW:mobile?390:1440,frameH:mobile?844:900,frameR:mobile?44:12,btnH,pad:mobile?14:24,headPad:mobile?'8px 16px 12px':'16px 24px',titleSize:mobile?26:22,logH:mobile?360:520,
+      clock:bad?'6:47':'2:20',histCols:mobile?'auto auto 1fr':'92px 130px 1fr 48px',detailCol:mobile?'1 / -1':'auto',
+      sideNav,tabs,moreNav,title:titles[screen],showBack:!!parent,back:go(parent||'overview'),
+      sOverview:show('overview'),sApps:show('apps'),sApp:show('app'),sDrive:show('drive'),sMedia:show('media'),sAlerts:show('alerts'),sUptime:show('uptime'),sSettings:show('settings'),sMore:show('more'),
+      loading,backendDown,offline,rehearsal,stamp,live,acc,five:[1,2,3,4,5],
+      banner,gate,rerun,drive,ch,history,host,backup,uptime,appsSum,apps,app,months,heat,fails,
+      toDrive:go('drive'),toApps:go('apps'),toUptime:go('uptime'),toMedia:go('media'),
+      playing,hasPlaying:playing.length>0,mobilePlaying:mobile&&playing.length>0,toAlerts:go('alerts'),recentAlerts:alerts.slice(0,4),
+      dlSummary:dl.err?'not answering':bad?'held':dl.items.length?`${dl.items.length} items · ${dl.speed}`:'empty',
+      mhSummary:mh.some(([,c])=>c.c==='var(--fail)')?{c:'var(--fail)',label:`${mh.filter(([,c])=>c.c==='var(--fail)').length} failing`}:mh.some(([,c])=>c.c==='var(--warn)')?{c:'var(--warn)',label:'1 near limit'}:{c:'var(--ok)',label:'All OK'},noPlaying:!playing.length,noPlayingText:bad?'Jellyfin is held by the gate.':clean?'Nothing has been played yet.':'Nothing playing right now.',
+      dl,requests,reqCount:requests.length,noRequests:!requests.length,mhealth:mh.map(([k,c])=>({k,chip:c})),subs,
+      retrySab:()=>this.toast('fail','Still no answer from SABnzbd (timeout 5 s)'),
+      alerts,noAlerts:!alerts.length,devices,noDevices:!devices.length,devCount:`${devices.length} subscribed`,showInstallHint:clean&&!s.subbed,canSubscribe:!devices.some(d=>d.me),
+      subscribe:()=>{this.setState(st=>({subbed:true,removed:{...st.removed,me:false}}));this.toast('ok','This iPhone will get alerts');},
+      actionsPaused:!!paused,testDis:!devices.length||!!paused,testOp:!devices.length||paused?0.45:1,
+      testLine:devices.length?`Sends a push to ${testN} device${testN===1?'':'s'}${rehearsal?' (test devices only)':''}.`:'Subscribe a device first.',
+      testPush:()=>this.toast('ok',`Test push sent to ${testN} device${testN===1?'':'s'}`,'ph-paper-plane-tilt'),
+      thresholds:[{label:'Disk warning at',unit:'% used',value:s.disk,set:e=>this.setState({disk:e.target.value})},{label:'Backup max age',unit:'hours',value:s.backupAge,set:e=>this.setState({backupAge:e.target.value})}],
+      runbooks:["Media drive won't mount",'Restore from backup','Replace the media drive','Rotate push keys'],
+      q:s.q,onQ:e=>this.setState({q:e.target.value}),logs:shown,noLogs:!logs.length,logCount:`${logs.length} lines${ql?' match':''}`,
+      follow:s.follow?{label:'Pause',i:'ph-pause',b:'var(--accent-border)',bg:'var(--tint-btn)',c:'var(--accent-text)',status:'Following live'}:{label:'Follow',i:'ph-play',b:'var(--border)',bg:'transparent',c:'var(--text-2)',status:'Paused'},
+      toggleFollow:()=>this.setState(st=>({follow:!st.follow})),copyLogs:()=>this.toast('ok',`Copied ${logs.length} lines`,'ph-copy'),
+      hasDialog:!!dlg,dlg:dlg||{steps:[]},closeDlg:()=>this.setState({dialog:null}),confirmDlg:()=>this.confirm(),
+      dlgAlign:mobile?'flex-end':'center',dlgPad:mobile?'0':'24px',dlgBottom:mobile?40:20,
+      hasToast:!!s.toast,toast:T,toastBottom:mobile?104:24,
+      off,offPad:mobile?'72px 20px 40px':'72px 64px',retryOffline:()=>this.toast('fail','Still unreachable')
+    };
+  }
+}
+</script>
+</body>
+</html>

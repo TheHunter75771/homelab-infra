@@ -3,7 +3,7 @@
 
   homelab-notify --title T --body B [--tag TAG] [--test]
 
-Reads the push store written by push-core (Contract 4):
+Reads the push store written by the dashboard, formerly push-core (Contract 4):
   <push_dir>/vapid.json          {"publicKey", "privateKey" (raw P-256, base64url), "subject"}
   <push_dir>/subscriptions.json  [{"endpoint", "keys": {"p256dh", "auth"}, "label", "created"}]
 Payload sent to each device: {"title", "body", "tag", "url": "/"}.
@@ -11,16 +11,27 @@ Payload sent to each device: {"title", "body", "tag", "url": "/"}.
 Exit codes: 0 = delivered to at least one device (or suppressed as a duplicate),
             2 = no subscriptions to send to, 1 = error / nothing delivered.
 
---tag      dedupe: the same tag + title is not resent within 30 min (state in
-           /var/lib/homelab-notify/). The tag also travels in the payload, so a phone can
-           replace an older notification with the same tag.
+--tag      dedupe: the same tag + title (as sent) is not resent within 30 min (state in
+           /var/lib/homelab-notify/, 0600). A DIFFERENT title on a tag clears that tag's
+           entries (CONTRACTS §4, amended), so lost -> back -> lost pushes and records the
+           second loss. The clear and the new entry are one atomic state write. The tag also
+           travels in the payload, so a phone can replace an older notification with it.
 --test     send only to subscriptions labelled "test".
 Rehearsal: while /etc/homelab/rehearsal exists, titles get a "[REHEARSAL] " prefix and only
            subscriptions labelled "test" receive anything.
-Dead subscriptions (HTTP 404/410): push-core is the ONLY writer of subscriptions.json, so this
-tool never writes it. It asks push-core to drop them (POST <pushcore_url>/api/unsubscribe,
-loopback only, 3 s timeout). Best-effort: if push-core is down (e.g. the boot gate holds
-Docker), pruning is skipped silently and the next push that hits the endpoint tries again.
+Dead subscriptions (HTTP 404/410): the dashboard (formerly push-core) is the ONLY writer of
+subscriptions.json, so this tool never writes it. It asks the dashboard to drop them
+(POST <pushcore_url>/api/unsubscribe, loopback only, 3 s timeout). The dashboard runs outside
+Docker (ADR 0013), so this works while the boot gate holds Docker. Best-effort: if the
+dashboard is down, pruning is skipped silently and the next push to the endpoint tries again.
+
+History: every send is appended to /var/lib/homelab-notify/history.jsonl (0644, read by the
+dashboard) as {"ts", "title", "body", "tag", "delivered", "failed"}: the title exactly as sent
+(with the rehearsal prefix), delivered/failed = device counts (a dead 404/410 device counts
+as failed). Sends that reach nobody are recorded too (0/0). Dedupe-suppressed sends are not.
+Never any endpoint or key. Entries older than 90 days are trimmed on write (only the first
+line is checked, so a normal append stays O(1)); a size cap bounds an alert storm.
+The dedupe state in the same directory stays private (0600).
 
 Logs go to journald under the identifier homelab-notify (and to stderr). URLs and control
 characters are stripped from every log line (push endpoints are capability URLs).
@@ -41,6 +52,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable
+from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 EXIT_OK, EXIT_ERROR, EXIT_NO_SUBSCRIPTIONS = 0, 1, 2
@@ -58,7 +70,11 @@ DEFAULTS = {
     "default_subject": "mailto:admin@localhost",
     "pushcore_url": "http://127.0.0.1:8085",
     "pushcore_timeout_seconds": 3,
+    "history_days": 90,
+    "history_max_bytes": 2 * 1024 * 1024,
 }
+HISTORY_FILE = "history.jsonl"
+HISTORY_MODE = 0o644
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]+")
@@ -68,7 +84,8 @@ Unsubscriber = Callable[[str], "int | None"]
 
 
 def sanitize_text(text: object, max_len: int | None = 160) -> str:
-    """Same rule as push-core's sanitizeText(): URLs -> <url>, control chars -> space, cap length."""
+    """Same rule as the dashboard's sanitizeText() (apps/dashboard/server/src/log.js):
+    URLs -> <url>, control chars -> space, cap length."""
     clean = _CTRL_RE.sub(" ", _URL_RE.sub("<url>", str(text))).strip()
     return clean[:max_len] + "…" if max_len and len(clean) > max_len else clean
 
@@ -133,6 +150,17 @@ def dedupe_key(tag: str, title: str) -> str:
     return f"{tag}\x1f{title}"
 
 
+def clear_tag(state: dict, tag: str, title: str) -> list[str]:
+    """CONTRACTS §4 (amended): a different title on a tag ends that tag's earlier alerts, so
+    drop their dedupe entries (in place). Other tags and this exact title are untouched.
+    Returns the removed keys."""
+    keep = dedupe_key(tag, title)
+    stale = [k for k in state if k != keep and k.partition("\x1f")[0] == tag]
+    for k in stale:
+        del state[k]
+    return stale
+
+
 def prune_dedupe(state: dict, now: float, window: float) -> dict:
     return {k: v for k, v in state.items() if isinstance(v, int | float) and now - v < window}
 
@@ -143,7 +171,8 @@ def is_duplicate(state: dict, key: str, now: float, window: float) -> bool:
 
 
 def build_payload(title: str, body: str, tag: str | None) -> str:
-    """The push payload contract shared with push-core's service worker. Exactly these keys.
+    """The push payload contract shared with the dashboard's (formerly push-core's) service
+    worker. Exactly these keys.
     Rehearsal is visible in the title prefix."""
     return json.dumps({"title": title, "body": body, "tag": tag, "url": "/"})
 
@@ -164,7 +193,7 @@ def send_all(targets: list[dict], payload: str, sender: Sender, log: Logger) -> 
             delivered += 1
         elif status in DEAD_STATUSES:
             dead.add(sub["endpoint"])
-            log(f"subscription {label} is gone (HTTP {status}); asking push-core to drop it", "warn")
+            log(f"subscription {label} is gone (HTTP {status}); asking the dashboard to drop it", "warn")
         else:
             failed += 1
             log(f"push to {label} rejected: HTTP {status}", "warn")
@@ -181,8 +210,8 @@ def read_json(path: str, default):
 
 
 def prune_dead(dead: set[str], unsubscribe: Unsubscriber, log: Logger) -> int:
-    """Ask push-core to drop dead subscriptions; returns how many it accepted. Stops quietly at
-    the first sign that push-core is unreachable (unsubscribe returns None)."""
+    """Ask the dashboard (formerly push-core) to drop dead subscriptions; returns how many it
+    accepted. Stops quietly at the first sign that it is unreachable (unsubscribe returns None)."""
     removed = 0
     for endpoint in sorted(dead):
         status = unsubscribe(endpoint)
@@ -191,15 +220,16 @@ def prune_dead(dead: set[str], unsubscribe: Unsubscriber, log: Logger) -> int:
         if 200 <= status < 300:
             removed += 1
         else:
-            log(f"push-core refused to unsubscribe a dead subscription (HTTP {status})", "warn")
+            log(f"the dashboard refused to unsubscribe a dead subscription (HTTP {status})", "warn")
     if removed:
-        log(f"push-core dropped {removed} dead subscription(s)")
+        log(f"the dashboard dropped {removed} dead subscription(s)")
     return removed
 
 
 def make_pushcore_unsubscriber(base_url: str, timeout: float) -> Unsubscriber | None:
-    """POST {"endpoint": ...} to push-core's /api/unsubscribe with its CSRF header. Loopback only,
-    never through a proxy. Returns the HTTP status, or None when push-core can't be reached."""
+    """POST {"endpoint": ...} to the dashboard's (formerly push-core's) /api/unsubscribe with its
+    CSRF header. Loopback only, never through a proxy. Returns the HTTP status, or None when the
+    dashboard can't be reached. (The name and the pushcore_url config key are kept as-is.)"""
     parsed = urlparse(base_url)
     if parsed.scheme != "http" or parsed.hostname not in LOOPBACK_HOSTS:
         return None
@@ -220,7 +250,7 @@ def make_pushcore_unsubscriber(base_url: str, timeout: float) -> Unsubscriber | 
             exc.close()
             return int(exc.code)
         except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError):
-            return None  # refused / timed out / reset: push-core is down, skip silently
+            return None  # refused / timed out / reset: the dashboard is down, skip silently
 
     return unsubscribe
 
@@ -234,6 +264,71 @@ def state_lock(state_dir: str):
         yield
     finally:
         os.close(fd)
+
+
+def history_entry(now: float, title: str, body: str, *, tag: str | None, delivered: int, failed: int) -> dict:
+    """One line of history.jsonl (CONTRACTS §11.5). Exactly these keys; never an endpoint."""
+    return {
+        "ts": datetime.fromtimestamp(now, UTC).isoformat(timespec="seconds"),
+        "title": title,
+        "body": body,
+        "tag": tag,
+        "delivered": int(delivered),
+        "failed": int(failed),
+    }
+
+
+def _entry_time(line: bytes) -> float | None:
+    try:
+        return datetime.fromisoformat(json.loads(line)["ts"]).timestamp()
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def append_history(state_dir: str, entry: dict, now: float, cfg: dict, log: Logger) -> None:
+    """Append one line (0644 whatever the umask), then trim if needed. Called under state_lock.
+    A failure here is logged and never changes the outcome of the push itself."""
+    path = os.path.join(state_dir, HISTORY_FILE)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, HISTORY_MODE)
+        try:
+            os.fchmod(fd, HISTORY_MODE)
+            os.write(fd, (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        trim_history(path, now, float(cfg["history_days"]) * 86400, int(cfg["history_max_bytes"]))
+    except OSError as exc:
+        log(f"could not record the send in {path}: {exc.strerror or type(exc).__name__}", "warn")
+
+
+def trim_history(path: str, now: float, max_age: float, max_bytes: int) -> bool:
+    """Rewrite history.jsonl without entries older than max_age, and within max_bytes (newest
+    kept). Cheap check first: lines are appended in time order, so the file only needs a
+    rewrite when its FIRST line is too old (or unreadable) or the file is over max_bytes."""
+    cutoff = now - max_age
+    with open(path, "rb") as fh:
+        first = fh.readline()
+        size = os.fstat(fh.fileno()).st_size
+    first_time = _entry_time(first) if first else now
+    if size <= max_bytes and first_time is not None and first_time >= cutoff:
+        return False
+    with open(path, "rb") as fh:
+        lines = fh.readlines()
+    keep = [ln for ln in lines if ln.endswith(b"\n") and (_entry_time(ln) or -1.0) >= cutoff]
+    total = sum(len(ln) for ln in keep)
+    while keep and total > max_bytes // 2 and size > max_bytes:  # alert storm: keep the newest half
+        total -= len(keep.pop(0))
+    tmp = f"{path}.tmp.{os.getpid()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, HISTORY_MODE)
+    try:
+        os.fchmod(fd, HISTORY_MODE)
+        os.write(fd, b"".join(keep))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+    return True
 
 
 def save_dedupe(state_dir: str, state: dict) -> None:
@@ -307,26 +402,51 @@ def main(
             log(f"{subs_path} is not a JSON list", "error")
             return EXIT_ERROR
         targets = select_targets(subs, rehearsal=rehearsal, test_only=args.test, test_label=cfg["test_label"])
-        if not targets:
-            scope = " labelled 'test'" if (rehearsal or args.test) else ""
-            log(f"no subscriptions{scope}; nothing sent: {title}", "warn")
-            return EXIT_NO_SUBSCRIPTIONS
 
         with state_lock(cfg["state_dir"]):
+
+            def finish(code: int, delivered: int, failed: int) -> int:
+                entry = history_entry(now, title, args.body, tag=args.tag, delivered=delivered, failed=failed)
+                append_history(cfg["state_dir"], entry, now, cfg, log)
+                return code
+
             window = float(cfg["dedupe_seconds"])
             dedupe_path = os.path.join(cfg["state_dir"], "dedupe.json")
             state = read_json(dedupe_path, {})
             state = prune_dedupe(state if isinstance(state, dict) else {}, now, window)
-            key = dedupe_key(args.tag, args.title) if args.tag else None
+            key = dedupe_key(args.tag, title) if args.tag else None  # the title as sent
             if key and is_duplicate(state, key, now, window):
                 log(f"suppressed duplicate (tag {args.tag}, sent within {window / 60:.0f} min): {title}")
-                return EXIT_OK
+                return EXIT_OK  # not a send: not recorded
+            cleared = clear_tag(state, args.tag, title) if key else []
+            if cleared:
+                log(f"tag {args.tag}: a new title ends its earlier alert(s); their dedupe is cleared")
+
+            def commit(record: bool) -> None:
+                """ONE atomic write of the dedupe state: this tag's cleared entries plus, when the
+                push was delivered, the new entry. A send that reached nobody still clears: it is
+                in the history, so the next alert on the tag must not be suppressed."""
+                if not key or not (record or cleared):
+                    return
+                if record:
+                    state[key] = now
+                try:
+                    save_dedupe(cfg["state_dir"], state)
+                except OSError as exc:
+                    log(f"could not save the dedupe state: {exc.strerror or type(exc).__name__}", "warn")
+
+            if not targets:
+                scope = " labelled 'test'" if (rehearsal or args.test) else ""
+                log(f"no subscriptions{scope}; nothing sent: {title}", "warn")
+                commit(record=False)
+                return finish(EXIT_NO_SUBSCRIPTIONS, 0, 0)
 
             if sender is None:
                 vapid = read_json(os.path.join(cfg["push_dir"], "vapid.json"), None)
                 if not isinstance(vapid, dict) or not vapid.get("privateKey"):
                     log("vapid.json is missing or has no privateKey", "error")
-                    return EXIT_ERROR
+                    commit(record=False)
+                    return finish(EXIT_ERROR, 0, len(targets))
                 sender = make_webpush_sender(vapid, cfg)
 
             payload = build_payload(title, args.body, args.tag)
@@ -340,11 +460,9 @@ def main(
                     log("pushcore_url is not a loopback http URL; dead subscriptions left in place", "error")
                 else:
                     prune_dead(dead, unsubscribe, log)
-            if delivered and key:
-                state[key] = now
-                save_dedupe(cfg["state_dir"], state)
-        log(f"delivered to {delivered}/{len(targets)} device(s), {failed} failed, {len(dead)} gone: {title}")
-        return EXIT_OK if delivered else EXIT_ERROR
+            commit(record=delivered > 0)
+            log(f"delivered to {delivered}/{len(targets)} device(s), {failed} failed, {len(dead)} gone: {title}")
+            return finish(EXIT_OK if delivered else EXIT_ERROR, delivered, len(targets) - delivered)
     except Exception as exc:  # noqa: BLE001
         log(f"error: {type(exc).__name__}: {sanitize_text(exc)}", "error")
         return EXIT_ERROR

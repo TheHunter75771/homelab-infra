@@ -14,6 +14,7 @@ Environment="KEEP={{ backups_keep }}"
 Environment="BACKUP_GROUP={{ backups_group }}"
 Environment="NOTIFY_BIN={{ backups_notify_bin }}"
 Environment="EXCLUDE_DIRS={{ backups_exclude_dirs | join(' ') }}"
+Environment="STATUS_DIR={{ backups_status_dir }}"
 ExecStart=/usr/local/sbin/homelab-backup
 SyslogIdentifier=homelab-backup
 Nice=10

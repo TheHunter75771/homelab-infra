@@ -1,6 +1,6 @@
 ---
-# Build gate for a locally built image (wol-relay, push-core). Imported with:
-#   stacks_li_stack    stack name (utils | push), the key in stacks_local_build
+# Build gate for a locally built image (today: wol-relay in the utils stack). Imported with:
+#   stacks_li_stack    stack name (e.g. utils), the key in stacks_local_build
 #   stacks_li_context  build context directory on the host (already synced)
 #   stacks_li_image    image reference from local_images.*
 # The source hash covers every file in the context (relative path + sha256) plus the base image.

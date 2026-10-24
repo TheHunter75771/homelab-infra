@@ -1,0 +1,136 @@
+---
+# Offline test for role tailscale_serve (no tailscale, no host). Runs the role's own validate.yml,
+# desired.yml and compare.yml against fixtures in the exact shape `tailscale serve status --json` prints.
+#   ansible-playbook -i localhost, -c local roles/tailscale_serve/tests/test_serve_config.yml
+# Fixtures use a dummy node name; nothing here is a real identifier.
+- name: Test tailscale_serve render, drift compare and validation
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    tailscale_serve_role: "{{ playbook_dir | dirname }}"
+    tailnet_fqdn: node.example.ts.net
+    tailscale_serve_node_name: node.example.ts.net
+    tailscale_serve_backend_state: Running
+    fixture_adr0015: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/fixtures/status-adr0015.json') }}"
+    fixture_before: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/fixtures/status-before-adr0015.json') }}"
+    node: node.example.ts.net
+  tasks:
+    - name: Defaults pass validation
+      ansible.builtin.include_role:
+        name: "{{ tailscale_serve_role }}"
+        tasks_from: validate
+
+    - name: Render the declared config
+      ansible.builtin.include_role:
+        name: "{{ tailscale_serve_role }}"
+        tasks_from: desired
+
+    - name: The render has three HTTPS ports and the ADR 0015 layout
+      vars:
+        web: "{{ tailscale_serve_desired.Web }}"
+      ansible.builtin.assert:
+        that:
+          - tailscale_serve_desired.keys() | sort == ['TCP', 'Web']
+          - >-
+            tailscale_serve_desired.TCP == {'443': {'HTTPS': true}, '8443': {'HTTPS': true}, '8444': {'HTTPS': true}}
+          - web.keys() | sort == [node ~ ':443', node ~ ':8443', node ~ ':8444']
+          - >-
+            web[node ~ ':443'] == {'Handlers': {'/': {'Proxy': 'http://127.0.0.1:8085'}}}
+          - >-
+            web[node ~ ':8443'] == {'Handlers': {'/': {'Proxy': 'http://127.0.0.1:5055'}}}
+          - web[node ~ ':8444'].Handlers.keys() | sort == ['/prowlarr', '/radarr', '/sabnzbd', '/sonarr', '/watch']
+          # Serve strips the mount, so no path-based backend may be a bare host:port.
+          - >-
+            web[node ~ ':8444'].Handlers | dict2items
+            | selectattr('value.Proxy', 'match', '^http://127\.0\.0\.1:[0-9]+$') | list | length == 0
+        quiet: true
+
+    - name: Every 8444 backend ends with its own mount (URL base kept)
+      ansible.builtin.assert:
+        that:
+          - item.value.Proxy.endswith(item.key)
+        quiet: true
+      loop: "{{ tailscale_serve_desired.Web[node ~ ':8444'].Handlers | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: Drift compare against status --json shaped inputs
+      ansible.builtin.include_tasks: expect_drift.yml
+      loop:
+        - { name: "exact match (Go key order)", json: "{{ fixture_adr0015 }}", want: false }
+        - name: "exact match, scrambled key order"
+          json: >-
+            {"Web": {"{{ node }}:8444": {"Handlers": {"/watch": {"Proxy": "http://127.0.0.1:8096/watch"},
+            "/sabnzbd": {"Proxy": "http://127.0.0.1:8080/sabnzbd"}, "/sonarr": {"Proxy": "http://127.0.0.1:8989/sonarr"},
+            "/radarr": {"Proxy": "http://127.0.0.1:7878/radarr"}, "/prowlarr": {"Proxy": "http://127.0.0.1:9696/prowlarr"}}},
+            "{{ node }}:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8085"}}},
+            "{{ node }}:8443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:5055"}}}},
+            "TCP": {"8444": {"HTTPS": true}, "443": {"HTTPS": true}, "8443": {"HTTPS": true}}}
+          want: false
+        - { name: "empty serve config", json: "{}", want: true }
+        - { name: "pre-ADR-0015 layout (apps on 443)", json: "{{ fixture_before }}", want: true }
+        - name: "funnel switched on"
+          json: "{{ fixture_adr0015 | from_json | combine({'AllowFunnel': {node ~ ':443': true}}) | to_json }}"
+          want: true
+        - name: "a handler missing on 8444"
+          json: >-
+            {{ fixture_adr0015 | from_json
+               | combine({'Web': (fixture_adr0015 | from_json).Web
+                   | combine({node ~ ':8444': {'Handlers': (fixture_adr0015 | from_json).Web[node ~ ':8444'].Handlers
+                       | dict2items | rejectattr('key', 'equalto', '/sabnzbd') | items2dict}})})
+               | to_json }}
+          want: true
+        - name: "an extra app on the dashboard origin"
+          json: >-
+            {{ fixture_adr0015 | from_json
+               | combine({'Web': {node ~ ':443': {'Handlers': {'/sonarr': {'Proxy': 'http://127.0.0.1:8989/sonarr'}}}}},
+                         recursive=true) | to_json }}
+          want: true
+        - name: "port 8444 not marked HTTPS"
+          json: "{{ fixture_adr0015 | from_json | combine({'TCP': {'443': {'HTTPS': true}, '8443': {'HTTPS': true}}}) | to_json }}"
+          want: true
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+
+    - name: Validation rejects bad handler lists
+      ansible.builtin.include_tasks: expect_invalid.yml
+      loop:
+        - name: "an app on the dashboard port (ADR 0015)"
+          handlers:
+            - { port: 443, mount: /, backend: "http://127.0.0.1:8085" }
+            - { port: 443, mount: /sonarr, backend: "http://127.0.0.1:8989/sonarr" }
+        - name: "dashboard also mounted on an app origin (8444 /dash)"
+          handlers:
+            - { port: 443, mount: /, backend: "http://127.0.0.1:8085" }
+            - { port: 8444, mount: /dash, backend: "http://127.0.0.1:8085" }
+        - name: "dashboard backend with a path on another port"
+          handlers:
+            - { port: 443, mount: /, backend: "http://127.0.0.1:8085" }
+            - { port: 8445, mount: /, backend: "http://127.0.0.1:8085/api" }
+        - name: "dashboard port points elsewhere"
+          handlers:
+            - { port: 443, mount: /, backend: "http://127.0.0.1:8096" }
+        - name: "no dashboard handler"
+          handlers:
+            - { port: 8444, mount: /watch, backend: "http://127.0.0.1:8096/watch" }
+        - name: "duplicate port and mount"
+          handlers:
+            - { port: 443, mount: /, backend: "http://127.0.0.1:8085" }
+            - { port: 8444, mount: /watch, backend: "http://127.0.0.1:8096/watch" }
+            - { port: 8444, mount: /watch, backend: "http://127.0.0.1:8096/watch" }
+        - name: "non-loopback backend"
+          handlers:
+            - { port: 443, mount: /, backend: "http://127.0.0.1:8085" }
+            - { port: 8444, mount: /watch, backend: "http://192.0.2.1:8096/watch" }
+        - name: "port given as a string"
+          handlers:
+            - { port: "443", mount: /, backend: "http://127.0.0.1:8085" }
+        - name: "mount with a trailing slash"
+          handlers:
+            - { port: 443, mount: /, backend: "http://127.0.0.1:8085" }
+            - { port: 8444, mount: /sonarr/, backend: "http://127.0.0.1:8989/sonarr" }
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"

@@ -1,0 +1,41 @@
+---
+# Preconditions, checked before anything is applied. Needs tailscale_serve_backend_state and
+# tailscale_serve_node_name (from main.yml, or set by tests/test_serve_config.yml).
+
+- name: Serve | handler keys (port + mount)
+  ansible.builtin.set_fact:
+    tailscale_serve_keys: >-
+      {{ tailscale_serve_handlers | map(attribute='port') | map('string')
+         | zip(tailscale_serve_handlers | map(attribute='mount')) | map('join', ' ') | list }}
+    tailscale_serve_dashboard_handlers: >-
+      {{ tailscale_serve_handlers | selectattr('port', 'equalto', tailscale_serve_dashboard_port) | list }}
+    # Every handler that proxies to the dashboard, with or without a path (http://127.0.0.1:8085[/...]).
+    tailscale_serve_dashboard_backend_handlers: >-
+      {{ tailscale_serve_handlers
+         | selectattr('backend', 'match', '^' ~ (tailscale_serve_dashboard_backend | regex_escape) ~ '(/.*)?$')
+         | list }}
+
+- name: Serve | preconditions (logged in, names agree, sane handler list, dashboard origin alone)
+  ansible.builtin.assert:
+    that:
+      - tailscale_serve_backend_state == 'Running'
+      - tailscale_serve_node_name | lower == tailnet_fqdn | lower
+      - tailscale_serve_handlers | length > 0
+      - tailscale_serve_handlers | rejectattr('port', 'integer') | list | length == 0
+      - tailscale_serve_keys | length == tailscale_serve_keys | unique | length
+      - tailscale_serve_handlers | rejectattr('mount', 'match', '^/$|^(/[A-Za-z0-9._-]+)+$') | list | length == 0
+      - tailscale_serve_handlers | rejectattr('backend', 'match', '^http://127\.0\.0\.1:[0-9]+(/[A-Za-z0-9._-]+)*$') | list | length == 0
+      - tailscale_serve_dashboard_handlers | length == 1
+      - tailscale_serve_dashboard_handlers[0].mount | default('') == '/'
+      - tailscale_serve_dashboard_handlers[0].backend | default('') == tailscale_serve_dashboard_backend
+      # ...and the dashboard backend appears nowhere else (no second mount on an app origin).
+      - tailscale_serve_dashboard_backend_handlers | length == 1
+      - tailscale_serve_dashboard_backend_handlers[0].port | default(0) == tailscale_serve_dashboard_port
+      - tailscale_serve_dashboard_backend_handlers[0].mount | default('') == '/'
+    fail_msg: >-
+      Tailscale must be logged in (state {{ tailscale_serve_backend_state }}), host_vars tailnet_fqdn must equal
+      this node's tailnet name, and every handler needs an integer port, a unique port+mount, a mount like
+      /name and a backend on http://127.0.0.1:<port>[/path]. Port {{ tailscale_serve_dashboard_port }} must carry
+      only `/` -> {{ tailscale_serve_dashboard_backend }}, and that backend may appear nowhere else
+      (ADR 0015: the dashboard has its own origin).
+    quiet: true

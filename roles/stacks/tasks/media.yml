@@ -21,13 +21,14 @@
     force: false
   loop: [sonarr, radarr, prowlarr]
 
+# 0640 with group media: the dashboard (in group media) reads the API key from it, read-only.
 - name: Media | SABnzbd preset (URL base, host whitelist, folders)
   ansible.builtin.template:
     src: presets/sabnzbd.ini.j2
     dest: "{{ homelab_data_dir }}/sabnzbd/sabnzbd.ini"
     owner: "{{ mediasvc_uid }}"
     group: "{{ media_gid }}"
-    mode: "0600"
+    mode: "0640"
     force: false
 
 # Rehearsal: SABnzbd starts paused. start_paused is kept in step with `rehearsal` even on an existing
@@ -71,6 +72,18 @@
     option: start_paused
     value: "{{ '1' if rehearsal | bool else '0' }}"
     create: false
+  when: stacks_sab_ini.stat.exists
+
+# Owner and mode only, never content (also fixes files preset as 0600 by earlier versions of this role).
+# SABnzbd keeps the mode when it rewrites the ini (save_config: copy to .bak, write, copymode back);
+# it only forces 0600 when it has to create a missing file, which the preset above prevents.
+- name: Media | SABnzbd config is readable by group media (owner/mode only)
+  ansible.builtin.file:
+    path: "{{ homelab_data_dir }}/sabnzbd/sabnzbd.ini"
+    state: file
+    owner: "{{ mediasvc_uid }}"
+    group: "{{ media_gid }}"
+    mode: "0640"
   when: stacks_sab_ini.stat.exists
 
 - name: Media | compose definition

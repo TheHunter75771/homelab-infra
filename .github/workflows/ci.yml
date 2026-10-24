@@ -38,11 +38,26 @@ jobs:
           docker run --rm -v "$PWD:/repo" -w /repo
           ghcr.io/gitleaks/gitleaks:v8.30.0@sha256:691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9
           git /repo --redact --no-banner
-  push-core:
+  dashboard-server:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: apps/push-core
+        working-directory: apps/dashboard/server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: npm ci
+      - run: npm test
+  dashboard-web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/dashboard/web
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -61,7 +76,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q sqlite3 rsync shellcheck
-          pip install pyyaml
+          pip install pyyaml jinja2==3.1.6  # jinja2: the dashboard helper's drift test renders the real template
           PIN=$(python3 -c 'import yaml;v=yaml.safe_load(open("inventory/group_vars/all/versions.yml"));print(v["python_packages"]["pywebpush"])')
           pip install "pywebpush==$PIN"
       - name: shellcheck
@@ -76,9 +91,13 @@ jobs:
         run: python3 -m unittest discover -s roles/bootgate/files/tests -v
       - name: notifier
         run: python3 -m unittest discover -s roles/notifier/files/tests -v
+      - name: dashboard helper
+        run: python3 -m unittest discover -s roles/dashboard/files/homelab-dockerctl/tests -v
       - name: storage format guard
         run: |
           pip install -r requirements-tools.txt
           ansible-galaxy collection install -r requirements.yml -p ./collections
           printf 'dummy\n' > /tmp/vault-pass
           ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/storage/tests/test_format_guard.yml
+      - name: tailscale serve config
+        run: ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/tailscale_serve/tests/test_serve_config.yml

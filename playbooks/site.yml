@@ -18,5 +18,7 @@
     - role: bootgate
     - role: notifier
     - role: stacks
+    # after stacks (which retires push-core and frees 8085), before tailscale_serve (CONTRACTS §11)
+    - role: dashboard
     - role: tailscale_serve
     - role: backups

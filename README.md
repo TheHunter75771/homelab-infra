@@ -12,13 +12,14 @@ media drive, and pushes alerts to a phone.
   Prowlarr, SABnzbd, Jellyseerr, plus Cloudflare Tunnel for public streaming only.
 - **Private access via Tailscale only:** admin UIs behind `tailscale serve` (HTTPS, tailnet
   identity), with no reverse-proxy IP trust rules. The backup Wi-Fi uplink is outbound-only.
-- **Push core:** a tiny PWA that phones subscribe to. The host notifier, the alert floor and an
-  off-site heartbeat all deliver Web Push through it.
+- **Dashboard v2:** a PWA that runs as a hardened host service outside Docker (live even when the
+  gate holds Docker). Phones subscribe to Web Push here. The host notifier, the alert floor and an off-site
+  heartbeat all deliver pushes. Docker actions go through a root helper with an exact allowlist.
 - **Backups:** integrity-checked nightly archives, pulled read-only to a workstation.
 - **Hardening:** key-only SSH, UFW plus a DOCKER-USER guard, unattended security patches
   (manual reboots), hardware watchdog.
 
-**Layout:** `playbooks/` · `roles/` · `apps/push-core/` · `inventory/group_vars/` (public defaults,
+**Layout:** `playbooks/` · `roles/` · `apps/dashboard/` (server + PWA) · `inventory/group_vars/` (public defaults,
 pinned versions, vault) · `docs/CONTRACTS.md` (the spec) · `docs/adr/` · `docs/runbooks/`.
 
 **Usage**

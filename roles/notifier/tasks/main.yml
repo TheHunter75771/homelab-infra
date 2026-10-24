@@ -4,11 +4,11 @@
     that:
       - notifier_pywebpush_version is match('^[0-9]+(\.[0-9]+)+$')
       - notifier_push_dir | length > 0
-      - notifier_pushcore_url is match('^http://(127\.0\.0\.1|localhost|\[::1\]):[0-9]+/?$')
+      - notifier_dashboard_url is match('^http://(127\.0\.0\.1|localhost|\[::1\]):[0-9]+/?$')
       # Fixed by CONTRACTS §4 and by the CLI's shebang line.
       - notifier_venv == '/opt/homelab-notify'
     fail_msg: >-
-      notifier_pywebpush_version must be an exact version, notifier_pushcore_url a loopback http URL,
+      notifier_pywebpush_version must be an exact version, notifier_dashboard_url a loopback http URL,
       and notifier_venv must stay /opt/homelab-notify.
     quiet: true
 
@@ -70,13 +70,27 @@
     state: absent
   when: not (rehearsal | bool)
 
+# 0755 so the dashboard (another user) can read history.jsonl. The dedupe state and its lock
+# stay private: homelab-notify creates them 0600.
 - name: Create the notifier state directory
   ansible.builtin.file:
     path: "{{ notifier_state_dir }}"
     state: directory
     owner: root
     group: root
-    mode: "0700"
+    mode: "0755"
+
+# Send history for the dashboard (CONTRACTS §11.5). Created empty so the dashboard always finds
+# it; homelab-notify appends to it and keeps it 0644. Timestamps preserved: idempotent.
+- name: Create the send history file
+  ansible.builtin.file:
+    path: "{{ notifier_state_dir }}/history.jsonl"
+    state: touch
+    owner: root
+    group: root
+    mode: "0644"
+    modification_time: preserve
+    access_time: preserve
 
 - name: Install homelab-notify
   ansible.builtin.copy:

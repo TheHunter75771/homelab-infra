@@ -1,0 +1,69 @@
+# {{ ansible_managed }}
+# Dashboard v2 (docs/CONTRACTS.md §11.1, ADR 0013/0014): a host service, outside Docker, so it
+# stays live while the boot gate holds Docker. It is also the Web Push store (push-core absorbed).
+# No ordering on docker.service or bootgate.service, on purpose.
+# systemd-analyze security: ~1.4 (OK). What remains: IP sockets (it listens on loopback and sends
+# Web Push to the internet), W^X memory (V8's JIT), the media/bootgate groups (the contract), and
+# no PrivateUsers= (it would hide those groups' names; left out until proven on the host).
+[Unit]
+Description=Homelab Dashboard v2 (tailnet-only; also the Web Push store)
+Documentation=file://{{ dashboard_app_dir }}
+After=network-online.target homelab-dockerctl.socket
+Wants=network-online.target homelab-dockerctl.socket
+
+[Service]
+Type=exec
+User={{ dashboard_user }}
+Group={{ dashboard_user }}
+# media: read the *arr/SABnzbd config files (API keys). bootgate: touch {{ dashboard_bootgate_run_dir }}/rerun.
+SupplementaryGroups={{ dashboard_groups | join(' ') }}
+Environment=DASHBOARD_CONFIG={{ dashboard_config_file }}
+Environment=NODE_ENV=production
+WorkingDirectory={{ dashboard_server_dir }}
+ExecStart=/usr/bin/node {{ dashboard_server_dir }}/{{ dashboard_server_entry }}
+Restart=always
+RestartSec=5s
+SyslogIdentifier=homelab-dashboard
+# settings.json must be 0600; everything the service creates is private to it.
+UMask=0077
+MemoryMax={{ dashboard_memory_max }}
+TasksMax={{ dashboard_tasks_max }}
+
+# Hardening (CONTRACTS §11.1, plus the extra directives below them).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# /run is made read-only explicitly: on the box it was writable in this unit's namespace despite
+# ProtectSystem=strict (Integrator, 2026-10-24), which left world-writable dirs such as /run/lock
+# reachable. {{ dashboard_bootgate_run_dir }} stays writable, because a ReadWritePaths= entry nested
+# inside a ReadOnlyPaths= one wins (systemd.exec); the dashboard creates the re-run trigger there
+# (contract 2). "-": a missing directory never stops the start. Connecting to Unix sockets in /run
+# (the helper, D-Bus, journald) is not a write and keeps working.
+ReadOnlyPaths=/run
+ReadWritePaths={{ dashboard_data_dir }} {{ homelab_push_dir }} -{{ dashboard_bootgate_run_dir }}
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+# Hides other users' processes. Not ProcSubset=pid: the host tile reads /proc/loadavg, meminfo, uptime.
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+
+[Install]
+WantedBy=multi-user.target

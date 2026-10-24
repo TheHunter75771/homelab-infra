@@ -1,0 +1,48 @@
+{
+  "TCP": {
+    "443": {
+      "HTTPS": true
+    },
+    "8443": {
+      "HTTPS": true
+    },
+    "8444": {
+      "HTTPS": true
+    }
+  },
+  "Web": {
+    "node.example.ts.net:443": {
+      "Handlers": {
+        "/": {
+          "Proxy": "http://127.0.0.1:8085"
+        }
+      }
+    },
+    "node.example.ts.net:8443": {
+      "Handlers": {
+        "/": {
+          "Proxy": "http://127.0.0.1:5055"
+        }
+      }
+    },
+    "node.example.ts.net:8444": {
+      "Handlers": {
+        "/prowlarr": {
+          "Proxy": "http://127.0.0.1:9696/prowlarr"
+        },
+        "/radarr": {
+          "Proxy": "http://127.0.0.1:7878/radarr"
+        },
+        "/sabnzbd": {
+          "Proxy": "http://127.0.0.1:8080/sabnzbd"
+        },
+        "/sonarr": {
+          "Proxy": "http://127.0.0.1:8989/sonarr"
+        },
+        "/watch": {
+          "Proxy": "http://127.0.0.1:8096/watch"
+        }
+      }
+    }
+  }
+}

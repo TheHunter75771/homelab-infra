@@ -14,3 +14,6 @@ Short records of why things are the way they are. Format: context, decision, con
 - [ADR 0010: OpenSSH keys over the tailnet instead of Tailscale SSH](0010-openssh-keys-over-the-tailnet-instead-of-tailscale-ssh.md)
 - [ADR 0011: Versions pinned in one file; Ubuntu sudo-rs workaround](0011-versions-pinned-in-one-file-ubuntu-sudo-rs-workaround.md)
 - [ADR 0012: MVP first, extras after](0012-mvp-first-extras-after.md)
+- [ADR 0013: The dashboard runs on the host, outside Docker](0013-dashboard-runs-on-the-host-outside-docker.md)
+- [ADR 0014: Dashboard v2.0 is tailnet-only](0014-dashboard-v2-is-tailnet-only.md)
+- [ADR 0015: The dashboard has its own origin](0015-the-dashboard-has-its-own-origin.md)

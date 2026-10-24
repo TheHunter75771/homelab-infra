@@ -1,0 +1,43 @@
+# yamllint disable rule:document-start
+# Test fixture: roles/stacks/templates rendered with placeholder identifiers (RFC 5737 addresses).
+# Ansible managed
+# Utils stack (docs/CONTRACTS.md §6): the Wake-on-LAN relay. Host networking so the magic packet
+# leaves on the physical LAN; the host firewall admits port 9999 on the tailnet interface only.
+# Built locally from ./wol-relay; pull_policy build means it is never pulled from a registry.
+# No provenance/SBOM attestations: they carry build timestamps and would change the image ID per build.
+# homelab.source-hash lets role stacks skip the build when the source is unchanged (tasks/local_image.yml).
+name: utils
+
+services:
+  wol-relay:
+    image: "homelab/wol-relay:2026.07"
+    build:
+      context: ./wol-relay
+      args:
+        NODE_BASE: "node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914"
+      provenance: false
+      sbom: false
+      labels:
+        homelab.source-hash: "0000000000000000000000000000000000000000000000000000000000000000"
+    pull_policy: build
+    container_name: wol-relay
+    restart: unless-stopped
+    network_mode: host
+    init: true
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    env_file:
+      - .env
+    environment:
+      PORT: "9999"
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9999/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    labels:
+      homelab.watch: "true"

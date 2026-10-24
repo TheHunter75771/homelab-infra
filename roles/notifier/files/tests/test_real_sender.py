@@ -6,7 +6,7 @@ the pinned version:
 It proves: a raw base64url VAPID key from vapid.json is accepted; every push service gets its
 own VAPID 'aud' (pywebpush mutates the claims dict, so a shared dict would send the first
 origin to everyone); TTL/Urgency/encoding headers; the payload decrypts on the device side;
-and a 410 from the real exception path is handed to push-core's unsubscribe API.
+and a 410 from the real exception path is handed to the dashboard's unsubscribe API.
 """
 
 from __future__ import annotations
@@ -139,8 +139,8 @@ class RealSender(unittest.TestCase):
             self.assertEqual(
                 (payload["title"], payload["body"], payload["tag"]), ("Media drive failed", "held down", "bootgate")
             )
-        # 410 came back through the real WebPushException path; push-core is asked to drop it and
-        # the notifier itself leaves subscriptions.json untouched (push-core is its only writer).
+        # 410 came back through the real WebPushException path; the dashboard is asked to drop it
+        # and the notifier itself leaves subscriptions.json untouched (the dashboard is its only writer).
         self.assertEqual(asked, ["https://updates.push.services.mozilla.invalid/wpush/v2/def"])
         self.assertEqual((self.push / "subscriptions.json").read_bytes(), before)
 

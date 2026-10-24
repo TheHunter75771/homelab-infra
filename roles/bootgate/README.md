@@ -50,7 +50,10 @@ check --retry  (timer + rerun path; acts on failed | media-lost | stale waiting)
   wait 30 s -> mount (replacing a stale/foreign mount) -> verify
      pass -> attempts=0, status=ok, "retry-pass"; systemctl start docker.service;
              docker compose up -d of the media stack if the watcher had stopped it;
-             push "Media drive back"
+             push "Media drive back" (Docker up AND media apps back, rc 0),
+                  "Media drive back, media apps did not restart" (rc 1, retried next run),
+               or "Media drive back, Docker did not start" (rc 1). Only the plain title
+             counts as a recovery on the dashboard; the qualified ones keep the incident open.
      fail -> nothing changes (no history spam). NEVER reboots, never runs the USB rungs.
 
 watch          (every 60 s; acts only when status=ok)
@@ -102,8 +105,9 @@ sudo touch /run/bootgate/rerun          # retry now (members of group bootgate n
 sudo bootgate --dry-run check --boot    # trace what a boot run would do; changes nothing
 journalctl -t bootgate -t bootgate-alert
 ```
-Emergency override, to run Docker without the drive (e.g. the disk is dead and push-core must
-come up). Systemd cannot cancel a dependency from another drop-in, so move this one away:
+Emergency override, to run Docker without the drive (e.g. the disk is dead and the other
+stacks, such as the tunnel or wol-relay, must come up; the dashboard runs outside Docker and
+needs no override). Systemd cannot cancel a dependency from another drop-in, so move this one away:
 `sudo mv /etc/systemd/system/docker.service.d/10-bootgate.conf /root/ && sudo systemctl daemon-reload && sudo systemctl start docker`.
 Then stop the media stack by hand. The next Ansible run puts the drop-in back.
 

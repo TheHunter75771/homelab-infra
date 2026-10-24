@@ -1,19 +1,30 @@
 ---
 # HTTPS handlers on this node's own tailnet name (docs/CONTRACTS.md §6). Tailnet only: never funnel.
 #
+# Origins (ADR 0015): browsers isolate by scheme+host+port, not by path. So the dashboard, which can
+# control Docker, gets an origin of its own (443) and the apps live on other ports:
+#   443   /                                          Dashboard v2 (host service), nothing else
+#   8443  /                                          Jellyseerr (no URL base support)
+#   8444  /watch /sonarr /radarr /prowlarr /sabnzbd  the path-based apps (they share this origin)
+#
 # `tailscale serve` STRIPS the mount path before proxying (ipn/ipnlocal/serve.go: http.StripPrefix),
 # then appends the request to the backend URL's own path. Apps that run under a URL base (Jellyfin
 # /watch, the *arr apps, SABnzbd) therefore get that base back in the backend URL:
-#   https://<node>/sonarr/api/v3/x  ->  strip "/sonarr"  ->  http://127.0.0.1:8989/sonarr + /api/v3/x
+#   https://<node>:8444/sonarr/api/v3/x  ->  strip "/sonarr"  ->  http://127.0.0.1:8989/sonarr + /api/v3/x
 # Every backend must be loopback (the apps publish on 127.0.0.1 only).
 tailscale_serve_handlers:
-  - { port: 443, mount: /, backend: "http://127.0.0.1:8085" }                  # push core
-  - { port: 443, mount: /watch, backend: "http://127.0.0.1:8096/watch" }       # Jellyfin
-  - { port: 443, mount: /sonarr, backend: "http://127.0.0.1:8989/sonarr" }
-  - { port: 443, mount: /radarr, backend: "http://127.0.0.1:7878/radarr" }
-  - { port: 443, mount: /prowlarr, backend: "http://127.0.0.1:9696/prowlarr" }
-  - { port: 443, mount: /sabnzbd, backend: "http://127.0.0.1:8080/sabnzbd" }
-  - { port: 8443, mount: /, backend: "http://127.0.0.1:5055" }                 # Jellyseerr (no URL base support)
+  - { port: 443, mount: /, backend: "http://127.0.0.1:8085" }                    # Dashboard v2 (host service)
+  - { port: 8443, mount: /, backend: "http://127.0.0.1:5055" }                   # Jellyseerr
+  - { port: 8444, mount: /watch, backend: "http://127.0.0.1:8096/watch" }        # Jellyfin
+  - { port: 8444, mount: /sonarr, backend: "http://127.0.0.1:8989/sonarr" }
+  - { port: 8444, mount: /radarr, backend: "http://127.0.0.1:7878/radarr" }
+  - { port: 8444, mount: /prowlarr, backend: "http://127.0.0.1:9696/prowlarr" }
+  - { port: 8444, mount: /sabnzbd, backend: "http://127.0.0.1:8080/sabnzbd" }
+
+# ADR 0015 guard, checked before anything is applied: the dashboard's port carries exactly one
+# handler, `/` to the dashboard. An app added to this port would share the dashboard's origin.
+tailscale_serve_dashboard_port: 443
+tailscale_serve_dashboard_backend: "http://127.0.0.1:8085"
 
 # Upper bound for one `tailscale` CLI call (it must never sit waiting on an interactive prompt).
 tailscale_serve_command_timeout: 60

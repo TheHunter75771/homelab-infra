@@ -1,0 +1,13 @@
+{#- homelab-dockerctl settings (role dashboard). Unknown keys make the helper refuse to start a request. -#}
+{%- set settings = {
+  'allowed_uid': dashboard_uid | int,
+  'stacks_dir': homelab_stacks_dir,
+  'media_mount': media_mount,
+  'media_dirs': dashboard_dockerctl_media_dirs,
+  'media_sentinel': dashboard_dockerctl_media_sentinel,
+  'bootgate_status_file': dashboard_bootgate_state_dir ~ '/status',
+  'held_stacks': dashboard_dockerctl_held_stacks,
+  'backup_pull_user': backup_pull_user,
+  'cache_dir': '/var/cache/' ~ dashboard_dockerctl_cache_name,
+} -%}
+{{ settings | combine(dashboard_dockerctl_timeouts) | to_nice_json(indent=2) }}

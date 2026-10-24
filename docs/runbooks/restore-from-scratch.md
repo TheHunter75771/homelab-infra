@@ -41,13 +41,13 @@ There's no restore playbook yet, so do it by hand:
    mkdir ~/restore && cd ~/restore && sudo tar -xpf ../appdata-*.tar && sudo sha256sum -c MANIFEST.sha256
    ```
    **Stop if any line isn't OK.** (sudo keeps the owners stored in the archive; extracted without sudo, the databases would end up owned by the admin and the apps couldn't read them.)
-2. Stop the stacks you're restoring: `sudo docker compose -f /srv/homelab/stacks/media/compose.yaml stop` (and `.../push/compose.yaml stop` if you're restoring push data).
+2. Stop what you're restoring: `sudo docker compose -f /srv/homelab/stacks/media/compose.yaml stop`, and `sudo systemctl stop homelab-dashboard` if you're restoring push data.
 3. App files, keeping the owners stored in the archive (no blanket chown):
    ```bash
    sudo tar -xpzf files.tar.gz -C /srv/homelab/data
    ```
 4. SQLite databases: for each `sqlite/<path>`, `sudo cp -p` it over the matching file under `/srv/homelab/data/<path>`, and `sudo rm -f` any `<db>-wal`/`<db>-shm` next to it.
-5. Push devices (optional; otherwise phones subscribe again): `sudo tar -xpzf push.tar.gz -C /srv/homelab/push`.
+5. Push devices (optional; otherwise phones subscribe again): `sudo tar -xpzf push.tar.gz -C /srv/homelab/push`, then `sudo chown -R dashboard:dashboard /srv/homelab/push && sudo chown root:dashboard /srv/homelab/push/vapid.json` (archives from before Dashboard v2 carry the old `pushcore` uid, which is the same uid 10101, so this is a no-op for them), then `sudo systemctl start homelab-dashboard`.
 6. **Don't restore `bootgate.tar.gz`.** Its state is stale and the gate rebuilds it.
 7. **Use the same app versions the backup came from** (`inventory/group_vars/all/versions.yml` at that commit), start the stacks (`sudo docker compose -f ... up -d`), check them, then upgrade.
 

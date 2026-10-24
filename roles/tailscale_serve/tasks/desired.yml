@@ -1,0 +1,5 @@
+---
+# The declared config in the shape `tailscale serve status --json` reports (templates/serve-config.json.j2).
+- name: Serve | the declared config, in the shape status --json reports
+  ansible.builtin.set_fact:
+    tailscale_serve_desired: "{{ lookup('ansible.builtin.template', 'serve-config.json.j2') | from_json }}"

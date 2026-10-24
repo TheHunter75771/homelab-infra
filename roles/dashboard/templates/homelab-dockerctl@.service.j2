@@ -1,0 +1,64 @@
+# {{ ansible_managed }}
+# One request from the dashboard (started by homelab-dockerctl.socket, connection on stdin).
+# Root, because the Docker socket is root:docker and the journal and media folders need it; but
+# boxed in: no network namespace access, one capability, read-only system, one writable cache.
+# systemd-analyze security: ~1.0 (OK). What remains is root itself, CAP_DAC_READ_SEARCH (du over
+# media folders an app may have made 0700), AF_UNIX (the Docker socket) and @resources (nice/ionice).
+[Unit]
+Description=Homelab dockerctl: one request from the dashboard
+Documentation=file://{{ dashboard_dockerctl_script }}
+CollectMode=inactive-or-failed
+
+[Service]
+ExecStart=/usr/bin/python3 -I {{ dashboard_dockerctl_script }}
+StandardInput=socket
+# Replies go only through the socket (fd 0); a stray print can never corrupt the protocol.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=homelab-dockerctl
+Environment=HOMELAB_DOCKERCTL_CONFIG={{ dashboard_dockerctl_config }}
+# The docker CLI's config dir; /root is hidden (ProtectHome) and /tmp is private to this instance.
+Environment=DOCKER_CONFIG=/tmp/docker-config
+# Backstop above the helper's own limits (log follow 30 min, pull 20 min).
+RuntimeMaxSec={{ dashboard_dockerctl_runtime_max }}
+TimeoutStopSec=15s
+UMask=0077
+# Disk-split cache and the per-container action locks, shared by every instance.
+CacheDirectory={{ dashboard_dockerctl_cache_name }}
+CacheDirectoryMode=0700
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=
+ProtectSystem=strict
+# Explicitly read-only too (it was found writable in the dashboard's namespace on the box): the
+# helper writes nothing in /run, and connecting to the Docker, systemd and journal sockets there
+# is not a write.
+ReadOnlyPaths=/run
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+# The Docker socket, systemd's and the journal's are filesystem Unix sockets: they work from a
+# private network namespace. The helper never needs IP.
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+KeyringMode=private
+SystemCallArchitectures=native
+# @resources stays allowed: nice and ionice (disk-split) need setpriority and ioprio_set.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM

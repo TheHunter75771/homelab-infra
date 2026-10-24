@@ -9,27 +9,17 @@
     quiet: true
 
 # The .env files quote values with single quotes, so a secret may not contain one (or whitespace).
+# (The VAPID keys and vapid_subject are role dashboard's to check since push-core's retirement, §11.5.)
 - name: Preflight | secrets are set in the vault and well formed
   ansible.builtin.assert:
     that:
       - wol_relay_token | default('') | length >= 16
       - wol_relay_token is not search("[\\s']")
-      - vapid_public_key | default('') is match('^[A-Za-z0-9_-]{87}$')
-      - vapid_private_key | default('') is match('^[A-Za-z0-9_-]{43}$')
       - rehearsal | bool or cloudflared_tunnel_token | default('') | length > 0
       - rehearsal | bool or cloudflared_tunnel_token is not search("[\\s']")
     fail_msg: >-
-      A vault secret is missing or malformed: wol_relay_token (16+ chars, no quotes/whitespace),
-      vapid_public_key / vapid_private_key (raw base64url P-256: 87 / 43 chars) and, outside
-      rehearsal, cloudflared_tunnel_token. Values are not printed.
-    quiet: true
-
-# Contract 4: the VAPID subject is an https URL (Apple may reject a localhost mailto).
-- name: Preflight | the VAPID subject is an https URL
-  ansible.builtin.assert:
-    that:
-      - vapid_subject | default('') is match('^https://[^/\s]+')
-    fail_msg: vapid_subject (inventory/group_vars/media_servers/main.yml) must be an https URL, e.g. https://<public_watch_host>.
+      A vault secret is missing or malformed: wol_relay_token (16+ chars, no quotes/whitespace) and,
+      outside rehearsal, cloudflared_tunnel_token. Values are not printed.
     quiet: true
 
 - name: Preflight | what is mounted at the media mount point

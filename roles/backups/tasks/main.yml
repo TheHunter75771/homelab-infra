@@ -25,6 +25,14 @@
     - "{{ homelab_backups_dir }}"
     - "{{ homelab_backups_dir }}/appdata"
 
+- name: Status directory is world-readable (the dashboard reads status.json)
+  ansible.builtin.file:
+    path: "{{ backups_status_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
 - name: Backup script is installed
   ansible.builtin.copy:
     src: homelab-backup.sh

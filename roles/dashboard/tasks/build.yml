@@ -1,0 +1,144 @@
+---
+# Lead decision (2026-10-24): no npm on the host. The server's production dependencies are
+# installed on the controller with `npm ci`, in a build directory outside the repo's tracked
+# files, and synced to the host with the app (tasks/app.yml). npm runs only when package.json or
+# package-lock.json changed since the last successful build, or node_modules is missing.
+# A controller build is only portable as plain JavaScript, so native modules are refused.
+
+- name: Build | controller Node.js version
+  ansible.builtin.command:
+    argv: [node, --version]
+  register: dashboard_controller_node
+  changed_when: false
+  check_mode: false
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Build | the controller runs Node.js 22.x
+  ansible.builtin.assert:
+    that: dashboard_controller_node.stdout is match('^v' ~ dashboard_node_major ~ '[.]')
+    fail_msg: >-
+      The controller must run Node.js {{ dashboard_node_major }}.x (same major as the host) to build the
+      dashboard's dependencies; it has {{ dashboard_controller_node.stdout }}.
+    quiet: true
+  run_once: true
+
+# Also in check mode (a git-ignored cache dir on the controller): npm ci's chdir must exist even
+# for check mode to report that it would run.
+- name: Build | build directory
+  ansible.builtin.file:
+    path: "{{ dashboard_build_dir }}"
+    state: directory
+    mode: "0755"
+  check_mode: false
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Build | dependency manifests from apps/dashboard/server
+  ansible.builtin.copy:
+    src: "{{ dashboard_server_src }}/{{ item }}"
+    dest: "{{ dashboard_build_dir }}/{{ item }}"
+    mode: "0644"
+  loop:
+    - package.json
+    - package-lock.json
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Build | checksums of the dependency manifests
+  ansible.builtin.stat:
+    path: "{{ dashboard_server_src }}/{{ item }}"
+    checksum_algorithm: sha256
+  loop:
+    - package.json
+    - package-lock.json
+  register: dashboard_manifests
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Build | dependencies already built
+  ansible.builtin.stat:
+    path: "{{ dashboard_build_dir }}/node_modules"
+  register: dashboard_build_node_modules
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Build | stamp of the last successful build
+  ansible.builtin.slurp:
+    src: "{{ dashboard_deps_stamp }}"
+  register: dashboard_deps_stamp_file
+  failed_when: false
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Build | compare the manifests with the stamp
+  ansible.builtin.set_fact:
+    dashboard_deps_wanted: "{{ dashboard_manifests.results | map(attribute='stat.checksum') | join(' ') }}"
+    dashboard_deps_needed: >-
+      {{ (dashboard_manifests.results | map(attribute='stat.checksum') | join(' '))
+         != ((dashboard_deps_stamp_file.content | default('') | b64decode) | trim)
+         or not dashboard_build_node_modules.stat.exists }}
+
+# Dropped before the install, so an install that fails half-way is redone on the next run.
+- name: Build | forget the stamp before a rebuild
+  ansible.builtin.file:
+    path: "{{ dashboard_deps_stamp }}"
+    state: absent
+  when: dashboard_deps_needed | bool
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+# Exactly the lockfile, production only. --ignore-scripts: no package code runs at install time.
+# --no-bin-links: no node_modules/.bin symlinks to carry over (nothing on the host runs them).
+- name: Build | npm ci on the controller
+  ansible.builtin.command:
+    argv: [npm, ci, --omit=dev, --ignore-scripts, --no-bin-links, --no-audit, --no-fund]
+    chdir: "{{ dashboard_build_dir }}"
+  environment:
+    npm_config_update_notifier: "false"
+  changed_when: true
+  when: dashboard_deps_needed | bool
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Build | look for native modules
+  ansible.builtin.find:
+    paths: "{{ dashboard_build_dir }}/node_modules"
+    patterns:
+      - "*.node"
+      - binding.gyp
+    recurse: true
+    hidden: true
+    file_type: any
+  register: dashboard_native_modules
+  when: not (ansible_check_mode and dashboard_deps_needed | bool)   # nothing was built in a check run
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Build | the dependencies are plain JavaScript (portable from the controller)
+  ansible.builtin.assert:
+    that: dashboard_native_modules.matched == 0
+    fail_msg: >-
+      Native modules found, which a controller build can't carry to the host:
+      {{ dashboard_native_modules.files | map(attribute='path') | join(', ') }}
+    quiet: true
+  when: dashboard_native_modules is not skipped
+  run_once: true
+
+- name: Build | record the built manifests
+  ansible.builtin.copy:
+    dest: "{{ dashboard_deps_stamp }}"
+    content: "{{ dashboard_deps_wanted }}\n"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  run_once: true

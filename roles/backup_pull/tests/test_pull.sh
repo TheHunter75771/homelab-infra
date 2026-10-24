@@ -63,7 +63,7 @@ chmod +x "$T/fakessh"
 make_backup() { # one real nightly run into $SRV
   sleep 1.1 # archive names have one-second resolution
   env BACKUP_ROOT="$SRV" DATA_DIR="$DATA" PUSH_DIR="$T/nopush" BOOTGATE_DIR="$T/nogate" \
-    KEEP="${KEEP:-14}" BACKUP_GROUP="$(id -gn)" NOTIFY_BIN=/nonexistent SQLITE3="$SQ" \
+    KEEP="${KEEP:-14}" BACKUP_GROUP="$(id -gn)" NOTIFY_BIN=/nonexistent SQLITE3="$SQ" STATUS_DIR="$T/status" \
     bash "$BACKUP" >/dev/null
 }
 run_pull() {

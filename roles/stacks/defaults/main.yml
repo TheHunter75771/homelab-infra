@@ -27,26 +27,11 @@ stacks_app_dirs:
   - { name: jellyseerr, owner: 0, group: 0 }   # the image runs as root
 stacks_app_dir_mode: "0750"
 
-# push-core container identity (contract 4). The compose file runs the container as uid:gid
-# 10101:10101; the host gets a matching system user and group so file ownership reads clearly.
-#   {{ homelab_push_dir }}            pushcore:pushcore 0750  (push-core writes subscriptions.json here)
-#   {{ homelab_push_dir }}/vapid.json root:pushcore     0640  (from the vault; push-core only reads it)
-# The VAPID subject is the group var vapid_subject (contract 4, an https URL), not a role default.
-stacks_pushcore_user: pushcore
-stacks_pushcore_uid: 10101
-stacks_pushcore_gid: 10101
-
-# push-core deploy interface. The app is module D's (apps/push-core/, see its README "Configuration").
-stacks_push_core_src: "{{ playbook_dir }}/../apps/push-core/"
-stacks_push_core_sync_excludes:
-  - node_modules/
-  - .git/
-  - coverage/
-stacks_push_core_port: 8085
-stacks_push_core_data_mount: /data
-stacks_push_core_environment:
-  PUSH_DIR: "{{ stacks_push_core_data_mount }}"
-  PORT: "{{ stacks_push_core_port }}"
+# Retired push stack (push-core, absorbed by Dashboard v2, docs/CONTRACTS.md §11.5): what tasks/retire_push.yml
+# removes from hosts that still have it. The push store and the uid 10101 account are role dashboard's.
+stacks_retired_push_container: push-core
+stacks_retired_push_network: push_default
+stacks_retired_push_image_repo: homelab/push-core
 
 # wol-relay runs with host networking; "nobody" so the process maps to no real host account.
 stacks_wol_relay_port: 9999
@@ -61,7 +46,6 @@ stacks_mem_limits:
   jellyseerr: 512m
   cloudflared: 256m
   wol_relay: 128m
-  push_core: 128m
 
 # docker compose up --wait: fail the run if a container is not healthy within this many seconds.
 stacks_compose_wait_timeout: 300

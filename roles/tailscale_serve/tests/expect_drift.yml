@@ -1,0 +1,15 @@
+---
+# One drift case for test_serve_config.yml: case = {name, json, want}.
+- name: Compare with the role's compare.yml
+  ansible.builtin.include_role:
+    name: "{{ tailscale_serve_role }}"
+    tasks_from: compare
+  vars:
+    tailscale_serve_compare_json: "{{ case.json }}"
+
+- name: Drift result is as expected for {{ case.name }}
+  ansible.builtin.assert:
+    that:
+      - tailscale_serve_drift | bool == case.want | bool
+    fail_msg: "drift={{ tailscale_serve_drift }}, expected {{ case.want }}"
+    quiet: true

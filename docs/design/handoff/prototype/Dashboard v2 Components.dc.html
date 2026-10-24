@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="_ds/nocturne-06816440-552b-4804-b5d1-83e6ce3b8b05/styles.css">
+<script src="_ds/nocturne-06816440-552b-4804-b5d1-83e6ce3b8b05/_ds_bundle.js"></script>
+<script src="https://unpkg.com/@phosphor-icons/web@2.1.1"></script>
+<style>
+:root{--ground:#161826;--deep:#0f1119;--surface:#232532;--surface-hover:#2b2d3c;--text:#e9e9ed;--text-2:#cfd3e5;--muted:#9397ab;--faint:#75798c;--disabled:#595d6c;--border:#3f424d;--accent-border:#5d5294;--divider:rgba(233,233,237,0.16);--accent:#9184d9;--accent-text:#d2cefd;--accent-bright:#b5abfc;--accent-pale:#e7e5fe;--tint-hover:rgba(145,132,217,0.10);--tint-active:rgba(145,132,217,0.16);--tint-btn:rgba(145,132,217,0.12);--track:#2b2741;--ok:#6cc79a;--ok-bg:rgba(108,199,154,0.13);--warn:#e4b363;--warn-bg:rgba(228,179,99,0.13);--fail:#f08a8a;--fail-bg:rgba(240,138,138,0.14);--info:#86b7e8;--info-bg:rgba(134,183,232,0.13);--idle-bg:rgba(147,151,171,0.14);--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+body{margin:0;background:var(--ground)}
+:root{color-scheme:dark}
+*{scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+a{color:var(--accent-text)}a:hover{color:var(--accent-pale)}
+</style>
+</helmet>
+<div style="min-height:100vh;background:var(--ground);color:var(--text);font-family:var(--font-body);padding:40px clamp(16px,4vw,56px);display:flex;flex-direction:column;gap:40px;max-width:1200px">
+<header style="display:flex;flex-direction:column;gap:6px">
+<span style="font-size:12px;color:var(--muted);font-family:var(--mono)">Dashboard v2 · handoff</span>
+<h1 style="margin:0;font-size:34px;font-weight:500;letter-spacing:-0.02em">Components, status tokens, notes</h1>
+<span style="font-size:15px;color:var(--text-2);max-width:640px">Nocturne, dark only. Every screen and state lives in <a href="Dashboard v2.dc.html">Dashboard v2</a>; switch device, scenario, access and state in Tweaks.</span>
+</header>
+
+<section style="display:flex;flex-direction:column;gap:14px">
+<h2 style="margin:0;font-size:20px;font-weight:500">Semantic status tokens</h2>
+<span style="font-size:14px;color:var(--text-2);max-width:680px">Text colors are ≥ 4.5:1 on --surface (#232532) and on their own tint. Tints are the text color at 13–14% alpha. Status always pairs color with an icon and a word.</span>
+<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px">
+<sc-for list="{{ tokens }}" as="t" hint-placeholder-count="5">
+<div style="display:flex;flex-direction:column;gap:10px;padding:14px;border-radius:var(--radius-md);background:var(--surface)">
+<span style="align-self:flex-start;display:inline-flex;align-items:center;gap:4px;padding:2px 8px 2px 6px;border-radius:999px;font-size:12px;font-weight:500;color:{{ t.c }};background:{{ t.bg }}"><i class="ph {{ t.i }}" style="font-size:14px"></i>{{ t.label }}</span>
+<div style="display:flex;flex-direction:column;gap:2px;font:12px var(--mono);color:var(--text-2)"><span>{{ t.name }}: {{ t.hex }}</span><span>{{ t.name }}-bg: {{ t.tint }}</span><span style="color:var(--muted)">{{ t.ratio }} on surface</span></div>
+<span style="font-size:12px;color:var(--muted)">{{ t.use }}</span>
+</div>
+</sc-for>
+</div>
+</section>
+
+<section style="display:flex;flex-direction:column;gap:14px">
+<h2 style="margin:0;font-size:20px;font-weight:500">Status chip, access badge, live indicator</h2>
+<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<sc-for list="{{ chips }}" as="t" hint-placeholder-count="8"><span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px 2px 6px;border-radius:999px;font-size:12px;font-weight:500;color:{{ t.c }};background:{{ t.bg }};font-family:{{ t.f }}"><i class="ph {{ t.i }}" style="font-size:14px"></i>{{ t.label }}</span></sc-for>
+<span style="width:1px;height:22px;background:var(--divider);margin:0 6px"></span>
+<span style="display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 9px;border-radius:999px;font-size:12px;font-weight:500;color:var(--accent-text);background:var(--tint-btn);border:1px solid var(--accent-border)"><i class="ph ph-shield-check" style="font-size:14px"></i>Tailnet</span>
+<span style="display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 9px;border-radius:999px;font-size:12px;font-weight:500;color:var(--warn);background:var(--warn-bg);border:1px solid rgba(228,179,99,0.35)"><i class="ph ph-globe-simple" style="font-size:14px"></i>Remote</span>
+<span style="width:1px;height:22px;background:var(--divider);margin:0 6px"></span>
+<span style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)"><span style="width:7px;height:7px;border-radius:50%;background:var(--ok)"></span><span style="color:var(--ok)">Live</span>· 12 s ago</span>
+<span style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)"><span style="width:7px;height:7px;border-radius:50%;background:var(--warn)"></span><span style="color:var(--warn)">Stale</span>· updated 14:08</span>
+</div>
+</section>
+
+<section style="display:flex;flex-direction:column;gap:14px">
+<h2 style="margin:0;font-size:20px;font-weight:500">Action buttons</h2>
+<div style="display:flex;flex-wrap:wrap;gap:24px;padding:16px;border-radius:var(--radius-md);background:var(--surface)">
+<div style="display:flex;flex-direction:column;gap:8px"><span style="font-size:12px;color:var(--muted)">Primary (outline + tint)</span><button style="display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 11px;border-radius:var(--radius-sm);border:1px solid var(--accent-border);background:var(--tint-btn);color:var(--accent-text);font:500 13px var(--font-body);cursor:pointer" style-hover="background:var(--tint-active)"><i class="ph ph-arrow-circle-up"></i>Update to 5.17.2</button></div>
+<div style="display:flex;flex-direction:column;gap:8px"><span style="font-size:12px;color:var(--muted)">Secondary</span><button style="display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 11px;border-radius:var(--radius-sm);border:1px solid var(--border);background:transparent;color:var(--text-2);font:500 13px var(--font-body);cursor:pointer" style-hover="background:var(--tint-hover)"><i class="ph ph-arrow-clockwise"></i>Restart</button></div>
+<div style="display:flex;flex-direction:column;gap:8px"><span style="font-size:12px;color:var(--muted)">Disabled with reason</span><button disabled="{{ true }}" style="display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 11px;border-radius:var(--radius-sm);border:1px solid var(--border);background:transparent;color:var(--disabled);font:500 13px var(--font-body);cursor:not-allowed"><i class="ph ph-lock-simple"></i>Update to 5.17.2</button><span style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)"><i class="ph ph-lock-simple"></i>Only available on the tailnet</span></div>
+<div style="display:flex;flex-direction:column;gap:8px"><span style="font-size:12px;color:var(--muted)">Mobile size</span><button style="display:inline-flex;align-items:center;gap:6px;height:44px;padding:0 14px;border-radius:var(--radius-sm);border:1px solid var(--border);background:transparent;color:var(--text-2);font:500 14px var(--font-body);cursor:pointer"><i class="ph ph-stop"></i>Stop</button></div>
+</div>
+<span style="font-size:13px;color:var(--muted);max-width:680px">Destructive and slow actions (Stop, Start, Update, Re-run gate, Remove device) open a confirm dialog: a bottom sheet on mobile, centered at 420 px on desktop. Update and Re-run show a three-step progress list, then close to a toast. Disabled actions always carry a visible reason line; hover titles alone don't work on a phone.</span>
+</section>
+
+<section style="display:flex;flex-direction:column;gap:14px">
+<h2 style="margin:0;font-size:20px;font-weight:500">Health banner, tile, gate timeline row, toast</h2>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr));gap:12px;align-items:start">
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="border-radius:var(--radius-md);background:var(--ok-bg);padding:14px;display:flex;align-items:center;gap:12px"><div style="width:38px;height:38px;border-radius:50%;display:grid;place-items:center;font-size:22px;color:var(--ok);border:1px solid var(--ok)"><i class="ph ph-check"></i></div><div style="display:flex;flex-direction:column;gap:2px"><span style="font-size:19px;font-weight:500">All systems normal</span><span style="font-size:13px;color:var(--text-2)">9 apps healthy · drive 34% · backup 3 h ago</span></div></div>
+<div style="border-radius:var(--radius-md);background:var(--fail-bg);padding:14px;display:flex;flex-direction:column;gap:10px"><div style="display:flex;align-items:center;gap:12px"><div style="width:38px;height:38px;border-radius:50%;display:grid;place-items:center;font-size:22px;color:var(--fail);border:1px solid var(--fail)"><i class="ph ph-warning-octagon"></i></div><span style="font-size:19px;font-weight:500">2 issues</span></div><div style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:var(--radius-sm);background:var(--surface);font-size:14px"><i class="ph ph-x-circle" style="color:var(--fail);font-size:18px"></i><span style="flex:1">Media drive failed after a power-cycle. 5 apps held.</span><i class="ph ph-caret-right" style="color:var(--muted)"></i></div></div>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;flex-direction:column;gap:8px;padding:14px;border-radius:var(--radius-md);background:var(--surface);font-size:13px;max-width:220px"><span style="display:flex;align-items:center;gap:6px;color:var(--muted);font-weight:500"><i class="ph ph-hard-drive" style="font-size:16px"></i>Media drive</span><span style="font-size:22px;font-weight:500">2.64 TB free</span><span style="height:6px;border-radius:3px;background:var(--track);overflow:hidden;display:block"><span style="display:block;height:100%;width:34%;background:var(--accent)"></span></span><span style="color:var(--text-2)">Full in ~63 weeks</span></div>
+<div style="display:grid;grid-template-columns:92px 130px 1fr 40px;gap:12px;align-items:center;padding:7px 8px;border-radius:var(--radius-sm);background:var(--warn-bg);border:1px dashed rgba(228,179,99,0.45)"><span style="font:12px var(--mono);color:var(--text-2)">02:38:16</span><span style="justify-self:start;display:inline-flex;align-items:center;gap:4px;padding:2px 8px 2px 6px;border-radius:999px;font:500 12px var(--mono);color:var(--warn);background:var(--warn-bg)"><i class="ph ph-lightning"></i>powercycle</span><span style="font-size:13px">USB port 2 power-cycled</span><span style="font:12px var(--mono);color:var(--muted);text-align:right">30</span></div>
+<div style="align-self:flex-start;display:flex;align-items:center;gap:10px;padding:11px 14px;border-radius:var(--radius-md);background:var(--surface-hover);box-shadow:var(--shadow-md);font-size:14px"><i class="ph ph-check-circle" style="font-size:19px;color:var(--ok)"></i>Radarr updated to 5.17.2 and healthy</div>
+<div style="align-self:flex-start;display:flex;align-items:center;gap:10px;padding:11px 14px;border-radius:var(--radius-md);background:var(--surface-hover);box-shadow:var(--shadow-md);font-size:14px"><i class="ph ph-x-circle" style="font-size:19px;color:var(--fail)"></i>Check failed: drive not detected</div>
+</div>
+</div>
+<span style="font-size:13px;color:var(--muted);max-width:680px">Gate events: pass, repair, powercycle, fail, retry-pass, media-lost. Power-cycles get a tinted, dashed row so they stand out in a boot group. The log viewer, forecast chart, app card, tab bar and sidebar are shown live in the prototype.</span>
+</section>
+
+<section style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:24px">
+<div style="display:flex;flex-direction:column;gap:10px"><h2 style="margin:0;font-size:20px;font-weight:500">Spacing & radii</h2>
+<sc-for list="{{ spacing }}" as="r" hint-placeholder-count="6"><div style="display:flex;gap:12px;align-items:center;font-size:13px"><span style="font-family:var(--mono);color:var(--text-2);width:120px">{{ r.k }}</span><span style="color:var(--muted)">{{ r.v }}</span></div></sc-for></div>
+<div style="display:flex;flex-direction:column;gap:10px"><h2 style="margin:0;font-size:20px;font-weight:500">Type</h2>
+<sc-for list="{{ type }}" as="r" hint-placeholder-count="6"><div style="display:flex;gap:12px;align-items:center;font-size:13px"><span style="font-family:var(--mono);color:var(--text-2);width:120px">{{ r.k }}</span><span style="color:var(--muted)">{{ r.v }}</span></div></sc-for></div>
+<div style="display:flex;flex-direction:column;gap:10px"><h2 style="margin:0;font-size:20px;font-weight:500">Motion</h2>
+<sc-for list="{{ motion }}" as="r" hint-placeholder-count="5"><div style="display:flex;gap:12px;align-items:center;font-size:13px"><span style="font-family:var(--mono);color:var(--text-2);width:120px">{{ r.k }}</span><span style="color:var(--muted)">{{ r.v }}</span></div></sc-for></div>
+</section>
+
+<section style="display:flex;flex-direction:column;gap:10px;max-width:760px">
+<h2 style="margin:0;font-size:20px;font-weight:500">Notes for the spec</h2>
+<sc-for list="{{ notes }}" as="n" hint-placeholder-count="5"><div style="display:flex;gap:10px;font-size:14px;line-height:1.5;color:var(--text-2)"><i class="ph ph-arrow-right" style="color:var(--accent-bright);margin-top:4px"></i><span>{{ n }}</span></div></sc-for>
+</section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  renderVals(){
+    const t=(name,hex,tint,label,i,ratio,use)=>({name,hex,tint,label,i,ratio,use,c:`var(${name})`,bg:`var(${name}-bg)`});
+    const ch=(k,label,i,mono)=>({c:k==='idle'?'var(--text-2)':`var(--${k})`,bg:`var(--${k}-bg)`,label,i,f:mono?'var(--mono)':'var(--font-body)'});
+    return {
+      tokens:[t('--ok','#6cc79a','rgba(108,199,154,.13)','Healthy','ph-check-circle','7.1:1','Healthy, pass, resolved, direct play'),
+        t('--warn','#e4b363','rgba(228,179,99,.13)','Near limit','ph-warning','7.3:1','Degraded, near limit, power-cycle, reboot needed, stale data'),
+        t('--fail','#f08a8a','rgba(240,138,138,.14)','Down','ph-x-circle','5.6:1','Down, failed, media-lost, active alert, destructive confirm'),
+        t('--info','#86b7e8','rgba(134,183,232,.13)','Starting','ph-circle-notch','6.6:1','In progress, starting, rehearsal mode, hints'),
+        t('--idle','var(--text-2)','rgba(147,151,171,.14)','Stopped on purpose','ph-pause-circle','10:1','Intentional stop or held by the gate. Not an error')],
+      chips:[ch('ok','Healthy','ph-check-circle'),ch('warn','Unhealthy','ph-warning'),ch('info','Starting','ph-circle-notch'),ch('idle','Stopped on purpose','ph-pause-circle'),ch('fail','Down','ph-x-circle'),ch('ok','ok','ph-check-circle',1),ch('info','waiting','ph-hourglass',1),ch('fail','failed','ph-x-circle',1),ch('fail','media-lost','ph-plugs',1)],
+      spacing:[{k:'--space-2 5.6',v:'Inside chips, icon gaps'},{k:'--space-3 8.4',v:'Gap between buttons'},{k:'10 / 12 px',v:'Grid gap mobile / desktop'},{k:'14 / 24 px',v:'Page padding mobile / desktop'},{k:'14–16 px',v:'Card padding'},{k:'4 · 8 · 14 px',v:'Radius: buttons · cards · sheets'},{k:'999 px',v:'Chips and badges'}],
+      type:[{k:'26 / 500',v:'Mobile screen title'},{k:'22 / 500',v:'Desktop title, tile figures'},{k:'17–19 / 500',v:'Banner and card headlines'},{k:'14–15 / 400',v:'Body'},{k:'12–13 / 500',v:'Labels, chips, captions'},{k:'12 mono',v:'Logs, versions, times, IDs'}],
+      motion:[{k:'120 ms ease-out',v:'Hover and press tints'},{k:'200 ms ease-out',v:'Toast and sheet enter'},{k:'1 s linear loop',v:'Spinner while busy'},{k:'3.8 s',v:'Toast dwell'},{k:'reduced motion',v:'All animation off; spinner becomes static icon'}],
+      notes:['Status never relies on color alone: every chip, row and dot has an icon or a word next to it.','Remote mode hides nothing silently: Update and Re-run gate render disabled with a lock and "Only available on the tailnet".','The dashboard runs in Docker, so it is down whenever the gate holds Docker. The offline screen reads the last snapshot from the service worker cache and says when it was taken. Consider running the dashboard outside the gate (no media mount dependency) so it can stay up during a failure.','Hit targets are 44 px on mobile, 32 px on desktop. Respect safe-area insets top and bottom; pull to refresh on every tab.','Fonts and icons must be self-hosted for offline use. The mockup loads Inter and Phosphor from CDNs only for preview.']
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,52 @@
+---
+# push-core is retired into Dashboard v2 (docs/CONTRACTS.md §11.5, ADR 0013). The dashboard is a host
+# service on the same port (127.0.0.1:8085) and role dashboard runs right after this role, so the old push
+# stack is removed from hosts that still have it and the port is free before the dashboard starts.
+#
+# Deliberately left alone, because role dashboard owns them now: homelab_push_dir and its files
+# (vapid.json, subscriptions.json), and the uid/gid 10101 account (renamed pushcore -> dashboard there).
+# `docker compose down` never touches the bind-mounted push dir (no named volumes, no --volumes).
+
+- name: Retire push | look for the push stack from an earlier deploy
+  ansible.builtin.stat:
+    path: "{{ homelab_stacks_dir }}/push/compose.yaml"
+    get_checksum: false
+  register: stacks_push_compose_stat
+
+- name: Retire push | push project is down (container and its network removed)
+  community.docker.docker_compose_v2:
+    project_src: "{{ homelab_stacks_dir }}/push"
+    state: absent
+    remove_orphans: true
+  when: stacks_push_compose_stat.stat.exists
+
+# Fallbacks for a half-removed stack (compose file already gone): both are no-ops when nothing is left.
+- name: Retire push | no push-core container is left
+  community.docker.docker_container:
+    name: "{{ stacks_retired_push_container }}"
+    state: absent
+
+- name: Retire push | no push project network is left
+  community.docker.docker_network:
+    name: "{{ stacks_retired_push_network }}"
+    state: absent
+
+- name: Retire push | push stack directory (compose file and build context) is removed
+  ansible.builtin.file:
+    path: "{{ homelab_stacks_dir }}/push"
+    state: absent
+
+# Matched by repository, every tag, so this does not depend on local_images.push_core still existing.
+- name: Retire push | find push-core images (any tag)
+  community.docker.docker_host_info:
+    images: true
+    images_filters:
+      reference: "{{ stacks_retired_push_image_repo }}"
+  register: stacks_push_images
+
+- name: Retire push | push-core images are removed
+  community.docker.docker_image:
+    name: "{{ item }}"
+    state: absent
+    force_absent: true
+  loop: "{{ stacks_push_images.images | map(attribute='Id') | unique | list }}"

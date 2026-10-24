@@ -1,0 +1,17 @@
+---
+# Order matters: handlers run in this order, so units are reloaded before anything restarts.
+- name: Dashboard daemon-reload
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+# Only the listening socket. Running helper instances finish their one request; the next
+# connection already starts the new script (one process per connection).
+- name: Restart homelab-dockerctl socket
+  ansible.builtin.systemd_service:
+    name: homelab-dockerctl.socket
+    state: restarted
+
+- name: Restart homelab-dashboard
+  ansible.builtin.systemd_service:
+    name: "{{ dashboard_service }}"
+    state: restarted

@@ -1,5 +1,5 @@
 ---
-# docs/CONTRACTS.md §2. The push store (homelab_push_dir) is laid out in push.yml.
+# docs/CONTRACTS.md §2. The push store (homelab_push_dir) belongs to role dashboard (§11.5), not this role.
 
 - name: Layout | homelab root, stacks and data dirs
   ansible.builtin.file:
@@ -20,7 +20,7 @@
     owner: root
     group: root
     mode: "0755"
-  loop: "{{ ['media', 'utils', 'push'] + ([] if rehearsal | bool else ['edge']) }}"
+  loop: "{{ ['media', 'utils'] + ([] if rehearsal | bool else ['edge']) }}"
 
 - name: Layout | app config dirs
   ansible.builtin.file:

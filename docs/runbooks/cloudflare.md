@@ -5,7 +5,7 @@ the token from the vault (`vault_cloudflared_tunnel_token`). The **routes** live
 dashboard, and Noah sets them by hand. Ansible never calls the Cloudflare API.
 
 Only one thing is public: Jellyfin under `/watch` on `public_watch_host`. Every admin UI (Sonarr,
-Radarr, Prowlarr, SABnzbd, Jellyseerr, push core) is tailnet-only through `tailscale serve`. None of
+Radarr, Prowlarr, SABnzbd, Jellyseerr, the dashboard) is tailnet-only through `tailscale serve`. None of
 them gets a Cloudflare route. The `cloudflared` container sits on the `hl-public` network next to
 Jellyfin only, so even a wrong route cannot reach anything else.
 

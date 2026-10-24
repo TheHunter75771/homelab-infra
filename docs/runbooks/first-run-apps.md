@@ -8,16 +8,18 @@ the rest, in order, about 30–45 minutes.
 **Where:** a device on the tailnet. All admin URLs use the server's tailnet name over HTTPS
 (`tailscale serve`). Below, `<ts>` is the value of `tailnet_fqdn` from `inventory/host_vars/`
 (the full name, e.g. `<host>.<tailnet>.ts.net`). The short name and plain IPs will not work.
+Three ports, three browser origins (ADR 0015): the dashboard alone on the default port 443, the
+path-based apps on **8444**, Jellyseerr on **8443**. Keep the ports when bookmarking.
 
 | App | URL |
 |---|---|
-| Jellyfin | `https://<ts>/watch` |
-| SABnzbd | `https://<ts>/sabnzbd` |
-| Sonarr | `https://<ts>/sonarr` |
-| Radarr | `https://<ts>/radarr` |
-| Prowlarr | `https://<ts>/prowlarr` |
+| Jellyfin | `https://<ts>:8444/watch` |
+| SABnzbd | `https://<ts>:8444/sabnzbd` |
+| Sonarr | `https://<ts>:8444/sonarr` |
+| Radarr | `https://<ts>:8444/radarr` |
+| Prowlarr | `https://<ts>:8444/prowlarr` |
 | Jellyseerr | `https://<ts>:8443` |
-| Push core (alerts) | `https://<ts>/` |
+| Dashboard (status, alerts) | `https://<ts>/` |
 
 Inside Docker the apps reach each other by container name: `jellyfin:8096`, `sonarr:8989`,
 `radarr:7878`, `prowlarr:9696`, `sabnzbd:8080`. Use those names (not `<ts>`) wherever one app asks
@@ -28,7 +30,7 @@ Paths inside the containers: the media drive is `/data` (`/data/tv`, `/data/movi
 
 ---
 
-## 1. Jellyfin: `https://<ts>/watch`
+## 1. Jellyfin: `https://<ts>:8444/watch`
 
 1. Startup wizard → language → **create the admin user** with a strong password. Jellyfin is on the
    internet through the tunnel.
@@ -48,7 +50,7 @@ Paths inside the containers: the media drive is `/data` (`/data/tv`, `/data/movi
 7. TVs on the home network add the server as **`http://<lan_ip>:8096/watch`** (`lan_ip` from host_vars).
    Auto-discovery is not available (the container is not on host networking).
 
-## 2. SABnzbd: `https://<ts>/sabnzbd`
+## 2. SABnzbd: `https://<ts>:8444/sabnzbd`
 
 1. The quick-start wizard opens (no news server yet): language → enter your **Usenet server**
    (host, port 563, **SSL on**, username, password, connections up to your plan's limit) → **Test
@@ -63,12 +65,13 @@ Paths inside the containers: the media drive is `/data` (`/data/tv`, `/data/movi
    Save each row.
 5. Leave **Config → Sorting** off. Sonarr/Radarr do the renaming.
 
-> "Access denied - Hostname verification failed" means you used a name other than `<ts>`.
+> "Access denied - Hostname verification failed" means you used a name other than `<ts>` (the port
+> doesn't matter: SABnzbd strips it before checking).
 > Use the full tailnet name (this goes away once a username/password is set).
 > In **rehearsal** SABnzbd starts **paused** on purpose (`start_paused`, kept in step with `rehearsal`
 > by Ansible). Don't resume it during a drill.
 
-## 3. Sonarr: `https://<ts>/sonarr`
+## 3. Sonarr: `https://<ts>:8444/sonarr`
 
 1. First visit shows **Authentication Required** (forms login is preset) → choose a username and
    password → Save.
@@ -85,14 +88,14 @@ Paths inside the containers: the media drive is `/data` (`/data/tv`, `/data/movi
    **Upgrade Until**. Delete or ignore the 4K ones unless the drive is sized for them.
 5. **Settings → General → Security**: copy the **API Key** (for Prowlarr and Jellyseerr).
 
-## 4. Radarr: `https://<ts>/radarr`
+## 4. Radarr: `https://<ts>:8444/radarr`
 
 Same as Sonarr, with these differences:
 - Root folder **`/data/movies`**; **Unmonitor Deleted Movies** = on.
 - Download client SABnzbd with Category **`movies`** (Host `sabnzbd`, Port `8080`, URL Base `/sabnzbd`).
 - Copy the API key from **Settings → General**.
 
-## 5. Prowlarr: `https://<ts>/prowlarr`
+## 5. Prowlarr: `https://<ts>:8444/prowlarr`
 
 1. **Authentication Required** → username/password → Save.
 2. **Indexers → Add Indexer** → your Usenet indexer(s) (Newznab) → API key → **Test** → Save.
@@ -153,9 +156,9 @@ every episode of every show you add. Start narrow and widen on purpose:
    for "(HW)" transcoding when forcing a lower quality.
 5. Sonarr/Radarr **System → Status** shows no health warnings (download client, root folder, indexers).
 
-## 9. Phone alerts (push core): `https://<ts>/`
+## 9. Phone alerts (dashboard): `https://<ts>/`
 
-On each phone (on the tailnet): open the page, set a label, **Subscribe**, then **Send test**.
-On iPhone, first use **Share → Add to Home Screen**, open it from the home screen, and then
-subscribe (iOS only allows Web Push for home-screen apps). For rehearsal drills, subscribe one
-device with the label **`test`**.
+On each phone (on the tailnet): open the dashboard, go to **Alerts**, tap **Subscribe this device**,
+set a label, then send a test. On iPhone, first use **Share → Add to Home Screen**, open it from the
+home screen, and then subscribe (iOS only allows Web Push for home-screen apps). For rehearsal
+drills, subscribe one device with the label **`test`**.

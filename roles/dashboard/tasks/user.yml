@@ -1,0 +1,96 @@
+---
+# CONTRACTS §11.1/§11.5: the push-core account "pushcore" (uid/gid 10101) becomes "dashboard".
+# The id never changes, so every file in the push store keeps its owner. On a fresh host the
+# account is created with that id. Each rename runs only while the old name still exists.
+
+- name: User | read the account databases
+  ansible.builtin.getent:
+    database: "{{ item }}"
+  loop:
+    - passwd
+    - group
+
+- name: User | what exists today
+  ansible.builtin.set_fact:
+    dashboard_has_user: "{{ dashboard_user in ansible_facts.getent_passwd }}"
+    dashboard_has_legacy_user: "{{ dashboard_legacy_user in ansible_facts.getent_passwd }}"
+    dashboard_has_group: "{{ dashboard_user in ansible_facts.getent_group }}"
+    dashboard_has_legacy_group: "{{ dashboard_legacy_user in ansible_facts.getent_group }}"
+    dashboard_uid_owners: >-
+      {{ ansible_facts.getent_passwd | dict2items | selectattr('value.1', 'equalto', dashboard_uid | string)
+         | map(attribute='key') | list }}
+    dashboard_gid_owners: >-
+      {{ ansible_facts.getent_group | dict2items | selectattr('value.1', 'equalto', dashboard_gid | string)
+         | map(attribute='key') | list }}
+
+- name: User | the ids stay 10101 and belong to nobody else
+  ansible.builtin.assert:
+    that:
+      - not dashboard_has_user or ansible_facts.getent_passwd[dashboard_user][1] | int == dashboard_uid | int
+      - not dashboard_has_legacy_user or ansible_facts.getent_passwd[dashboard_legacy_user][1] | int == dashboard_uid | int
+      - not dashboard_has_group or ansible_facts.getent_group[dashboard_user][1] | int == dashboard_gid | int
+      - not dashboard_has_legacy_group or ansible_facts.getent_group[dashboard_legacy_user][1] | int == dashboard_gid | int
+      - not (dashboard_has_user and dashboard_has_legacy_user)
+      - not (dashboard_has_group and dashboard_has_legacy_group)
+      - dashboard_uid_owners | difference([dashboard_user, dashboard_legacy_user]) | length == 0
+      - dashboard_gid_owners | difference([dashboard_user, dashboard_legacy_user]) | length == 0
+    fail_msg: >-
+      Refusing to touch the accounts: {{ dashboard_user }}/{{ dashboard_legacy_user }} must be uid and gid
+      {{ dashboard_uid }}, only one of the two names may exist, and no other account may use that id.
+      Fix this by hand; this role never changes an id.
+    quiet: true
+
+- name: User | processes still running as the old account
+  ansible.builtin.command:
+    argv: [pgrep, --uid, "{{ dashboard_uid }}"]
+  register: dashboard_legacy_procs
+  changed_when: false
+  failed_when: dashboard_legacy_procs.rc not in [0, 1]
+  check_mode: false
+  when: dashboard_has_legacy_user
+
+# usermod refuses to rename an account in use. Role stacks retires push-core (the only thing
+# that ran as 10101) before this role runs.
+- name: User | nothing runs as the old account during the rename
+  ansible.builtin.assert:
+    that: dashboard_legacy_procs.rc == 1
+    fail_msg: >-
+      uid {{ dashboard_uid }} ({{ dashboard_legacy_user }}) still has running processes (push-core?).
+      Run role stacks first: it retires the push stack.
+    quiet: true
+  when: dashboard_has_legacy_user
+
+- name: User | rename the old account, keeping its uid
+  ansible.builtin.command:
+    argv: [usermod, --login, "{{ dashboard_user }}", "{{ dashboard_legacy_user }}"]
+  changed_when: true
+  when: dashboard_has_legacy_user
+  notify: Restart homelab-dashboard
+
+- name: User | rename the old group, keeping its gid
+  ansible.builtin.command:
+    argv: [groupmod, --new-name, "{{ dashboard_user }}", "{{ dashboard_legacy_user }}"]
+  changed_when: true
+  when: dashboard_has_legacy_group
+  notify: Restart homelab-dashboard
+
+- name: User | dashboard group
+  ansible.builtin.group:
+    name: "{{ dashboard_user }}"
+    gid: "{{ dashboard_gid }}"
+    system: true
+
+# append: false makes the supplementary list exact, so a stray docker membership is removed.
+- name: User | dashboard system user (no login; media and bootgate, never docker)
+  ansible.builtin.user:
+    name: "{{ dashboard_user }}"
+    uid: "{{ dashboard_uid }}"
+    group: "{{ dashboard_user }}"
+    groups: "{{ dashboard_groups }}"
+    append: false
+    system: true
+    comment: Homelab dashboard
+    shell: /usr/sbin/nologin
+    home: /nonexistent
+    create_home: false
+  notify: Restart homelab-dashboard

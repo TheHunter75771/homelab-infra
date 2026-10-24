@@ -1,0 +1,110 @@
+---
+# Only nodejs: npm stays off the host (dependencies are built on the controller). An npm package
+# left by an earlier run is not removed automatically.
+- name: App | Node.js from the Ubuntu archive
+  ansible.builtin.apt:
+    name: "{{ dashboard_packages }}"
+    state: present
+    install_recommends: false
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: App | Node.js version
+  ansible.builtin.command:
+    argv: [/usr/bin/node, --version]
+  register: dashboard_node_version
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: App | Node.js is the contract's major version
+  ansible.builtin.assert:
+    that: dashboard_node_version.stdout is match('^v' ~ dashboard_node_major ~ '[.]')
+    fail_msg: Expected Node.js {{ dashboard_node_major }}.x from the Ubuntu archive, got {{ dashboard_node_version.stdout | default('none') }}.
+    quiet: true
+  when: not ansible_check_mode
+
+- name: App | code directories (root-owned, read-only to the service)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ dashboard_app_dir }}"
+    - "{{ dashboard_server_dir }}"
+    - "{{ dashboard_web_dir }}"
+
+# node_modules is excluded (and so safe from --delete); a later task syncs it from the controller build.
+- name: App | server code from apps/dashboard/server
+  ansible.posix.synchronize:
+    src: "{{ dashboard_server_src }}/"
+    dest: "{{ dashboard_server_dir }}/"
+    delete: true
+    checksum: true
+    times: false
+    owner: false
+    group: false
+    perms: true
+    # The plugin's own default is a plain "sudo rsync"; use the play's become binary, non-interactive.
+    rsync_path: "{{ ansible_become_exe | default('sudo') }} -n rsync"
+    rsync_opts: "{{ dashboard_sync_excludes | map('regex_replace', '^', '--exclude=') | list + ['--chmod=D0755,F0644'] }}"
+  notify: Restart homelab-dashboard
+
+- name: App | web app (the static files in apps/dashboard/web/public)
+  ansible.posix.synchronize:
+    src: "{{ dashboard_web_src }}/"
+    dest: "{{ dashboard_web_dir }}/"
+    delete: true
+    checksum: true
+    times: false
+    owner: false
+    group: false
+    perms: true
+    rsync_path: "{{ ansible_become_exe | default('sudo') }} -n rsync"
+    rsync_opts: "{{ dashboard_sync_excludes | map('regex_replace', '^', '--exclude=') | list + ['--chmod=D0755,F0644'] }}"
+  notify: Restart homelab-dashboard
+
+# Built on the controller by tasks/build.yml. Synced as its own tree (the code sync above excludes
+# node_modules), root-owned and read-only to the service.
+- name: App | server dependencies built on the controller
+  ansible.posix.synchronize:
+    src: "{{ dashboard_build_dir }}/node_modules/"
+    dest: "{{ dashboard_server_dir }}/node_modules/"
+    delete: true
+    checksum: true
+    times: false
+    owner: false
+    group: false
+    perms: true
+    rsync_path: "{{ ansible_become_exe | default('sudo') }} -n rsync"
+    rsync_opts: ["--chmod=D0755,F0644"]
+  when: not (ansible_check_mode and dashboard_deps_needed | bool)   # nothing was built in a check run
+  notify: Restart homelab-dashboard
+
+- name: App | settings directory
+  ansible.builtin.file:
+    path: "{{ dashboard_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: App | runtime settings (ports, paths, remote access off)
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ dashboard_config_file }}"
+    owner: root
+    group: "{{ dashboard_gid }}"
+    mode: "0640"
+    validate: /usr/bin/python3 -c "import json, sys; json.load(open(sys.argv[1]))" %s
+  notify: Restart homelab-dashboard
+
+- name: App | state directory (settings.json, samples.jsonl, uptime/)
+  ansible.builtin.file:
+    path: "{{ dashboard_data_dir }}"
+    state: directory
+    owner: "{{ dashboard_uid }}"
+    group: "{{ dashboard_gid }}"
+    mode: "0750"

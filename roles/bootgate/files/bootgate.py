@@ -44,6 +44,14 @@ EVENTS = ("pass", "repair", "powercycle", "fail", "retry-pass", "media-lost")
 USB_DEVICE_RE = re.compile(r"^\d+-\d+(\.\d+)*$")
 UUID_RE = re.compile(r"^[0-9A-Fa-f-]{8,36}$")
 NOTIFY_TAG = "bootgate"
+# Push titles (all on tag "bootgate"). The dashboard counts a title as a recovery only if it ENDS
+# with a recovery phrase and holds no failure qualifier ("not", "fail...", "n't", ...), so only the
+# plain TITLE_BACK resolves the incident; the two qualified "back" titles keep it open.
+TITLE_FAILED = "Media drive failed"
+TITLE_LOST = "Media drive lost"
+TITLE_BACK = "Media drive back"
+TITLE_BACK_NO_DOCKER = "Media drive back, Docker did not start"
+TITLE_BACK_NO_MEDIA = "Media drive back, media apps did not restart"
 HISTORY_MAX_BYTES = 1_000_000
 HISTORY_KEEP_LINES = 2000
 # After SIGKILL, how long to wait for a child before abandoning it. A process stuck in
@@ -901,26 +909,28 @@ class Gate:
             restore_media = self.store.media_stopped() or status == "media-lost"
 
         # Outside the lock: starting docker.service may start bootgate.service, which takes it.
-        rc = 0
         notes = []
+        media_ok = True
         docker_ok, msg = self.host.start_docker()
-        notes.append("docker running" if docker_ok else f"docker start FAILED: {msg}")
-        if not docker_ok:
-            rc = 1
+        notes.append("docker running" if docker_ok else f"docker start FAILED: {msg[-300:]}")
         if restore_media and docker_ok:
             if self.host.compose_available():
-                up_ok, msg = self.host.compose("up")
-                notes.append("media apps restarted" if up_ok else f"media apps restart FAILED: {msg}")
-                if up_ok:
-                    self.store.set_media_stopped(False)
-                else:
-                    rc = 1
+                media_ok, msg = self.host.compose("up")
+                notes.append("media apps restarted" if media_ok else f"media apps restart FAILED: {msg[-300:]}")
+                if media_ok:
+                    self.store.set_media_stopped(False)  # else: kept, so the next retry tries again
             else:
                 notes.append("media stack not deployed")
                 self.store.set_media_stopped(False)
+        if not docker_ok:
+            title = TITLE_BACK_NO_DOCKER
+        elif not media_ok:
+            title = TITLE_BACK_NO_MEDIA
+        else:
+            title = TITLE_BACK  # only when Docker is up AND the media apps (if stopped) restarted
         body = ("Verified again" if not restore_only else "Drive verified") + "; " + "; ".join(notes) + "."
-        self.host.notify("Media drive back" if docker_ok else "Media drive back, Docker did not start", body)
-        return rc
+        self.host.notify(title, body)
+        return 0 if docker_ok and media_ok else 1
 
     def watch(self) -> int:
         with self.store.lock(blocking=False) as held:
@@ -949,7 +959,7 @@ class Gate:
         else:
             stopped = "media stack not deployed"
         self.host.notify(
-            "Media drive lost",
+            TITLE_LOST,
             f"Media drive lost; {stopped}. {why}. Retrying every {self.cfg.retry_minutes} min.",
         )
         return 0
@@ -964,7 +974,7 @@ class Gate:
         )
         rc = 1
         for attempt in range(1, self.cfg.alert_tries + 1):
-            rc = self.host.notify("Media drive failed", body)
+            rc = self.host.notify(TITLE_FAILED, body)
             if rc != 1:
                 break
             if attempt < self.cfg.alert_tries:

@@ -1,0 +1,21 @@
+# {{ ansible_managed }}
+# homelab-dockerctl (docs/CONTRACTS.md §11.2, ADR 0013): the dashboard's only way to Docker.
+# Accept=yes: systemd accepts each connection and starts one homelab-dockerctl@.service instance
+# with it on stdin. One request per connection, one short-lived root process per request.
+# No ordering on docker.service: the socket must answer (docker-state, ps of the declared apps)
+# while the boot gate holds Docker.
+[Unit]
+Description=Homelab dockerctl socket (the dashboard's privileged Docker helper)
+Documentation=file://{{ dashboard_dockerctl_script }}
+
+[Socket]
+ListenStream={{ dashboard_dockerctl_socket }}
+SocketUser=root
+SocketGroup={{ dashboard_user }}
+SocketMode=0660
+Accept=yes
+MaxConnections={{ dashboard_dockerctl_max_connections }}
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

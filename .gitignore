@@ -19,3 +19,6 @@ vault-pass*
 .env
 *.env
 !*.env.example
+
+# Controller-side build output (e.g. dashboard node_modules)
+.build/

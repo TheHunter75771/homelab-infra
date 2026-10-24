@@ -1,0 +1,9 @@
+---
+# Drift = the live config (tailscale_serve_compare_json: the raw `tailscale serve status --json` text)
+# differs from tailscale_serve_desired. Both sides are compared as JSON with sorted keys, so key order
+# never matters; any extra key (AllowFunnel, Services, Foreground, another port) counts as drift.
+- name: Serve | compare live with declared
+  ansible.builtin.set_fact:
+    tailscale_serve_drift: >-
+      {{ (tailscale_serve_compare_json | from_json | to_json(sort_keys=true))
+         != (tailscale_serve_desired | to_json(sort_keys=true)) }}

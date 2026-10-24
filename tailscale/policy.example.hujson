@@ -4,13 +4,15 @@
 // (logins) there, or in a git-ignored override once the policy moves to GitOps. Never commit
 // logins or email addresses to this file.
 //
-// Port map on the media server (tag:server), all reached over tailscale0:
+// Port map on the media server (tag:server), all reached over tailscale0
+// (one origin per port; see docs/adr/0015-the-dashboard-has-its-own-origin.md):
 //   22    OpenSSH (Tailscale SSH is off on the server)
-//   443   tailscale serve: push alerts (/), Jellyfin (/watch), Sonarr, Radarr, Prowlarr, SABnzbd
+//   443   tailscale serve: the dashboard only (push alerts and box controls)
 //   8443  tailscale serve: Jellyseerr (requests)
+//   8444  tailscale serve: Jellyfin (/watch), Sonarr, Radarr, Prowlarr, SABnzbd
 //   9999  wol-relay (token-gated)
-// Port 443 carries the admin UIs, so only admins get it. Household members get Jellyseerr only;
-// they watch Jellyfin on the LAN or through the public /watch tunnel.
+// 443 (controls) and 8444 (admin UIs) are for admins only. Household members get Jellyseerr
+// (8443) only; they watch Jellyfin on the LAN or through the public /watch tunnel.
 {
 	"groups": {
 		// Noah's login(s). Full access, including SSH and every admin UI.
@@ -27,13 +29,14 @@
 	},
 
 	"grants": [
-		// Admins keep access to everything they own and every tagged node.
+		// Admins keep access to everything they own and every tagged node (all ports, including
+		// 22, 443, 8443, 8444 and 9999 on tag:server).
 		{"src": ["group:admins"], "dst": ["*"], "ip": ["*"]},
 
 		// Everyone can reach their own devices.
 		{"src": ["autogroup:member"], "dst": ["autogroup:self"], "ip": ["*"]},
 
-		// Household: Jellyseerr only.
+		// Household: Jellyseerr only (not the dashboard on 443, not the admin apps on 8444).
 		{"src": ["group:household"], "dst": ["tag:server"], "ip": ["tcp:8443"]},
 
 		// Edge VPS heartbeat: `tailscale ping` plus a TCP check on 22. Nothing else.
@@ -43,11 +46,14 @@
 
 	// No Tailscale SSH rules: the server runs OpenSSH, limited by the grants above and by UFW.
 
+	// The edge VPS is the only non-admin principal without logins, so it's the one that can be
+	// tested here: SSH only, none of the three serve ports. Household tests need a real login as
+	// "src"; add them in the private copy (accept tag:server:8443, deny :22, :443, :8444, :9999).
 	"tests": [
 		{
 			"src": "tag:edge",
 			"accept": ["tag:server:22"],
-			"deny": ["tag:server:443", "tag:server:8443", "tag:server:9999"],
+			"deny": ["tag:server:443", "tag:server:8443", "tag:server:8444", "tag:server:9999"],
 		},
 	],
 }

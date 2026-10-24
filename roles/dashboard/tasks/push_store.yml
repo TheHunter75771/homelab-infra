@@ -1,0 +1,40 @@
+---
+# Contract 4 (push store), owned by this role since CONTRACTS §11.5:
+#   {{ homelab_push_dir }}                    dashboard:dashboard 0750 (the dashboard writes here, tmp + rename)
+#   {{ homelab_push_dir }}/vapid.json         root:dashboard      0640 (from the vault; the dashboard only reads it)
+#   {{ homelab_push_dir }}/subscriptions.json dashboard           seeded once; the dashboard is its single writer
+# Ownership uses the numeric ids, so these tasks also work in check mode before the rename.
+
+- name: Push store | directory
+  ansible.builtin.file:
+    path: "{{ homelab_push_dir }}"
+    state: directory
+    owner: "{{ dashboard_uid }}"
+    group: "{{ dashboard_gid }}"
+    mode: "0750"
+
+# Same rendering as role stacks used (sorted keys, 2-space indent), so the existing file is
+# left byte-for-byte unchanged.
+- name: Push store | VAPID keys from the vault
+  ansible.builtin.copy:
+    dest: "{{ homelab_push_dir }}/vapid.json"
+    content: >-
+      {{ {'publicKey': vapid_public_key, 'privateKey': vapid_private_key, 'subject': vapid_subject}
+         | to_nice_json(indent=2) }}
+    owner: root
+    group: "{{ dashboard_gid }}"
+    mode: "0640"
+  no_log: true
+  diff: false
+  notify: Restart homelab-dashboard
+
+# Only if absent (force: false leaves an existing file, its owner and its mode alone): after the
+# first start the dashboard owns it, and the notifier and the heartbeat sync only read it.
+- name: Push store | empty subscription list on a clean start
+  ansible.builtin.copy:
+    dest: "{{ homelab_push_dir }}/subscriptions.json"
+    content: "[]\n"
+    owner: "{{ dashboard_uid }}"
+    group: "{{ dashboard_gid }}"
+    mode: "0640"
+    force: false

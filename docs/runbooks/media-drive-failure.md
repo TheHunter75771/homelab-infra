@@ -4,7 +4,7 @@ Use this when you get **"Media drive lost"** (it dropped while running) or **"Me
 
 ## What the system already did
 - **Lost while running:** the watcher stopped the media stack (Jellyfin, *arr, SABnzbd, Jellyseerr). Everything else keeps running.
-- **Failed at boot:** the gate waited 12 min, ran the repair ladder (udev re-trigger, USB port reset or power-cycle, mount retry, read-only `fsck -n`), power-cycled **once**, waited again, then gave up **without rebooting again**. **Docker is held down**, so no containers run, including the tunnel and push page. SSH over the tailnet still works.
+- **Failed at boot:** the gate waited 12 min, ran the repair ladder (udev re-trigger, USB port reset or power-cycle, mount retry, read-only `fsck -n`), power-cycled **once**, waited again, then gave up **without rebooting again**. **Docker is held down**, so no containers run, including the tunnel. The dashboard (a host service) and the push alerts keep working. SSH over the tailnet still works.
 - In both cases a retry runs every 5 minutes. When the drive comes back, everything restarts on its own and you get **"Media drive back"**.
 
 ## Steps
@@ -33,5 +33,5 @@ Use this when you get **"Media drive lost"** (it dropped while running) or **"Me
 5. **Never** remove the sentinel file or edit `/var/lib/bootgate/attempts` to force things. The attempts counter is what prevents boot loops. A successful retry resets it.
 
 ## After recovery
-- Check that everything is healthy: `sudo docker ps`. Expect 9 healthy containers: cloudflared, jellyfin, jellyseerr, prowlarr, push-core, radarr, sabnzbd, sonarr, wol-relay.
+- Check that everything is healthy: the dashboard's Apps screen (it runs outside Docker, so it stays reachable even while the gate holds Docker), or `sudo docker ps`. Expect 8 healthy containers: cloudflared, jellyfin, jellyseerr, prowlarr, radarr, sabnzbd, sonarr, wol-relay.
 - If this keeps happening, it's hardware (the evidence on file points to power or cabling). Plan a new cable, a powered hub or a replacement drive.

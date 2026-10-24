@@ -11,6 +11,9 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
+import shutil
+import subprocess
 import tempfile
 import unittest
 from datetime import datetime
@@ -42,6 +45,8 @@ class FakeHost:
         notify_rcs=None,
         dev_majmin="8:1",
         mount_majmin="8:1",
+        docker_ok=True,
+        compose_up_ok=True,
     ):
         self.cfg = cfg
         self.t = 0.0
@@ -57,6 +62,8 @@ class FakeHost:
         self.notify_rcs = list(notify_rcs or [])
         self.dev_majmin = dev_majmin  # what /dev/disk/by-uuid/<uuid> points at now
         self.mount_majmin = mount_majmin  # what the mount at the mount point was made from
+        self.docker_ok = docker_ok
+        self.compose_up_ok = compose_up_ok
         self.calls: list[tuple] = []
         self.notes: list[tuple[str, str]] = []
 
@@ -133,13 +140,15 @@ class FakeHost:
     # docker / notify
     def start_docker(self):
         self.calls.append(("start_docker",))
-        return True, ""
+        return (True, "") if self.docker_ok else (False, "Job for docker.service failed")
 
     def compose_available(self):
         return True
 
     def compose(self, action):
         self.calls.append(("compose", action))
+        if action == "up" and not self.compose_up_ok:
+            return False, "Error response from daemon: driver failed programming external connectivity"
         return True, ""
 
     def notify(self, title, body):
@@ -458,6 +467,98 @@ class RetryAndWatch(GateTestCase):
         gate, host = self.gate(notify_rcs=[2])
         self.assertEqual(gate.alert(), 2)
         self.assertEqual(len(host.notes), 1)
+
+
+# Mirror of the dashboard's recovery rule (apps/dashboard/server/src/collectors/alerts.js,
+# isRecovery): a title resolves its incident only if it ENDS with a recovery phrase and holds
+# no failure qualifier anywhere. RecoveryTitles also checks the real one when node is present.
+RECOVERY_END_RE = re.compile(r"\b(?:back|recovered|online|resolved|healthy again|ok again|up again)[\s.!]*$", re.I)
+QUALIFIER_RE = re.compile(
+    r"\b(?:not|no|never|unable|cannot|fail(?:s|ed|ing|ure)?|errors?|still|but|however|except|partial(?:ly)?|"
+    r"degraded|without|pending)\b|\w+n['\u2019]t\b",
+    re.I,
+)
+
+
+def is_recovery(title):
+    return bool(RECOVERY_END_RE.search(title.strip())) and not QUALIFIER_RE.search(title)
+
+
+class RecoveryTitles(GateTestCase):
+    """Reviewer major 1: "Media drive back" only when Docker AND the media apps are back."""
+
+    def media_lost_retry(self, **kw):
+        self.store.set_status("media-lost")
+        self.store.set_media_stopped(True)
+        gate, host = self.gate(**kw)
+        return gate.check_retry(), host
+
+    def test_docker_and_media_apps_back_is_the_only_plain_recovery(self):
+        rc, host = self.media_lost_retry()
+        self.assertEqual(rc, 0)
+        self.assertEqual(host.notes[-1][0], "Media drive back")
+        self.assertIn(("compose", "up"), host.calls)
+        self.assertFalse(self.store.media_stopped())
+
+    def test_media_apps_failing_to_restart_keeps_the_incident_open(self):
+        rc, host = self.media_lost_retry(compose_up_ok=False)
+        self.assertEqual(rc, 1)
+        title, body = host.notes[-1]
+        self.assertEqual(title, "Media drive back, media apps did not restart")
+        self.assertIn("media apps restart FAILED", body)
+        self.assertTrue(self.store.media_stopped(), "kept so the next retry restarts them")
+        self.assertEqual(self.read("status"), "ok", "the drive itself is verified")
+
+    def test_restore_only_run_with_failing_media_apps_is_qualified_too(self):
+        self.store.set_status("ok")
+        self.store.set_media_stopped(True)
+        gate, host = self.gate(mounted=UUID, compose_up_ok=False)
+        self.assertEqual(gate.check_retry(), 1)
+        self.assertEqual(host.notes[-1][0], "Media drive back, media apps did not restart")
+
+    def test_docker_not_starting_wins_and_skips_the_media_restart(self):
+        rc, host = self.media_lost_retry(docker_ok=False)
+        self.assertEqual(rc, 1)
+        self.assertEqual(host.notes[-1][0], "Media drive back, Docker did not start")
+        self.assertNotIn(("compose", "up"), host.calls)
+
+    def test_failed_status_retry_needs_no_media_restart(self):
+        self.store.set_status("failed")
+        gate, host = self.gate()
+        self.assertEqual(gate.check_retry(), 0)
+        self.assertEqual(host.notes[-1][0], "Media drive back")
+        self.assertNotIn(("compose", "up"), host.calls)
+
+    def test_titles_against_the_dashboard_rule(self):
+        self.assertTrue(is_recovery(bootgate.TITLE_BACK))
+        self.assertIsNone(QUALIFIER_RE.search(bootgate.TITLE_BACK), "the plain title must hold no qualifier")
+        for title in (bootgate.TITLE_BACK_NO_DOCKER, bootgate.TITLE_BACK_NO_MEDIA):
+            self.assertFalse(is_recovery(title), title)
+            self.assertIsNotNone(QUALIFIER_RE.search(title), title)
+        for title in (bootgate.TITLE_FAILED, bootgate.TITLE_LOST):
+            self.assertFalse(is_recovery(title), title)
+
+    def test_titles_against_the_real_dashboard_code(self):
+        alerts_js = HERE.parents[3] / "apps/dashboard/server/src/collectors/alerts.js"
+        node = shutil.which("node")
+        if not node or not alerts_js.exists():
+            self.skipTest("node or the dashboard source is not available")
+        titles = [
+            bootgate.TITLE_BACK,
+            bootgate.TITLE_BACK_NO_DOCKER,
+            bootgate.TITLE_BACK_NO_MEDIA,
+            bootgate.TITLE_LOST,
+            bootgate.TITLE_FAILED,
+        ]
+        script = (
+            f"import {{ isRecovery }} from {json.dumps(alerts_js.as_uri())};"
+            f"console.log(JSON.stringify({json.dumps(titles)}.map((t) => isRecovery(t))));"
+        )
+        out = subprocess.run(
+            [node, "--input-type=module", "-e", script], check=False, capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), [True, False, False, False, False])
 
 
 class Helpers(unittest.TestCase):

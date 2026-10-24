@@ -1,0 +1,114 @@
+---
+- name: Preflight | role inputs
+  ansible.builtin.assert:
+    that:
+      # Fixed by CONTRACTS §11.1: the push store already belongs to 10101.
+      - dashboard_uid | int == 10101
+      - dashboard_gid | int == 10101
+      - dashboard_user is match('^[a-z_][a-z0-9_-]*$')
+      - dashboard_legacy_user is match('^[a-z_][a-z0-9_-]*$')
+      - "'docker' not in dashboard_groups"
+      - dashboard_listen_host in ['127.0.0.1', '::1']
+      - dashboard_port | int > 0 and dashboard_port | int < 65536
+      # ADR 0014: v2.0 is tailnet-only. Remote access needs its own ADR first.
+      - not (dashboard_remote_enabled | bool)
+      - dashboard_server_entry is match('^[A-Za-z0-9_][A-Za-z0-9_./-]*\.m?js$')
+      - "'..' not in dashboard_server_entry"
+      - homelab_push_dir is match('^/[A-Za-z0-9_./-]+$')
+      - homelab_stacks_dir is match('^/[A-Za-z0-9_./-]+$')
+      - media_mount is match('^/[A-Za-z0-9_]+(/[A-Za-z0-9_]+)*$')
+      - backup_pull_user is match('^[a-z_][a-z0-9_-]*$')
+    fail_msg: >-
+      Check the dashboard inputs: uid/gid 10101, loopback listen address, remote access off
+      (ADR 0014), a .js entry inside the server dir, and absolute layout paths.
+    quiet: true
+
+# The secrets are checked one at a time and never printed (no values in any failure output).
+- name: Preflight | the VAPID public key is raw base64url (87 characters)
+  ansible.builtin.assert:
+    that:
+      - vapid_public_key is match('^[A-Za-z0-9_-]{87}$')
+      - vapid_public_key | length == 87
+    quiet: true
+  no_log: true
+
+- name: Preflight | the VAPID private key is raw base64url (43 characters)
+  ansible.builtin.assert:
+    that:
+      - vapid_private_key is match('^[A-Za-z0-9_-]{43}$')
+      - vapid_private_key | length == 43
+    quiet: true
+  no_log: true
+
+- name: Preflight | the VAPID subject is an https URL
+  ansible.builtin.assert:
+    that:
+      - vapid_subject is match('^https://[^/\s]+')
+    quiet: true
+  no_log: true
+
+- name: Preflight | runbook links (Settings > Runbooks)
+  ansible.builtin.assert:
+    that:
+      - dashboard_runbook_base_url is match('^https://[^\s]+/$')
+      - dashboard_runbooks | length > 0
+      - dashboard_runbooks | rejectattr('title', 'defined') | list | length == 0
+      - dashboard_runbooks | rejectattr('path', 'defined') | list | length == 0
+      - dashboard_runbooks | map(attribute='title') | select('match', '^\S.*$') | list | length == dashboard_runbooks | length
+      - dashboard_runbooks | map(attribute='path') | select('match', '^[A-Za-z0-9_][A-Za-z0-9_./-]*[.]md$') | list | length == dashboard_runbooks | length
+      - dashboard_runbooks | map(attribute='path') | select('search', '[.][.]') | list | length == 0
+    fail_msg: >-
+      dashboard_runbook_base_url must be an https URL ending in "/", and every dashboard_runbooks entry needs a
+      title and a repo-relative .md path (no "..").
+    quiet: true
+
+- name: Preflight | the runbooks exist in this repository
+  ansible.builtin.stat:
+    path: "{{ dashboard_repo_dir }}/{{ item.path }}"
+  loop: "{{ dashboard_runbooks }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: dashboard_runbook_stat
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Preflight | require the runbooks
+  ansible.builtin.assert:
+    that: dashboard_runbook_stat.results | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      Runbooks missing from the repository:
+      {{ dashboard_runbook_stat.results | rejectattr('stat.exists') | map(attribute='item.path') | join(', ') }}
+    quiet: true
+  run_once: true
+
+- name: Preflight | read the group database
+  ansible.builtin.getent:
+    database: group
+
+- name: Preflight | the supplementary groups exist (roles users and bootgate run first)
+  ansible.builtin.assert:
+    that: item in ansible_facts.getent_group
+    fail_msg: Group {{ item }} is missing; run roles users and bootgate before role dashboard.
+    quiet: true
+  loop: "{{ dashboard_groups }}"
+
+- name: Preflight | the app sources exist on the controller (modules D and G)
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ dashboard_server_src }}/package.json"
+    - "{{ dashboard_server_src }}/package-lock.json"
+    - "{{ dashboard_server_src }}/{{ dashboard_server_entry }}"
+    - "{{ dashboard_web_src }}/index.html"
+  register: dashboard_src_stat
+  delegate_to: localhost
+  become: false
+
+- name: Preflight | require the app sources
+  ansible.builtin.assert:
+    that: dashboard_src_stat.results | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      Missing on the controller:
+      {{ dashboard_src_stat.results | rejectattr('stat.exists') | map(attribute='item') | join(', ') }}
+    quiet: true

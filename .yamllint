@@ -3,7 +3,8 @@ extends: default
 ignore: |
   .venv/
   collections/
-  apps/*/node_modules/
+  .build/
+  node_modules/
   inventory/group_vars/media_servers/vault.yml
 rules:
   line-length:

@@ -1,0 +1,40 @@
+---
+# homelab-dockerctl (CONTRACTS §11.2): one root process per connection (Accept=yes), so a new
+# script or config takes effect on the next request without restarting anything.
+
+- name: Helper | install homelab-dockerctl (Python 3 stdlib)
+  ansible.builtin.copy:
+    src: homelab-dockerctl/homelab_dockerctl.py
+    dest: "{{ dashboard_dockerctl_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Helper | settings
+  ansible.builtin.template:
+    src: dockerctl.json.j2
+    dest: "{{ dashboard_dockerctl_config }}"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/bin/python3 -c "import json, sys; json.load(open(sys.argv[1]))" %s
+
+- name: Helper | socket unit
+  ansible.builtin.template:
+    src: homelab-dockerctl.socket.j2
+    dest: /etc/systemd/system/homelab-dockerctl.socket
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Dashboard daemon-reload
+    - Restart homelab-dockerctl socket
+
+- name: Helper | per-connection service unit
+  ansible.builtin.template:
+    src: homelab-dockerctl@.service.j2
+    dest: /etc/systemd/system/homelab-dockerctl@.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Dashboard daemon-reload

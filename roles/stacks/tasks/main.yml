@@ -1,13 +1,17 @@
 ---
-# Role stacks (docs/CONTRACTS.md §6): network, layout, presets and the four compose projects.
-# Order: checks -> layout -> network -> media -> edge -> utils -> push. Every compose project is
+# Role stacks (docs/CONTRACTS.md §6): network, layout, presets and the three compose projects.
+# Order: checks -> layout -> retire push -> network -> media -> edge -> utils. Every compose project is
 # brought up with community.docker.docker_compose_v2 (state present), so a re-run reports changed=0.
+# push-core is retired (§11.5): Dashboard v2 (role dashboard, after this role) serves 127.0.0.1:8085.
 
 - name: Preflight checks
   ansible.builtin.import_tasks: preflight.yml
 
 - name: Directory layout
   ansible.builtin.import_tasks: layout.yml
+
+- name: Retired push stack (push-core, replaced by the dashboard)
+  ansible.builtin.import_tasks: retire_push.yml
 
 - name: Shared network for the tunnel
   community.docker.docker_network:
@@ -27,6 +31,3 @@
 
 - name: Utils stack (wol-relay)
   ansible.builtin.import_tasks: utils.yml
-
-- name: Push stack (push-core)
-  ansible.builtin.import_tasks: push.yml

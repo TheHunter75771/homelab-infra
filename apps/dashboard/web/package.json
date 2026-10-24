@@ -1,0 +1,26 @@
+{
+  "name": "homelab-dashboard-web",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Dashboard v2 PWA (static files in public/, served by apps/dashboard/server)",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@fontsource/inter": "5.3.0",
+    "@phosphor-icons/core": "2.1.1",
+    "htm": "3.1.1",
+    "linkedom": "0.18.14",
+    "preact": "11.0.2"
+  },
+  "scripts": {
+    "vendor": "node scripts/vendor.mjs && node scripts/stamp-sw.mjs",
+    "dev": "node scripts/dev-server.mjs",
+    "test": "node scripts/test.mjs",
+    "test:browser": "node --test --test-reporter=spec test/chromium.check.mjs",
+    "stamp": "node scripts/stamp-sw.mjs",
+    "dump-summaries": "node scripts/dump-server-summaries.mjs"
+  }
+}

@@ -53,7 +53,7 @@ class StubSender:
 
 
 class RecordingUnsubscriber:
-    """Stands in for push-core's /api/unsubscribe. status=None models push-core being down."""
+    """Stands in for the dashboard's /api/unsubscribe. status=None models the dashboard being down."""
 
     def __init__(self, status=200):
         self.status = status
@@ -85,7 +85,7 @@ class NotifyCase(unittest.TestCase):
                     "push_dir": str(self.push),
                     "state_dir": str(self.state),
                     "rehearsal_flag": str(self.flag),
-                    # never the real push-core on this machine: a port nobody listens on
+                    # never the real dashboard on this machine: a port nobody listens on
                     "pushcore_url": f"http://127.0.0.1:{closed_port()}",
                 }
             )
@@ -201,6 +201,109 @@ class Dedupe(NotifyCase):
         self.assertFalse(hn.is_duplicate(state, hn.dedupe_key("t", "T"), 50.0, 1800), "clock went backwards")
 
 
+class TagClearing(NotifyCase):
+    """CONTRACTS §4 (amended): a different title on a tag clears that tag's dedupe entries."""
+
+    MIN = 60.0
+
+    def history_titles(self):
+        path = self.state / "history.jsonl"
+        return [json.loads(x)["title"] for x in path.read_text().splitlines()] if path.exists() else []
+
+    def send(self, sender, title, tag="bootgate", at=0.0):
+        return self.run_cli("--tag", tag, "--title", title, "--body", "b", sender=sender, now=1000.0 + at)
+
+    def test_reviewer_sequence_lost_back_lost_pushes_and_records_the_second_loss(self):
+        self.write_subs([sub("a")])
+        s = StubSender()
+        self.send(s, "Media drive lost", at=0)
+        self.send(s, "Media drive back", at=5 * self.MIN)
+        self.assertEqual(self.send(s, "Media drive lost", at=10 * self.MIN), hn.EXIT_OK)
+        sent = [p["title"] for _, p in s.sent]
+        self.assertEqual(sent, ["Media drive lost", "Media drive back", "Media drive lost"])
+        self.assertEqual(self.history_titles(), sent, "the dashboard must see the re-loss")
+        self.send(s, "Media drive lost", at=12 * self.MIN)  # same title again: still a duplicate
+        self.assertEqual(len(s.sent), 3)
+
+    def test_same_title_twice_is_still_suppressed(self):
+        self.write_subs([sub("a")])
+        s = StubSender()
+        self.send(s, "Media drive lost", at=0)
+        self.send(s, "Media drive lost", at=10 * self.MIN)
+        self.assertEqual((len(s.sent), len(self.history_titles())), (1, 1))
+
+    def test_a_different_tag_does_not_clear_another_tag(self):
+        self.write_subs([sub("a")])
+        s = StubSender()
+        self.send(s, "Media drive lost", tag="bootgate", at=0)
+        self.send(s, "sonarr is down", tag="alertfloor:sonarr:down", at=1 * self.MIN)
+        self.send(s, "sonarr recovered", tag="alertfloor:sonarr:down", at=2 * self.MIN)
+        self.send(s, "Media drive lost", tag="bootgate", at=3 * self.MIN)
+        self.assertEqual([p["title"] for _, p in s.sent], ["Media drive lost", "sonarr is down", "sonarr recovered"])
+        state = json.loads((self.state / "dedupe.json").read_text())
+        self.assertEqual(
+            sorted(state),
+            sorted(
+                [
+                    hn.dedupe_key("bootgate", "Media drive lost"),
+                    hn.dedupe_key("alertfloor:sonarr:down", "sonarr recovered"),
+                ]
+            ),
+        )
+
+    def test_rehearsal_prefixed_titles(self):
+        self.flag.write_text("")
+        self.write_subs([sub("drill", "test")])
+        s = StubSender()
+        self.send(s, "Media drive lost", at=0)
+        self.send(s, "Media drive back", at=5 * self.MIN)
+        self.send(s, "Media drive lost", at=10 * self.MIN)
+        self.send(s, "[REHEARSAL] Media drive lost", at=11 * self.MIN)  # already prefixed: same alert
+        sent = [p["title"] for _, p in s.sent]
+        self.assertEqual(
+            sent, ["[REHEARSAL] Media drive lost", "[REHEARSAL] Media drive back", "[REHEARSAL] Media drive lost"]
+        )
+        self.assertEqual(self.history_titles(), sent)
+
+    def test_clear_and_new_entry_are_one_atomic_write_with_private_state(self):
+        self.write_subs([sub("a")])
+        s = StubSender()
+        self.send(s, "Media drive lost", at=0)
+        with mock.patch.object(hn, "save_dedupe", wraps=hn.save_dedupe) as save:
+            self.send(s, "Media drive back", at=5 * self.MIN)
+        self.assertEqual(save.call_count, 1, "clear + record must land in a single state write")
+        state = json.loads((self.state / "dedupe.json").read_text())
+        self.assertEqual(list(state), [hn.dedupe_key("bootgate", "Media drive back")])
+        self.assertEqual(stat.S_IMODE((self.state / "dedupe.json").stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE((self.state / "history.jsonl").stat().st_mode), 0o644)
+        self.assertEqual(sorted(p.name for p in self.state.iterdir()), [".lock", "dedupe.json", "history.jsonl"])
+
+    def test_a_recovery_that_reached_nobody_still_clears(self):
+        self.write_subs([sub("a")])
+        s = StubSender()
+        self.send(s, "Media drive lost", at=0)
+        self.write_subs([])
+        self.assertEqual(self.send(s, "Media drive back", at=5 * self.MIN), hn.EXIT_NO_SUBSCRIPTIONS)
+        self.write_subs([sub("a")])
+        self.send(s, "Media drive lost", at=10 * self.MIN)
+        self.assertEqual([p["title"] for _, p in s.sent], ["Media drive lost", "Media drive lost"])
+        self.assertEqual(self.history_titles(), ["Media drive lost", "Media drive back", "Media drive lost"])
+
+    def test_a_recovery_whose_delivery_failed_still_clears(self):
+        self.write_subs([sub("a")])
+        self.send(StubSender(), "Media drive lost", at=0)
+        self.assertEqual(self.send(StubSender(raise_for={"a"}), "Media drive back", at=5 * self.MIN), hn.EXIT_ERROR)
+        s = StubSender()
+        self.send(s, "Media drive lost", at=10 * self.MIN)
+        self.assertEqual(len(s.sent), 1)
+
+    def test_clear_tag_pure(self):
+        state = {hn.dedupe_key("a", "x"): 1.0, hn.dedupe_key("a", "y"): 2.0, hn.dedupe_key("ab", "x"): 3.0}
+        self.assertEqual(hn.clear_tag(state, "a", "y"), [hn.dedupe_key("a", "x")])
+        self.assertEqual(state, {hn.dedupe_key("a", "y"): 2.0, hn.dedupe_key("ab", "x"): 3.0})
+        self.assertEqual(hn.clear_tag(state, "a", "y"), [])
+
+
 class Rehearsal(NotifyCase):
     def test_rehearsal_prefixes_and_targets_test_label_only(self):
         self.flag.write_text("")
@@ -232,7 +335,8 @@ class Rehearsal(NotifyCase):
 
 
 class Pruning(NotifyCase):
-    """B2: push-core is the single writer of subscriptions.json; the notifier only asks it."""
+    """B2: the dashboard (formerly push-core) is the single writer of subscriptions.json; the
+    notifier only asks it."""
 
     def freeze_push_dir(self, subs):
         path = self.write_subs(subs, mode=0o444)
@@ -259,10 +363,10 @@ class Pruning(NotifyCase):
         down = RecordingUnsubscriber(status=None)
         s = StubSender(statuses={"gone": 410, "other-gone": 404})
         self.assertEqual(self.run_cli("--title", "T", "--body", "B", sender=s, unsubscribe=down), hn.EXIT_OK)
-        self.assertEqual(len(down.endpoints), 1, "stop at the first sign push-core is down")
+        self.assertEqual(len(down.endpoints), 1, "stop at the first sign the dashboard is down")
         logged = self.err.getvalue()
-        self.assertNotIn("push-core refused", logged)
-        self.assertNotIn("push-core dropped", logged)
+        self.assertNotIn("the dashboard refused", logged)
+        self.assertNotIn("the dashboard dropped", logged)
         self.assertNotIn(": error:", logged)
         self.assertEqual(self.snapshot(path), before)
 
@@ -271,7 +375,7 @@ class Pruning(NotifyCase):
         refused = RecordingUnsubscriber(status=403)
         rc = self.run_cli("--title", "T", "--body", "B", sender=StubSender(statuses={"gone": 410}), unsubscribe=refused)
         self.assertEqual(rc, hn.EXIT_OK)
-        self.assertIn("push-core refused to unsubscribe a dead subscription (HTTP 403)", self.err.getvalue())
+        self.assertIn("the dashboard refused to unsubscribe a dead subscription (HTTP 403)", self.err.getvalue())
 
     def test_non_loopback_pushcore_url_is_never_used(self):
         self.assertIsNone(hn.make_pushcore_unsubscriber("http://192.0.2.10:8085", 3))
@@ -301,7 +405,7 @@ class _Recorder(http.server.BaseHTTPRequestHandler):
 
 
 class PushCoreClient(unittest.TestCase):
-    """The real HTTP call, against a local recording server (no push-core, no network)."""
+    """The real HTTP call, against a local recording server (no dashboard, no network)."""
 
     def setUp(self):
         _Recorder.seen = []
@@ -375,6 +479,126 @@ class Pure(NotifyCase):
         self.assertEqual(len(hn.select_targets(subs, rehearsal=False, test_only=False)), 2)
         self.assertEqual([s["label"] for s in hn.select_targets(subs, rehearsal=True, test_only=False)], ["test"])
         self.assertEqual([s["label"] for s in hn.select_targets(subs, rehearsal=False, test_only=True)], ["test"])
+
+
+class History(NotifyCase):
+    """§11.5: every send is appended to history.jsonl (0644) for the dashboard."""
+
+    DAY = 86400.0
+
+    def history(self):
+        path = self.state / "history.jsonl"
+        return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+
+    def test_send_is_recorded_with_exactly_the_contract_fields(self):
+        self.write_subs([sub("a"), sub("b"), sub("gone"), sub("busy")])
+        s = StubSender(statuses={"gone": 410, "busy": 500})
+        rc = self.run_cli("--tag", "bootgate", "--title", "Media drive failed", "--body", "held down", sender=s)
+        self.assertEqual(rc, hn.EXIT_OK)
+        (entry,) = self.history()
+        self.assertEqual(
+            entry,
+            {
+                "ts": "1970-01-12T13:46:40+00:00",
+                "title": "Media drive failed",
+                "body": "held down",
+                "tag": "bootgate",
+                "delivered": 2,
+                "failed": 2,
+            },
+        )
+
+    def test_history_never_holds_endpoints_or_keys(self):
+        self.write_subs([sub("SECRET-ENDPOINT-1"), sub("gone")])
+        self.run_cli("--title", "T", "--body", "B", sender=StubSender(statuses={"gone": 404}))
+        text = (self.state / "history.jsonl").read_text()
+        for needle in ("SECRET-ENDPOINT-1", "push.example.invalid", "https://", "BPk-key", "auth-secret"):
+            self.assertNotIn(needle, text)
+
+    def test_dedupe_suppressed_sends_are_not_recorded(self):
+        self.write_subs([sub("a")])
+        args = ("--tag", "bootgate", "--title", "Media drive lost", "--body", "x")
+        self.run_cli(*args, now=1000.0)
+        self.run_cli(*args, now=1060.0)  # suppressed duplicate
+        self.assertEqual(len(self.history()), 1)
+
+    def test_rehearsal_is_recorded_with_the_title_as_sent(self):
+        self.flag.write_text("")
+        self.write_subs([sub("drill", "test")])
+        self.run_cli("--title", "Media drive failed", "--body", "B")
+        self.assertEqual(self.history()[0]["title"], "[REHEARSAL] Media drive failed")
+
+    def test_a_send_that_reaches_nobody_is_recorded(self):
+        self.assertEqual(self.run_cli("--title", "Media drive failed", "--body", "B"), hn.EXIT_NO_SUBSCRIPTIONS)
+        entry = self.history()[0]
+        self.assertEqual(
+            (entry["title"], entry["tag"], entry["delivered"], entry["failed"]), ("Media drive failed", None, 0, 0)
+        )
+
+    def test_failed_send_is_recorded(self):
+        self.write_subs([sub("a"), sub("b")])
+        self.assertEqual(hn.main(["--title", "T", "--body", "B"], unsubscribe=self.unsub, now=5.0), hn.EXIT_ERROR)
+        self.assertEqual((self.history()[0]["delivered"], self.history()[0]["failed"]), (0, 2))  # no vapid.json
+
+    def test_modes_history_public_dedupe_private_even_with_umask_077(self):
+        self.write_subs([sub("a")])
+        old = os.umask(0o077)
+        try:
+            self.run_cli("--tag", "t", "--title", "T", "--body", "B")
+        finally:
+            os.umask(old)
+        self.assertEqual(stat.S_IMODE((self.state / "history.jsonl").stat().st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE((self.state / "dedupe.json").stat().st_mode), 0o600)
+
+    def test_entries_older_than_90_days_are_trimmed_on_write(self):
+        self.write_subs([sub("a")])
+        now = 200 * self.DAY
+        self.state.mkdir()
+        old = hn.history_entry(now - 91 * self.DAY, "old", "b", tag=None, delivered=1, failed=0)
+        recent = hn.history_entry(now - 10 * self.DAY, "recent", "b", tag=None, delivered=1, failed=0)
+        (self.state / "history.jsonl").write_text(json.dumps(old) + "\n" + json.dumps(recent) + "\n")
+        self.run_cli("--title", "new", "--body", "b", now=now)
+        self.assertEqual([e["title"] for e in self.history()], ["recent", "new"])
+        self.assertEqual(stat.S_IMODE((self.state / "history.jsonl").stat().st_mode), 0o644)
+        self.assertEqual(sorted(p.name for p in self.state.iterdir()), [".lock", "history.jsonl"])
+
+    def test_a_normal_append_does_not_rewrite_the_file(self):
+        self.write_subs([sub("a")])
+        self.run_cli("--title", "one", "--body", "b", now=100 * self.DAY)
+        inode = (self.state / "history.jsonl").stat().st_ino
+        self.run_cli("--title", "two", "--body", "b", now=100 * self.DAY + 60)
+        self.assertEqual((self.state / "history.jsonl").stat().st_ino, inode, "cheap path must only append")
+        self.assertEqual([e["title"] for e in self.history()], ["one", "two"])
+
+    def test_size_cap_keeps_the_newest_entries(self):
+        cfg = json.loads(self.config.read_text())
+        cfg["history_max_bytes"] = 4000
+        self.config.write_text(json.dumps(cfg))
+        self.write_subs([sub("a")])
+        for i in range(60):
+            self.run_cli("--title", f"alert {i:02d}", "--body", "x" * 40, now=100 * self.DAY + i)
+        size = (self.state / "history.jsonl").stat().st_size
+        titles = [e["title"] for e in self.history()]
+        self.assertLessEqual(size, 4000)
+        self.assertEqual(titles[-1], "alert 59")
+        self.assertEqual(titles, sorted(titles), "order kept, oldest dropped first")
+        self.assertNotIn("alert 00", titles)
+
+    def test_unwritable_history_does_not_break_the_push(self):
+        self.write_subs([sub("a")])
+        self.state.mkdir()
+        (self.state / "history.jsonl").mkdir()  # cannot be opened for append
+        s = StubSender()
+        self.assertEqual(self.run_cli("--title", "T", "--body", "B", sender=s), hn.EXIT_OK)
+        self.assertEqual(len(s.sent), 1)
+        self.assertIn("could not record the send", self.err.getvalue())
+
+    def test_garbage_first_line_is_dropped_on_write(self):
+        self.write_subs([sub("a")])
+        self.state.mkdir()
+        (self.state / "history.jsonl").write_text("not json\n")
+        self.run_cli("--title", "T", "--body", "B", now=100 * self.DAY)
+        self.assertEqual([e["title"] for e in self.history()], ["T"])
 
 
 if __name__ == "__main__":

@@ -1,0 +1,22 @@
+---
+# One invalid case for test_serve_config.yml: case = {name, handlers}. The role's validation must fail
+# on its preconditions assert (not anywhere else).
+- name: Validation fails for {{ case.name }}
+  block:
+    - name: Run the role's validation
+      ansible.builtin.include_role:
+        name: "{{ tailscale_serve_role }}"
+        tasks_from: validate
+      vars:
+        tailscale_serve_handlers: "{{ case.handlers }}"
+
+    - name: Validation accepted an invalid list
+      ansible.builtin.fail:
+        msg: "validate.yml accepted an invalid handler list: {{ case.name }}"
+  rescue:
+    - name: It was the preconditions assert that failed
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_task.name is search('preconditions')
+        fail_msg: "unexpected failure in {{ ansible_failed_task.name }}: {{ ansible_failed_result.msg | default('') }}"
+        quiet: true

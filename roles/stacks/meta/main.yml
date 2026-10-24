@@ -1,7 +1,7 @@
 ---
 galaxy_info:
   author: homelab-infra
-  description: Docker Compose stacks (media, edge, utils, push) with first-run presets
+  description: Docker Compose stacks (media, edge, utils) with first-run presets
   license: MIT
   min_ansible_version: "2.17"
   platforms:

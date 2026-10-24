@@ -1,0 +1,29 @@
+{#- Dashboard v2 settings (role dashboard), read through DASHBOARD_CONFIG by apps/dashboard/server/src/config.js.
+    Keys are module D's snake_case names; anything else is reported and ignored. No secrets here. -#}
+{%- set settings = {
+  'listen_host': dashboard_listen_host,
+  'listen_port': dashboard_port | int,
+  'display_name': dashboard_display_name,
+  'timezone': timezone,
+  'log_level': dashboard_log_level,
+  'remote_enabled': dashboard_remote_enabled | bool,
+  'web_dir': dashboard_web_dir,
+  'state_dir': dashboard_data_dir,
+  'push_dir': homelab_push_dir,
+  'data_dir': homelab_data_dir,
+  'media_mount': media_mount,
+  'helper_socket': dashboard_dockerctl_socket,
+  'gate_dir': dashboard_bootgate_state_dir,
+  'gate_rerun_file': dashboard_bootgate_run_dir ~ '/rerun',
+  'gate_retry_timer': dashboard_bootgate_retry_timer,
+  'gate_retry_service': dashboard_bootgate_retry_service,
+  'gate_retry_minutes': dashboard_bootgate_retry_minutes | int,
+  'reboot_required_file': dashboard_reboot_required_file,
+  'backup_status_file': dashboard_backup_status,
+  'notify_history_file': dashboard_notify_history,
+  'rehearsal_flag': dashboard_rehearsal_flag,
+  'pinned_images': dashboard_pinned_images,
+  'runbook_base_url': dashboard_runbook_base_url,
+  'runbooks': dashboard_runbooks,
+} -%}
+{{ settings | to_nice_json(indent=2) }}

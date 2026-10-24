@@ -1,0 +1,40 @@
+---
+- name: Service | homelab-dashboard unit
+  ansible.builtin.template:
+    src: homelab-dashboard.service.j2
+    dest: /etc/systemd/system/{{ dashboard_service }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Dashboard daemon-reload
+    - Restart homelab-dashboard
+
+# Reload units, then restart whatever changed (socket first, then the dashboard).
+- name: Service | apply pending reloads and restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Service | the helper socket listens on every boot
+  ansible.builtin.systemd_service:
+    name: homelab-dockerctl.socket
+    enabled: true
+    state: started
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Service | the dashboard runs on every boot
+  ansible.builtin.systemd_service:
+    name: "{{ dashboard_service }}"
+    enabled: true
+    state: started
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Service | the dashboard answers on its port
+  ansible.builtin.uri:
+    url: "{{ dashboard_healthz_url }}"
+    status_code: 200
+  register: dashboard_healthz
+  until: dashboard_healthz.status == 200
+  retries: 10
+  delay: 3
+  changed_when: false
+  when: not ansible_check_mode

@@ -1,5 +1,5 @@
 ---
-# One declared serve config for this node (docs/CONTRACTS.md §6), applied only when it differs.
+# One declared serve config for this node (docs/CONTRACTS.md §6, ADR 0015), applied only when it differs.
 #
 # Why not `tailscale serve set-config`: in Tailscale 1.102 set-config is for Tailscale Services only.
 # It requires --service=svc:<name> or --all, takes TCP endpoints only (no path handlers), and drops
@@ -7,6 +7,7 @@
 # compares it with `tailscale serve status --json`, and on any drift resets and re-applies it with the
 # documented `tailscale serve --bg` CLI. A config that already matches is never touched (changed=0).
 # Funnel is never enabled: the declared config has no AllowFunnel, so any funnel counts as drift.
+# validate.yml, desired.yml and compare.yml are shared with tests/test_serve_config.yml.
 
 - name: Serve | read this node's Tailscale status
   ansible.builtin.command:
@@ -19,28 +20,12 @@
   ansible.builtin.set_fact:
     tailscale_serve_node_name: "{{ (tailscale_serve_self_status.stdout | from_json).Self.DNSName | regex_replace('\\.$', '') }}"
     tailscale_serve_backend_state: "{{ (tailscale_serve_self_status.stdout | from_json).BackendState }}"
-    tailscale_serve_keys: >-
-      {{ tailscale_serve_handlers | map(attribute='port') | map('string')
-         | zip(tailscale_serve_handlers | map(attribute='mount')) | map('join', ' ') | list }}
 
-- name: Serve | preconditions (logged in, names agree, sane handler list)
-  ansible.builtin.assert:
-    that:
-      - tailscale_serve_backend_state == 'Running'
-      - tailscale_serve_node_name | lower == tailnet_fqdn | lower
-      - tailscale_serve_handlers | length > 0
-      - tailscale_serve_keys | length == tailscale_serve_keys | unique | length
-      - tailscale_serve_handlers | rejectattr('mount', 'match', '^/$|^(/[A-Za-z0-9._-]+)+$') | list | length == 0
-      - tailscale_serve_handlers | rejectattr('backend', 'match', '^http://127\.0\.0\.1:[0-9]+(/[A-Za-z0-9._-]+)*$') | list | length == 0
-    fail_msg: >-
-      Tailscale must be logged in (state {{ tailscale_serve_backend_state }}), host_vars tailnet_fqdn must equal
-      this node's tailnet name, and every handler needs a unique port+mount, a mount like /name and a
-      backend on http://127.0.0.1:<port>[/path].
-    quiet: true
+- name: Serve | preconditions
+  ansible.builtin.import_tasks: validate.yml
 
-- name: Serve | the declared config, in the shape status --json reports
-  ansible.builtin.set_fact:
-    tailscale_serve_desired: "{{ lookup('ansible.builtin.template', 'serve-config.json.j2') | from_json }}"
+- name: Serve | declared config
+  ansible.builtin.import_tasks: desired.yml
 
 - name: Serve | read the live serve config
   ansible.builtin.command:
@@ -49,11 +34,10 @@
   changed_when: false
   check_mode: false
 
-- name: Serve | compare live with declared
-  ansible.builtin.set_fact:
-    tailscale_serve_drift: >-
-      {{ (tailscale_serve_live.stdout | from_json | to_json(sort_keys=true))
-         != (tailscale_serve_desired | to_json(sort_keys=true)) }}
+- name: Serve | drift check
+  ansible.builtin.import_tasks: compare.yml
+  vars:
+    tailscale_serve_compare_json: "{{ tailscale_serve_live.stdout }}"
 
 - name: Serve | drift - clear this node's serve config
   ansible.builtin.command:

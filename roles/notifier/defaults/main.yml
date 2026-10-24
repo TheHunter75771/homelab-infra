@@ -15,10 +15,12 @@ notifier_dedupe_seconds: 1800
 notifier_ttl_seconds: 86400
 notifier_timeout_seconds: 10
 notifier_test_label: test
-# push-core's local API (published on loopback only, CONTRACTS §5). The notifier never writes
-# subscriptions.json; it asks push-core to drop dead subscriptions here (best-effort).
-notifier_pushcore_url: http://127.0.0.1:8085
-notifier_pushcore_timeout_seconds: 3
+# The dashboard's local API (formerly push-core's; same endpoints, same port, CONTRACTS §11.1/§11.3).
+# The notifier never writes subscriptions.json; it asks the dashboard to drop dead subscriptions
+# here (best-effort). The dashboard runs outside Docker (ADR 0013), so this works while the gate
+# holds Docker.
+notifier_dashboard_url: http://127.0.0.1:8085
+notifier_dashboard_timeout_seconds: 3
 
 # Alert floor.
 notifier_alertfloor_script: /usr/local/sbin/homelab-alertfloor

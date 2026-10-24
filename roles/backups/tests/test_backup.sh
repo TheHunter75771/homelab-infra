@@ -35,6 +35,7 @@ check() {
 
 B="$T/srv/backups"
 D="$T/srv/data"
+S="$T/status" # STATUS_DIR; outside srv so it survives setup() (tests remove it explicitly)
 
 setup() {
   chmod -R u+rwX "$T/srv" 2>/dev/null || true
@@ -77,7 +78,7 @@ PY
 run_backup() { # extra VAR=value pairs may be passed
   local rc=0
   env BACKUP_ROOT="$B" DATA_DIR="$D" PUSH_DIR="$T/srv/push" BOOTGATE_DIR="$T/srv/bootgate" \
-    KEEP=14 BACKUP_GROUP="$GROUP" NOTIFY_BIN="$T/notify" SQLITE3="$SQ" "$@" \
+    KEEP=14 BACKUP_GROUP="$GROUP" NOTIFY_BIN="$T/notify" SQLITE3="$SQ" STATUS_DIR="$S" "$@" \
     bash "$SCRIPT" >"$T/out.log" 2>&1 || rc=$?
   return "$rc"
 }
@@ -86,6 +87,16 @@ archives() { find "$B/appdata" -maxdepth 1 -name 'appdata-*.tar' -printf '%f\n' 
 newest() { archives | tail -n 1; }
 count_rows() { python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("select count(*) from t").fetchone()[0])' "$1"; }
 no_workdirs() { [ -z "$(find "$B" -maxdepth 1 -name '.work.*')" ]; }
+st() { jq -r "$1" "$S/status.json"; }
+corrupt_jellyfin_db() {
+  python3 - "$D/jellyfin/data/data/jellyfin.db" <<'PY'
+import sys
+with open(sys.argv[1], "r+b") as f:
+    f.seek(4096 + 8)          # inside page 2 (the table's b-tree page)
+    f.write(b"\xff" * 1500)
+PY
+}
+ISO_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
 
 # --- 1. Happy path, with uncheckpointed WAL data in a live database -------------------------
 setup
@@ -156,12 +167,7 @@ setup
 mkdir -p "$B/appdata"
 echo good >"$B/appdata/appdata-20200101T000000Z.tar"
 echo 2020-01-01T00:00:00Z >"$B/LAST_OK"
-python3 - "$D/jellyfin/data/data/jellyfin.db" <<'PY'
-import sys
-with open(sys.argv[1], "r+b") as f:
-    f.seek(4096 + 8)          # inside page 2 (the table's b-tree page)
-    f.write(b"\xff" * 1500)
-PY
+corrupt_jellyfin_db
 if run_backup; then bad "corrupt db: backup should fail"; else ok "corrupt db: backup exits non-zero"; fi
 check "corrupt db: failure pushed with --tag backup" grep -q -- '--tag backup --title Backup failed --body .*jellyfin' "$T/notify.log"
 check "corrupt db: no new archive" [ "$(archives)" = appdata-20200101T000000Z.tar ]
@@ -201,6 +207,7 @@ if [ "$(id -u)" = 0 ]; then
 else
   if run_backup; then bad "unreadable file: should fail"; else ok "unreadable file: exits non-zero"; fi
   check "unreadable file: failure pushed" grep -q 'tar of' "$T/notify.log"
+  check "unreadable file: status error is path-free" [ "$(st .error)" = "tar of data files failed (exit 2)" ]
 fi
 
 # --- 7. EXCLUDE_DIRS can be overridden -----------------------------------------------------------
@@ -208,6 +215,77 @@ setup
 check "EXCLUDE_DIRS='' backs up caches too" run_backup EXCLUDE_DIRS=
 mkdir -p "$T/x" && tar -xf "$B/appdata/$(newest)" -C "$T/x" files.tar.gz
 check "EXCLUDE_DIRS='': cache present" sh -c 'tar -tzf "$1" | grep -qx ./jellyfin/cache/img/a' _ "$T/x/files.tar.gz"
+
+# --- 8. status.json (dashboard, CONTRACTS §11.5) --------------------------------------------------
+# 8a. First run ever, and it fails: nothing to carry over.
+setup
+rm -rf "$S" "$D"
+if run_backup; then bad "status first run: should fail"; else ok "status first run: exits non-zero"; fi
+check "status first run: dir created 0755, file 0644" [ "$(stat -c %a "$S") $(stat -c %a "$S/status.json")" = "755 644" ]
+check "status first run: ok false, nothing carried" \
+  [ "$(jq -c '[.ok, .last_ok, .archive, .size_bytes, .error]' "$S/status.json")" = '[false,null,null,null,"data dir does not exist"]' ]
+check "status first run: last_run is ISO-8601 UTC" grep -qE "$ISO_RE" <(st .last_run)
+
+# 8b. Success.
+setup
+check "status success: exits 0" run_backup
+check "status success: exactly the six keys" \
+  [ "$(jq -c 'keys' "$S/status.json")" = '["archive","error","last_ok","last_run","ok","size_bytes"]' ]
+check "status success: ok true, error null" [ "$(jq -c '[.ok, .error]' "$S/status.json")" = '[true,null]' ]
+check "status success: archive is the bare file name" [ "$(st .archive)" = "$(newest)" ]
+check "status success: size_bytes is the archive size (a number)" \
+  [ "$(jq -c '.size_bytes' "$S/status.json")" = "$(stat -c %s "$B/appdata/$(newest)")" ]
+check "status success: last_ok equals LAST_OK" [ "$(st .last_ok)" = "$(cat "$B/LAST_OK")" ]
+check "status success: last_run equals last_ok" [ "$(st .last_run)" = "$(st .last_ok)" ]
+check "status success: file 0644" [ "$(stat -c %a "$S/status.json")" = 644 ]
+check "status success: no temp files left" [ -z "$(find "$S" -name '.status.*')" ]
+cp "$S/status.json" "$T/status.ok"
+
+# 8c. A failure carries last_ok/archive/size_bytes over from that success.
+sleep 1.1
+corrupt_jellyfin_db
+if run_backup; then bad "status failure: should fail"; else ok "status failure: exits non-zero"; fi
+check "status failure: ok false" [ "$(st .ok)" = false ]
+for k in last_ok archive size_bytes; do
+  check "status failure: $k carried over" [ "$(st ".$k")" = "$(jq -r ".$k" "$T/status.ok")" ]
+done
+check "status failure: last_run is this run" [ "$(st .last_run)" != "$(jq -r .last_run "$T/status.ok")" ]
+check "status failure: error is a path-free summary" [ "$(st .error)" = "integrity check failed for jellyfin.db (jellyfin)" ]
+check "status failure: push body is the same summary" \
+  grep -qxF -- "--tag backup --title Backup failed --body integrity check failed for jellyfin.db (jellyfin)" "$T/notify.log"
+
+# 8d. A second failure in a row still carries the last success.
+rm -rf "$D"
+if run_backup; then bad "status 2nd failure: should fail"; else ok "status 2nd failure: exits non-zero"; fi
+check "status 2nd failure: last_ok still the last success" [ "$(st .last_ok)" = "$(jq -r .last_ok "$T/status.ok")" ]
+check "status 2nd failure: archive still the last success" [ "$(st .archive)" = "$(jq -r .archive "$T/status.ok")" ]
+check "status 2nd failure: new error" [ "$(st .error)" = "data dir does not exist" ]
+
+# 8e. Recovery clears the error.
+setup
+check "status recovery: exits 0" run_backup
+check "status recovery: ok true, error null" [ "$(jq -c '[.ok, .error]' "$S/status.json")" = '[true,null]' ]
+check "status recovery: archive moved on" [ "$(st .archive)" != "$(jq -r .archive "$T/status.ok")" ]
+
+# 8f. A damaged previous status.json can't smuggle a path or junk into the new one.
+setup
+printf '{"last_ok":"2026-01-01T00:00:00Z","archive":"../../etc/shadow","size_bytes":"12; rm"}\n' >"$S/status.json"
+rm -rf "$D"
+run_backup || true
+check "status damaged: valid last_ok kept, bad archive/size dropped" \
+  [ "$(jq -c '[.last_ok, .archive, .size_bytes]' "$S/status.json")" = '["2026-01-01T00:00:00Z",null,null]' ]
+echo 'not json' >"$S/status.json"
+run_backup || true
+check "status unreadable previous: starts from nulls" [ "$(jq -c '[.ok, .last_ok, .archive]' "$S/status.json")" = '[false,null,null]' ]
+
+# 8g. Not being able to write status.json fails the run loudly (the dashboard would be stale).
+if [ "$(id -u)" != 0 ]; then
+  setup
+  chmod 0555 "$S"
+  if run_backup; then bad "status unwritable: should fail"; else ok "status unwritable: exits non-zero"; fi
+  check "status unwritable: failure pushed" grep -q 'could not write the status file' "$T/notify.log"
+  chmod 0755 "$S"
+fi
 
 echo
 echo "backup tests: $PASS passed, $FAILS failed"
