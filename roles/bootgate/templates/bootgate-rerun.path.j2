@@ -1,0 +1,12 @@
+# Managed by Ansible (role bootgate). Do not edit by hand.
+# Contract 2: creating {{ bootgate_run_dir }}/rerun (dir 0770, group {{ bootgate_group }}) starts
+# bootgate-retry.service, which deletes the file.
+[Unit]
+Description=Boot gate: manual re-run trigger
+
+[Path]
+PathExists={{ bootgate_run_dir }}/rerun
+Unit=bootgate-retry.service
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,19 @@
+# {{ ansible_managed }}
+# Ubuntu blacklists watchdog drivers, and systemd-modules-load applies that blacklist, so a
+# modules-load.d entry would be skipped ("is deny-listed (by kmod)"). An explicit modprobe of
+# the module name isn't subject to the blacklist. PID 1 opens the device as soon as it appears.
+[Unit]
+Description=Load the {{ watchdog_module }} hardware watchdog driver
+Documentation=man:systemd-system.conf(5) man:modprobe(8)
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=sysinit.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/modprobe {{ watchdog_module }}
+
+[Install]
+WantedBy=sysinit.target

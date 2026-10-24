@@ -1,0 +1,25 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Homelab nightly app-data backup (integrity-checked)
+Documentation=file:///usr/local/sbin/homelab-backup
+OnFailure=homelab-backup-alert.service
+
+[Service]
+Type=oneshot
+Environment="BACKUP_ROOT={{ homelab_backups_dir }}"
+Environment="DATA_DIR={{ homelab_data_dir }}"
+Environment="PUSH_DIR={{ homelab_push_dir }}"
+Environment="BOOTGATE_DIR={{ backups_bootgate_dir }}"
+Environment="KEEP={{ backups_keep }}"
+Environment="BACKUP_GROUP={{ backups_group }}"
+Environment="NOTIFY_BIN={{ backups_notify_bin }}"
+Environment="EXCLUDE_DIRS={{ backups_exclude_dirs | join(' ') }}"
+ExecStart=/usr/local/sbin/homelab-backup
+SyslogIdentifier=homelab-backup
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=2h
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes

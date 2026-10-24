@@ -1,0 +1,8 @@
+---
+# Intel TCO hardware watchdog (docs/CONTRACTS.md §7).
+watchdog_module: iTCO_wdt
+watchdog_device: /dev/watchdog0
+# systemd (PID 1) pings the hardware every half period; a hung PID 1 resets the box.
+watchdog_runtime_sec: 30s
+# Upper bound on a hung shutdown/reboot.
+watchdog_reboot_sec: 10min

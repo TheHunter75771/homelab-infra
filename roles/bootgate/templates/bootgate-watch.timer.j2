@@ -1,0 +1,11 @@
+# Managed by Ansible (role bootgate). Do not edit by hand.
+[Unit]
+Description=Boot gate: check the media drive every {{ bootgate_watch_interval_seconds }}s
+
+[Timer]
+OnActiveSec={{ bootgate_watch_interval_seconds }}s
+OnUnitInactiveSec={{ bootgate_watch_interval_seconds }}s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

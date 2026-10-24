@@ -1,0 +1,11 @@
+---
+- name: Restart systemd-journald
+  ansible.builtin.systemd_service:
+    name: systemd-journald
+    state: restarted
+
+# Only re-reads unit files. wait-online is a boot-time oneshot; the new command takes effect at
+# the next boot (it isn't re-run mid-play).
+- name: Reload systemd units (base)
+  ansible.builtin.systemd_service:
+    daemon_reload: true

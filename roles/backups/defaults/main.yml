@@ -1,0 +1,19 @@
+---
+# Role backups (docs/CONTRACTS.md §8). Paths come from inventory/group_vars/all/main.yml.
+backups_group: "{{ backup_pull_user }}" # created by role users; only read here
+backups_keep: 14
+backups_on_calendar: "*-*-* 03:30:00"
+# Directory NAMES (matched anywhere under homelab_data_dir) left out of files.tar.gz.
+backups_exclude_dirs:
+  - cache
+  - Cache
+  - .cache
+  - metadata
+  - MediaCover
+  - trickplay
+  - keyframes
+  - transcodes
+  - log
+  - logs
+backups_bootgate_dir: /var/lib/bootgate
+backups_notify_bin: /usr/local/bin/homelab-notify

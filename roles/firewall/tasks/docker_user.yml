@@ -1,0 +1,42 @@
+---
+# Docker-published ports are DNATed before UFW's INPUT rules see them, so the Wi-Fi drop and the
+# tailnet-range anti-spoofing rule live in DOCKER-USER. Docker owns docker.service and its
+# drop-ins; this only adds a separate unit that docker.service pulls in (WantedBy).
+- name: DOCKER-USER guard script is installed
+  ansible.builtin.template:
+    src: homelab-docker-user.sh.j2
+    dest: "{{ firewall_docker_user_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart homelab-docker-user
+
+- name: DOCKER-USER guard unit is installed
+  ansible.builtin.template:
+    src: homelab-docker-user.service.j2
+    dest: /etc/systemd/system/homelab-docker-user.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: firewall_docker_user_unit
+  notify: Restart homelab-docker-user
+
+- name: DOCKER-USER guard runs whenever docker.service starts
+  ansible.builtin.systemd_service:
+    name: homelab-docker-user.service
+    enabled: true
+    daemon_reload: "{{ firewall_docker_user_unit is changed }}"
+
+- name: Read service states
+  ansible.builtin.service_facts:
+
+- name: Note whether Docker is running
+  ansible.builtin.set_fact:
+    firewall_docker_running: "{{ ansible_facts.services['docker.service'].state | default('') == 'running' }}"
+
+# When Docker is down (say the boot gate failed), the guard starts with Docker instead.
+- name: DOCKER-USER guard is applied now
+  ansible.builtin.systemd_service:
+    name: homelab-docker-user.service
+    state: started
+  when: firewall_docker_running

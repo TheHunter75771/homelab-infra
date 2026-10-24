@@ -1,0 +1,32 @@
+---
+# Role bootgate: the media drive boot gate (docs/CONTRACTS.md §3).
+# bootgate_wait_seconds, bootgate_powercycle_method and bootgate_retry_minutes come from
+# group_vars (media_servers); these defaults only make the role self-contained.
+bootgate_wait_seconds: 720
+bootgate_powercycle_method: reboot
+bootgate_retry_minutes: 5
+
+# Paths and names fixed by the contract.
+bootgate_script: /usr/local/sbin/bootgate
+bootgate_config_file: /etc/default/bootgate
+bootgate_state_dir: /var/lib/bootgate
+bootgate_run_dir: /run/bootgate
+bootgate_group: bootgate
+bootgate_sentinel_name: .homelab-media-sentinel
+bootgate_mount_unit: "{{ media_mount | regex_replace('^/', '') | replace('/', '-') }}.mount"
+bootgate_media_compose: "{{ homelab_stacks_dir }}/media/compose.yaml"
+bootgate_notify_cmd: /usr/local/bin/homelab-notify
+
+# Tuning.
+bootgate_retry_wait_seconds: 30      # device wait for --retry and for any non-boot run
+bootgate_rebind_wait_seconds: 90     # device wait after a USB re-bind (enumeration + spin-up)
+bootgate_rtcwake_seconds: 60         # power-off time for bootgate_powercycle_method=rtcwake
+bootgate_fsck_timeout_seconds: 900   # fsck -n is diagnostics only; cap it
+bootgate_watch_interval_seconds: 60
+# bootgate.service TimeoutStartSec = wait + this (repair ladder, fsck -n, power-cycle grace).
+bootgate_timeout_margin_seconds: 2700
+
+# Docker drop-ins from the old setup that bypassed the gate (RequiresMountsFor=/media).
+bootgate_legacy_dropins:
+  - /etc/systemd/system/docker.service.d/wait-for-media.conf
+  - /etc/systemd/system/docker.service.d/wait-for-media.conf.disabled

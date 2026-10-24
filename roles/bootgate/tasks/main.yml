@@ -1,0 +1,140 @@
+---
+- name: Check the boot gate inputs
+  ansible.builtin.assert:
+    that:
+      - media_uuid is defined
+      - media_uuid is match('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+      - media_mount is match('^/[A-Za-z0-9_]+(/[A-Za-z0-9_]+)*$')
+      - bootgate_powercycle_method in ['reboot', 'rtcwake']
+      - bootgate_wait_seconds | int > 0
+      - bootgate_retry_minutes | int > 0
+    fail_msg: Check media_uuid, media_mount, bootgate_powercycle_method (reboot|rtcwake) and the timings.
+    quiet: true
+
+- name: Check that role storage installed the media mount unit
+  ansible.builtin.stat:
+    path: /etc/systemd/system/{{ bootgate_mount_unit }}
+  register: bootgate_mount_unit_file
+
+- name: Require the media mount unit
+  ansible.builtin.assert:
+    that: bootgate_mount_unit_file.stat.exists
+    fail_msg: /etc/systemd/system/{{ bootgate_mount_unit }} is missing; run role storage before role bootgate.
+    quiet: true
+  when: not ansible_check_mode
+
+- name: Create the group allowed to request a re-run
+  ansible.builtin.group:
+    name: "{{ bootgate_group }}"
+    system: true
+    state: present
+
+- name: Create the gate state directory
+  ansible.builtin.file:
+    path: "{{ bootgate_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Declare the re-run trigger directory for every boot
+  ansible.builtin.template:
+    src: bootgate.tmpfiles.j2
+    dest: /etc/tmpfiles.d/bootgate.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Create the re-run trigger directory now
+  ansible.builtin.file:
+    path: "{{ bootgate_run_dir }}"
+    state: directory
+    owner: root
+    group: "{{ bootgate_group }}"
+    mode: "0770"
+
+- name: Install the boot gate script
+  ansible.builtin.copy:
+    src: bootgate.py
+    dest: "{{ bootgate_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Write the boot gate settings
+  ansible.builtin.template:
+    src: bootgate.default.j2
+    dest: "{{ bootgate_config_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install the boot gate units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: /etc/systemd/system/{{ item }}
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - bootgate.service
+    - bootgate-alert.service
+    - bootgate-retry.service
+    - bootgate-retry.timer
+    - bootgate-rerun.path
+    - bootgate-watch.service
+    - bootgate-watch.timer
+  notify: Bootgate daemon-reload
+
+- name: Create the docker.service drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/docker.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Make Docker require and wait for the boot gate
+  ansible.builtin.template:
+    src: 10-bootgate.conf.j2
+    dest: /etc/systemd/system/docker.service.d/10-bootgate.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Bootgate daemon-reload
+
+- name: Remove the old setup's media-wait docker drop-ins
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ bootgate_legacy_dropins }}"
+  notify: Bootgate daemon-reload
+
+- name: Load the new units
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable the boot gate on every boot
+  ansible.builtin.systemd_service:
+    name: bootgate.service
+    enabled: true
+  ignore_errors: "{{ ansible_check_mode }}"
+
+# Outside boot the gate uses the short wait and can never power-cycle (it checks
+# `systemctl is-system-running`), so this cannot reboot the host. A no-op once it has passed:
+# the unit stays active (RemainAfterExit). If the drive is not verified, the run fails here.
+- name: Run the gate now so its state is current
+  ansible.builtin.systemd_service:
+    name: bootgate.service
+    state: started
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Enable and start the retry timer, the re-run path and the drop-out watcher
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - bootgate-retry.timer
+    - bootgate-rerun.path
+    - bootgate-watch.timer
+  ignore_errors: "{{ ansible_check_mode }}"

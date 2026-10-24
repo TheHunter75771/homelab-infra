@@ -1,0 +1,5 @@
+---
+# Fixed by the contract; not meant to be overridden.
+heartbeat_install_dir: /opt/homelab-heartbeat
+heartbeat_state_dir: /var/lib/homelab-heartbeat
+heartbeat_source_push_dir: "{{ hostvars[heartbeat_push_source]['homelab_push_dir'] }}"

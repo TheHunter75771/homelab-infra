@@ -1,0 +1,16 @@
+---
+# Upstream resolvers for systemd-resolved (global, used for every link). These replace the
+# hand-made /etc/systemd/resolved.conf.d/custom-dns.conf, which the role removes.
+dns_upstreams:
+  - 1.1.1.1
+  - 9.9.9.9
+# Used only when every upstream above (and every per-link server) is unreachable.
+dns_fallback:
+  - 1.0.0.1
+  - 149.112.112.112
+# Opportunistic: TLS to the upstream when it works, plain DNS otherwise (never breaks lookups).
+dns_over_tls: opportunistic
+dns_dnssec: allow-downgrade
+# Hand-made resolved drop-ins this role replaces.
+dns_stale_dropins:
+  - /etc/systemd/resolved.conf.d/custom-dns.conf

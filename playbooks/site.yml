@@ -1,0 +1,20 @@
+---
+# Full converge of the media server. Order matters: see docs/CONTRACTS.md §9.
+- name: Converge media servers
+  hosts: media_servers
+  become: true
+  roles:
+    - role: base
+    - role: users
+    - role: ssh_hardening
+    - role: tailscale
+    - role: dns
+    - role: watchdog
+    - role: storage
+    - role: docker
+    - role: bootgate
+    - role: firewall
+    - role: notifier
+    - role: stacks
+    - role: tailscale_serve
+    - role: backups

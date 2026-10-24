@@ -1,0 +1,82 @@
+---
+- name: Preflight | identifiers are set in host_vars
+  ansible.builtin.assert:
+    that:
+      - lan_ip | default('') | length > 0
+      - tailnet_fqdn | default('') | length > 0
+      - media_uuid | default('') | length > 0
+    fail_msg: lan_ip, tailnet_fqdn and media_uuid must be set in inventory/host_vars for this host.
+    quiet: true
+
+# The .env files quote values with single quotes, so a secret may not contain one (or whitespace).
+- name: Preflight | secrets are set in the vault and well formed
+  ansible.builtin.assert:
+    that:
+      - wol_relay_token | default('') | length >= 16
+      - wol_relay_token is not search("[\\s']")
+      - vapid_public_key | default('') is match('^[A-Za-z0-9_-]{87}$')
+      - vapid_private_key | default('') is match('^[A-Za-z0-9_-]{43}$')
+      - rehearsal | bool or cloudflared_tunnel_token | default('') | length > 0
+      - rehearsal | bool or cloudflared_tunnel_token is not search("[\\s']")
+    fail_msg: >-
+      A vault secret is missing or malformed: wol_relay_token (16+ chars, no quotes/whitespace),
+      vapid_public_key / vapid_private_key (raw base64url P-256: 87 / 43 chars) and, outside
+      rehearsal, cloudflared_tunnel_token. Values are not printed.
+    quiet: true
+
+# Contract 4: the VAPID subject is an https URL (Apple may reject a localhost mailto).
+- name: Preflight | the VAPID subject is an https URL
+  ansible.builtin.assert:
+    that:
+      - vapid_subject | default('') is match('^https://[^/\s]+')
+    fail_msg: vapid_subject (inventory/group_vars/media_servers/main.yml) must be an https URL, e.g. https://<public_watch_host>.
+    quiet: true
+
+- name: Preflight | what is mounted at the media mount point
+  ansible.builtin.command:
+    argv: [findmnt, --noheadings, --output, UUID, --mountpoint, "{{ media_mount }}"]
+  register: stacks_media_findmnt
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Preflight | look for the media sentinel
+  ansible.builtin.stat:
+    path: "{{ stacks_media_sentinel }}"
+    get_checksum: false
+  register: stacks_media_sentinel_stat
+
+# Never create library folders (or start apps) on an empty mount point on the system disk.
+- name: Preflight | the media drive is mounted and verified
+  ansible.builtin.assert:
+    that:
+      - stacks_media_findmnt.rc == 0
+      - stacks_media_findmnt.stdout | trim | lower == media_uuid | lower
+      - stacks_media_sentinel_stat.stat.exists
+    fail_msg: >-
+      {{ media_mount }} is not the verified media drive (wrong/no mount or no sentinel).
+      Check /var/lib/bootgate/status and let the boot gate mount it before deploying stacks.
+    quiet: true
+
+- name: Preflight | look up the render group (Jellyfin hardware transcoding)
+  ansible.builtin.getent:
+    database: group
+    key: render
+
+- name: Preflight | look for the GPU device directory
+  ansible.builtin.stat:
+    path: /dev/dri
+    get_checksum: false
+  register: stacks_dri_stat
+
+- name: Preflight | the GPU devices are present
+  ansible.builtin.assert:
+    that:
+      - stacks_dri_stat.stat.exists
+      - stacks_dri_stat.stat.isdir
+    fail_msg: /dev/dri is missing, so Jellyfin cannot use QuickSync. Check the iGPU driver (i915/xe).
+    quiet: true
+
+- name: Preflight | remember the render gid for the Jellyfin group_add
+  ansible.builtin.set_fact:
+    stacks_render_gid: "{{ ansible_facts.getent_group.render[1] }}"

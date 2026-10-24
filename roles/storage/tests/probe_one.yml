@@ -1,0 +1,24 @@
+---
+# One image through the role's real probe + refusal; records the verdict in guard_results.
+- name: Run the role's format guard probe on {{ guard_image }}
+  block:
+    - name: Include the role's probe for {{ guard_image }}
+      ansible.builtin.include_tasks: ../tasks/format_probe.yml
+      vars:
+        storage_format_device: "{{ guard_tmp.path }}/{{ guard_image }}.img"
+    - name: Mark as allowed the image {{ guard_image }}
+      ansible.builtin.set_fact:
+        guard_refused_msg: ""
+  rescue:
+    - name: Mark as refused the image {{ guard_image }}
+      ansible.builtin.set_fact:
+        guard_refused_msg: "{{ ansible_failed_result.msg | default('refused') }}"
+
+- name: Record the verdict for {{ guard_image }}
+  ansible.builtin.set_fact:
+    guard_results: >-
+      {{ guard_results | default({}) | combine({guard_image: {
+           'refused': guard_refused_msg | length > 0,
+           'message': guard_refused_msg,
+           'signatures': storage_format_signatures,
+           'backups': storage_format_backup_superblocks_found | map(attribute='superblock') | list}}) }}

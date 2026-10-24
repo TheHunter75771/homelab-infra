@@ -1,0 +1,13 @@
+---
+galaxy_info:
+  role_name: bootgate
+  namespace: homelab
+  author: homelab-infra
+  description: Boot gate that holds Docker until the media drive is verified, with repair ladder, one power-cycle, retry and drop-out watcher
+  license: MIT
+  min_ansible_version: "2.17"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - all
+dependencies: []

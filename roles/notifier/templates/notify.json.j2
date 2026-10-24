@@ -1,0 +1,11 @@
+{{ {
+  "push_dir": notifier_push_dir,
+  "state_dir": notifier_state_dir,
+  "rehearsal_flag": notifier_rehearsal_flag,
+  "dedupe_seconds": notifier_dedupe_seconds | int,
+  "ttl_seconds": notifier_ttl_seconds | int,
+  "timeout_seconds": notifier_timeout_seconds | int,
+  "test_label": notifier_test_label,
+  "pushcore_url": notifier_pushcore_url,
+  "pushcore_timeout_seconds": notifier_pushcore_timeout_seconds | int
+} | to_nice_json }}

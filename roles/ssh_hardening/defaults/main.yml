@@ -1,0 +1,10 @@
+---
+ssh_hardening_max_auth_tries: 3
+# Accounts allowed to log in over SSH (all key-only).
+ssh_hardening_allow_users:
+  - "{{ admin_user }}"
+  - "{{ automation_user }}"
+  - "{{ backup_pull_user }}"
+# Hand-made drop-ins this role replaces. Removed only after the new config passes `sshd -t`.
+ssh_hardening_stale_dropins:
+  - /etc/ssh/sshd_config.d/99-hardening.conf

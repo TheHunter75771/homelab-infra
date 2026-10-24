@@ -1,0 +1,11 @@
+# Managed by Ansible (role notifier). Do not edit by hand.
+[Unit]
+Description=Homelab alert floor every {{ notifier_alertfloor_interval_minutes }} min
+
+[Timer]
+OnActiveSec={{ notifier_alertfloor_interval_minutes }}min
+OnUnitInactiveSec={{ notifier_alertfloor_interval_minutes }}min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

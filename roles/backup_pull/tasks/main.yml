@@ -1,0 +1,69 @@
+---
+- name: Pull host vars are set
+  ansible.builtin.assert:
+    that:
+      - pull_source_host | default('') | length > 0
+      - pull_ssh_key | default('') | length > 0
+      - pull_dest | default('') | length > 0
+    fail_msg: Set pull_source_host, pull_ssh_key and pull_dest in inventory/host_vars/{{ inventory_hostname }}.yml
+    quiet: true
+
+- name: Look for the pull key
+  ansible.builtin.stat:
+    path: "{{ backup_pull_key_path }}"
+  register: backup_pull_key_stat
+
+- name: Fail clearly when the pull key is missing
+  ansible.builtin.assert:
+    that:
+      - backup_pull_key_stat.stat.exists
+    fail_msg: >-
+      {{ backup_pull_key_path }} does not exist. Create it (ssh-keygen -t ed25519) and put its
+      public half in backup_pull_pubkey for the media server.
+    quiet: true
+
+# u+rwx only adds bits: an existing ~/.local/bin or ~/.config/systemd/user keeps its mode.
+- name: User bin and unit directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: u+rwx
+  loop:
+    - "{{ backup_pull_home }}/.local/bin"
+    - "{{ backup_pull_home }}/.config/systemd/user"
+
+- name: Destination directory is private
+  ansible.builtin.file:
+    path: "{{ backup_pull_dest_path }}"
+    state: directory
+    mode: "0700"
+
+- name: Pull script is installed
+  ansible.builtin.copy:
+    src: homelab-pull.sh
+    dest: "{{ backup_pull_home }}/.local/bin/homelab-pull"
+    mode: "0755"
+
+- name: Pull user units are installed
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ backup_pull_home }}/.config/systemd/user/{{ item }}"
+    mode: "0644"
+  loop:
+    - homelab-pull.service
+    - homelab-pull.timer
+  notify:
+    - Reload user systemd for homelab-pull
+    - Restart homelab-pull timer
+
+# Reload the user manager only when our unit files changed (the desktop has its own units).
+- name: Load changed pull units before enabling the timer
+  ansible.builtin.meta: flush_handlers
+
+- name: Pull timer is enabled and running
+  ansible.builtin.systemd_service:
+    name: homelab-pull.timer
+    scope: user
+    enabled: true
+    state: started
+  environment: "{{ backup_pull_systemd_env }}"

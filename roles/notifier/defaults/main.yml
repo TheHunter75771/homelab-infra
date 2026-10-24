@@ -1,0 +1,27 @@
+---
+# Role notifier: homelab-notify (Web Push CLI) and the alert floor (docs/CONTRACTS.md §4).
+
+# Exact pin from inventory/group_vars/all/versions.yml (shared with the edge heartbeat).
+notifier_pywebpush_version: "{{ python_packages.pywebpush }}"
+notifier_venv: /opt/homelab-notify
+notifier_python: /usr/bin/python3
+notifier_cli: /usr/local/bin/homelab-notify
+notifier_config_dir: /etc/homelab
+notifier_config_file: "{{ notifier_config_dir }}/notify.json"
+notifier_rehearsal_flag: "{{ notifier_config_dir }}/rehearsal"
+notifier_state_dir: /var/lib/homelab-notify
+notifier_push_dir: "{{ homelab_push_dir }}"   # read-only for this role (owned by role stacks)
+notifier_dedupe_seconds: 1800
+notifier_ttl_seconds: 86400
+notifier_timeout_seconds: 10
+notifier_test_label: test
+# push-core's local API (published on loopback only, CONTRACTS §5). The notifier never writes
+# subscriptions.json; it asks push-core to drop dead subscriptions here (best-effort).
+notifier_pushcore_url: http://127.0.0.1:8085
+notifier_pushcore_timeout_seconds: 3
+
+# Alert floor.
+notifier_alertfloor_script: /usr/local/sbin/homelab-alertfloor
+notifier_alertfloor_state_dir: /var/lib/homelab-alertfloor
+notifier_alertfloor_interval_minutes: 2
+notifier_bootgate_status_file: /var/lib/bootgate/status

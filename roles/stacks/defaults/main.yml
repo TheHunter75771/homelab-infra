@@ -1,0 +1,67 @@
+---
+# Role stacks (docs/CONTRACTS.md §2, §5, §6). Identifiers (lan_ip, tailnet_fqdn, media_uuid) come from
+# host_vars, secrets from the vault, image references only from versions.yml (images.*, local_images.*).
+
+# Shared bridge between the edge project (cloudflared) and the media project (jellyfin).
+stacks_public_network: hl-public
+stacks_public_subnet: 172.30.10.0/24
+stacks_public_bridge: br-hl-public
+
+# The boot gate's proof that /media is the real drive (created by role storage).
+stacks_media_sentinel: "{{ media_mount }}/.homelab-media-sentinel"
+# Library folders on the drive. Created 1001:1002 2775 only after the mount is verified.
+stacks_media_dirs:
+  - tv
+  - movies
+  - downloads
+  - downloads/complete
+
+# App config dirs under homelab_data_dir. linuxserver images chown /config to PUID:PGID on every
+# start, so their dirs are declared with that same owner/group or every run would flip them back.
+stacks_app_dirs:
+  - { name: jellyfin, owner: "{{ mediasvc_uid }}", group: "{{ media_gid }}" }
+  - { name: sonarr, owner: "{{ mediasvc_uid }}", group: "{{ media_gid }}" }
+  - { name: radarr, owner: "{{ mediasvc_uid }}", group: "{{ media_gid }}" }
+  - { name: prowlarr, owner: "{{ mediasvc_uid }}", group: "{{ media_gid }}" }
+  - { name: sabnzbd, owner: "{{ mediasvc_uid }}", group: "{{ media_gid }}" }
+  - { name: jellyseerr, owner: 0, group: 0 }   # the image runs as root
+stacks_app_dir_mode: "0750"
+
+# push-core container identity (contract 4). The compose file runs the container as uid:gid
+# 10101:10101; the host gets a matching system user and group so file ownership reads clearly.
+#   {{ homelab_push_dir }}            pushcore:pushcore 0750  (push-core writes subscriptions.json here)
+#   {{ homelab_push_dir }}/vapid.json root:pushcore     0640  (from the vault; push-core only reads it)
+# The VAPID subject is the group var vapid_subject (contract 4, an https URL), not a role default.
+stacks_pushcore_user: pushcore
+stacks_pushcore_uid: 10101
+stacks_pushcore_gid: 10101
+
+# push-core deploy interface. The app is module D's (apps/push-core/, see its README "Configuration").
+stacks_push_core_src: "{{ playbook_dir }}/../apps/push-core/"
+stacks_push_core_sync_excludes:
+  - node_modules/
+  - .git/
+  - coverage/
+stacks_push_core_port: 8085
+stacks_push_core_data_mount: /data
+stacks_push_core_environment:
+  PUSH_DIR: "{{ stacks_push_core_data_mount }}"
+  PORT: "{{ stacks_push_core_port }}"
+
+# wol-relay runs with host networking; "nobody" so the process maps to no real host account.
+stacks_wol_relay_port: 9999
+stacks_wol_relay_user: "65534:65534"
+
+stacks_mem_limits:
+  jellyfin: 2g
+  sonarr: 1g
+  radarr: 1g
+  prowlarr: 512m
+  sabnzbd: 1g
+  jellyseerr: 512m
+  cloudflared: 256m
+  wol_relay: 128m
+  push_core: 128m
+
+# docker compose up --wait: fail the run if a container is not healthy within this many seconds.
+stacks_compose_wait_timeout: 300

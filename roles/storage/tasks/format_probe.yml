@@ -1,0 +1,54 @@
+---
+# Read-only: is there ANYTHING on storage_format_device that could be someone's data? Fails
+# (refuses) unless the device is completely blank. Sets storage_format_signatures (blkid
+# findings) and storage_format_backup_superblocks_found (readable ext2/3/4 backup superblocks).
+# Included by format.yml before any mkfs, and by tests/test_format_guard.yml against images.
+
+# blkid -p reads the device itself (no cache) and exits 2 when it identifies nothing.
+- name: Format probe | scan for any signature (filesystem, partition table, RAID, LVM)
+  ansible.builtin.command:
+    argv: [blkid, -p, -o, export, "{{ storage_format_device }}"]
+  register: storage_format_blkid
+  changed_when: false
+  failed_when: storage_format_blkid.rc not in [0, 2]
+  check_mode: false
+
+# An ext4 library whose PRIMARY superblock is damaged has no blkid signature, yet it is fully
+# recoverable from a backup superblock (e2fsck -b). Never format over one: try the backup
+# locations for every ext4 block size; dumpe2fs exits 0 only when one is valid.
+- name: Format probe | look for ext2/3/4 backup superblocks
+  ansible.builtin.command:
+    argv:
+      - dumpe2fs
+      - -h
+      - -o
+      - superblock={{ item.superblock }}
+      - -o
+      - blocksize={{ item.blocksize }}
+      - "{{ storage_format_device }}"
+  loop: "{{ storage_format_backup_superblock_locations }}"
+  loop_control:
+    label: "{{ item.superblock }}@{{ item.blocksize }}"
+  register: storage_format_dumpe2fs
+  changed_when: false
+  # Only 'dumpe2fs missing' is an error; any other non-zero just means "no superblock there".
+  failed_when: storage_format_dumpe2fs.msg | default('') is search('No such file or directory')
+  check_mode: false
+
+- name: Format probe | collect the findings
+  ansible.builtin.set_fact:
+    storage_format_signatures: "{{ storage_format_blkid.stdout_lines if storage_format_blkid.rc == 0 else [] }}"
+    storage_format_backup_superblocks_found: >-
+      {{ storage_format_dumpe2fs.results | selectattr('rc', 'equalto', 0) | map(attribute='item') | list }}
+
+- name: Format guard | refuse unless the target is completely blank
+  ansible.builtin.assert:
+    that:
+      - storage_format_signatures | length == 0
+      - storage_format_backup_superblocks_found | length == 0
+    fail_msg: >-
+      Refusing to format {{ storage_format_device }}: blkid found
+      [{{ storage_format_signatures | join(', ') }}] and readable ext backup superblocks at
+      [{{ storage_format_backup_superblocks_found | map(attribute='superblock') | join(', ') }}].
+      A damaged primary superblock can be repaired with e2fsck -b <backup>. Nothing was changed.
+    quiet: true

@@ -1,0 +1,48 @@
+---
+# Docker itself is already installed on the host (docs/CONTRACTS.md §0). This role only checks it
+# and owns daemon.json. The systemd drop-in that makes docker wait for the boot gate
+# (docker.service.d/10-bootgate.conf) belongs to role bootgate and is never touched here.
+
+- name: Docker CLI and the compose plugin are installed
+  ansible.builtin.command:
+    argv: [docker, compose, version, --short]
+  register: docker_compose_version
+  changed_when: false
+  check_mode: false
+
+- name: The compose plugin is new enough for community.docker.docker_compose_v2
+  ansible.builtin.assert:
+    that:
+      - docker_compose_version.stdout | trim | regex_replace('^v', '') is version(docker_compose_min_version, '>=')
+    fail_msg: >-
+      docker compose {{ docker_compose_version.stdout | trim }} is older than
+      {{ docker_compose_min_version }}; upgrade docker-compose-plugin first.
+    quiet: true
+
+- name: Docker config directory exists
+  ansible.builtin.file:
+    path: /etc/docker
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Docker daemon config is in place (checked by dockerd before it lands)
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    content: "{{ docker_daemon_config | to_nice_json(indent=2) }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: dockerd --validate --config-file=%s
+  notify: Restart docker
+
+- name: Docker starts at boot (it still waits for the boot gate through bootgate's drop-in)
+  ansible.builtin.systemd_service:
+    name: docker.service
+    enabled: true
+
+# log-driver and userland-proxy are not reloadable, so a changed daemon.json needs a restart.
+# Do it now, before role stacks creates containers, not at the end of the play.
+- name: Apply a changed daemon config before any stack is deployed
+  ansible.builtin.meta: flush_handlers

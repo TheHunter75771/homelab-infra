@@ -1,0 +1,17 @@
+---
+# Single source of truth for image versions (Renovate updates this file later).
+# Pinned by tag AND digest. Local builds are versioned by their source in apps/ or roles/.
+images:
+  cloudflared: "cloudflare/cloudflared:2026.5.0@sha256:59bab8d3aceec09bf6bdb07d6beca0225ca5cd7ab79436a87ea97978fe1dc4f9"
+  jellyfin: "lscr.io/linuxserver/jellyfin:10.11.9ubu2404-ls33@sha256:155fb51c745d1a2c28c8b300612bc728a5dd06097bbc62b8b1c76d174eb20366"
+  sonarr: "lscr.io/linuxserver/sonarr:4.0.17.2952-ls312@sha256:0b5c4803f92456fb9b65bae8375716ea120b4ea17b3cced7da32b63f0085782b"
+  radarr: "lscr.io/linuxserver/radarr:6.1.1.10360-ls303@sha256:079e48870584baf2a3e7e43e7ba6d3c834555931851a59c82c51cc792d285caf"
+  prowlarr: "lscr.io/linuxserver/prowlarr:2.3.5.5327-ls147@sha256:c9fe528f34b1fd3715438b6f6d6991d64e2965f2c055db36398bc66a0e7eab01"
+  sabnzbd: "lscr.io/linuxserver/sabnzbd:5.0.3-ls255@sha256:6b392fce45ed587ba7213259fbce6f9f725b157b746b36ec53d3f08ee415602e"
+  jellyseerr: "fallenbagel/jellyseerr:2.7.3@sha256:4538137bc5af902dece165f2bf73776d9cf4eafb6dd714670724af8f3eb77764"
+  node_base: "node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914"
+local_images:
+  wol_relay: "homelab/wol-relay:2026.07"
+  push_core: "homelab/push-core:0.1.0"
+python_packages:
+  pywebpush: "2.5.0"

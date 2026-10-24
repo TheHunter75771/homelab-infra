@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Homelab alerts</title>
+  <meta name="description" content="Subscribe this device to push alerts from the homelab.">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0b1020">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Homelab">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="icon" href="/icons/icon-192.png" type="image/png" sizes="192x192">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <img src="/icons/icon-192.png" alt="" width="40" height="40">
+      <h1>Homelab alerts</h1>
+      <span id="state" class="pill">Checking…</span>
+    </header>
+
+    <main>
+      <section id="hint" class="card hint" hidden>
+        <h2 id="hint-title"></h2>
+        <p id="hint-body"></p>
+      </section>
+
+      <section class="card" aria-labelledby="this-device">
+        <h2 id="this-device">This device</h2>
+        <label for="label">Device name</label>
+        <input id="label" name="label" type="text" maxlength="64" autocomplete="off" autocapitalize="words"
+               spellcheck="false" placeholder="e.g. Kitchen iPad">
+        <div class="actions">
+          <button id="subscribe" type="button" class="primary" disabled>Subscribe</button>
+          <button id="unsubscribe" type="button" hidden>Unsubscribe</button>
+        </div>
+        <button id="test" type="button" class="wide" disabled>Send test</button>
+        <p id="status" class="status" role="status" aria-live="polite"></p>
+      </section>
+
+      <section class="card" aria-labelledby="devices-title">
+        <h2 id="devices-title">Subscribed devices <span id="count" class="count"></span></h2>
+        <ul id="devices" class="devices"></ul>
+        <p id="empty" class="muted">No devices are subscribed yet.</p>
+      </section>
+    </main>
+
+    <footer>Reachable only on the tailnet. Alerts come from the host notifier, the alert floor and the off-site heartbeat.</footer>
+  </div>
+  <script type="application/json" id="devices-data">__DEVICES_JSON__</script>
+</body>
+</html>

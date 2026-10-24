@@ -1,0 +1,8 @@
+# {{ ansible_managed }}
+# Netplan's generated drop-in (/run/systemd/generator.late/…/10-netplan.conf) also waits for the
+# Wi-Fi uplink, which is normally down, so wait-online times out and fails at every boot.
+# Drop-ins apply in file-name order across all directories; "zz-" sorts after "10-netplan", so this
+# reset wins and only the LAN interface is waited for.
+[Service]
+ExecStart=
+ExecStart=/usr/lib/systemd/systemd-networkd-wait-online --interface={{ lan_iface }} --operational-state=routable --timeout={{ base_wait_online_timeout }}

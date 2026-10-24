@@ -1,0 +1,16 @@
+# Managed by Ansible (role bootgate). Do not edit by hand.
+# Started by bootgate-retry.timer and by bootgate-rerun.path (touch {{ bootgate_run_dir }}/rerun).
+# Acts only when the gate status is failed or media-lost. NEVER reboots.
+[Unit]
+Description=Boot gate: retry a failed or lost media drive (never reboots)
+After=bootgate.service
+# The timer and the path unit pace this service; a start limit could only disable them.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+# Consume the trigger before anything can fail, so the path unit can never loop on it.
+ExecStartPre=-/usr/bin/rm -f {{ bootgate_run_dir }}/rerun
+ExecStart={{ bootgate_script }} check --retry
+TimeoutStartSec=20min
+SyslogIdentifier=bootgate

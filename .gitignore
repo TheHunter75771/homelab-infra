@@ -1,0 +1,21 @@
+# Tooling
+.venv/
+collections/
+*.retry
+__pycache__/
+node_modules/
+.ansible/
+
+# Identifiers and secrets never go public
+inventory/hosts.yml
+inventory/host_vars/
+*.tfvars
+*.tfstate
+*.tfstate.*
+.terraform/
+vault-pass*
+*.pem
+*.key
+.env
+*.env
+!*.env.example

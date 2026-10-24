@@ -1,0 +1,13 @@
+# {{ ansible_managed }}
+# Fallback push when homelab-backup.service fails without reporting (killed, timed out).
+# The script's own push uses the same tag+title, so homelab-notify's dedupe drops this one
+# when the script already reported the reason.
+[Unit]
+Description=Push an alert when the nightly backup fails
+
+[Service]
+Type=oneshot
+ExecStart={{ backups_notify_bin }} --tag backup --title "Backup failed" --body "homelab-backup.service failed. See: journalctl -u homelab-backup"
+# 2 = no subscribed devices yet; nothing to deliver is not a failure of this unit.
+SuccessExitStatus=2
+SyslogIdentifier=homelab-backup-alert

@@ -1,0 +1,9 @@
+---
+# Home of the read-only backup pull account (docs/CONTRACTS.md §7).
+users_backup_pull_home: /var/lib/backuppull
+# rsync's restricted wrapper; ships in the rsync package (3.2.4+) at this path on Ubuntu.
+users_rrsync_path: /usr/bin/rrsync
+# sudoers.d files left by retired services (removed if present). homepage-actions let the
+# admin user run a homepage-container script that was deleted in the 2026-10-23 wipe.
+users_stale_sudoers:
+  - homepage-actions

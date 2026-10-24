@@ -1,0 +1,56 @@
+---
+# The tunnel runs only outside rehearsal. In rehearsal there is no tunnel token and the stack is
+# torn down (with its .env) if an earlier run left one behind.
+
+- name: Edge | tunnel token (.env, root only)
+  ansible.builtin.copy:
+    dest: "{{ homelab_stacks_dir }}/edge/.env"
+    content: "TUNNEL_TOKEN='{{ cloudflared_tunnel_token }}'\n"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+  when: not rehearsal | bool
+
+- name: Edge | compose definition
+  ansible.builtin.template:
+    src: edge-compose.yaml.j2
+    dest: "{{ homelab_stacks_dir }}/edge/compose.yaml"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: docker compose --project-directory {{ homelab_stacks_dir }}/edge -f %s config --quiet
+  when: not rehearsal | bool
+
+- name: Edge | tunnel is up and connected
+  community.docker.docker_compose_v2:
+    project_src: "{{ homelab_stacks_dir }}/edge"
+    state: present
+    pull: missing
+    remove_orphans: true
+    wait: true
+    wait_timeout: "{{ stacks_compose_wait_timeout }}"
+  when: not rehearsal | bool
+
+- name: Edge | rehearsal - look for a leftover edge stack
+  ansible.builtin.stat:
+    path: "{{ homelab_stacks_dir }}/edge/compose.yaml"
+    get_checksum: false
+  register: stacks_edge_compose_stat
+  when: rehearsal | bool
+
+- name: Edge | rehearsal - no tunnel runs
+  community.docker.docker_compose_v2:
+    project_src: "{{ homelab_stacks_dir }}/edge"
+    state: absent
+    remove_orphans: true
+  when:
+    - rehearsal | bool
+    - stacks_edge_compose_stat.stat.exists
+
+- name: Edge | rehearsal - edge stack files and token are removed
+  ansible.builtin.file:
+    path: "{{ homelab_stacks_dir }}/edge"
+    state: absent
+  when: rehearsal | bool

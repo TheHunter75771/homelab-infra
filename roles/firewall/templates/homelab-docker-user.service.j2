@@ -1,0 +1,14 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Homelab DOCKER-USER guard (Wi-Fi uplink and tailnet-range drops)
+Documentation=file://{{ firewall_docker_user_script }}
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={{ firewall_docker_user_script }}
+
+[Install]
+WantedBy=docker.service

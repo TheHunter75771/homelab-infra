@@ -1,0 +1,9 @@
+{#- The serve config exactly as `tailscale serve status --json` reports it (ipn.ServeConfig) after the
+    CLI calls in tasks/main.yml: TCP marks each port as HTTPS, Web maps "<node>:<port>" to its handlers.
+    No AllowFunnel key, so any funnel setting on the node counts as drift and is reset. -#}
+{%- set ns = namespace(tcp={}, web={}) -%}
+{%- for h in tailscale_serve_handlers -%}
+{%-   set ns.tcp = ns.tcp | combine({h.port | string: {'HTTPS': true}}) -%}
+{%-   set ns.web = ns.web | combine({tailscale_serve_node_name ~ ':' ~ h.port: {'Handlers': {h.mount: {'Proxy': h.backend}}}}, recursive=true) -%}
+{%- endfor -%}
+{{ {'TCP': ns.tcp, 'Web': ns.web} | to_json(sort_keys=true) }}

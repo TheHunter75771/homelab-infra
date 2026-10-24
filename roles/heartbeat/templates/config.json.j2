@@ -1,0 +1,16 @@
+{{ {
+  "target": heartbeat_target,
+  "tcp_port": heartbeat_tcp_port | int,
+  "timeout_s": heartbeat_timeout_seconds | int,
+  "fail_threshold": heartbeat_fail_threshold | int,
+  "name": heartbeat_display_name,
+  "tag": "heartbeat",
+  "display_tz": timezone | default('UTC'),
+  "rehearsal": heartbeat_rehearsal | bool,
+  "state_dir": heartbeat_state_dir,
+  "vapid_file": heartbeat_install_dir ~ "/vapid.json",
+  "subscriptions_file": heartbeat_install_dir ~ "/subscriptions.json",
+  "push_ttl_s": heartbeat_push_ttl_seconds | int,
+  "log_keep_lines": heartbeat_log_keep_lines | int,
+  "log_max_bytes": (heartbeat_log_keep_lines | int) * 140,
+} | to_nice_json(indent=2) }}

@@ -1,0 +1,21 @@
+---
+extends: default
+ignore: |
+  .venv/
+  collections/
+  apps/*/node_modules/
+  inventory/group_vars/media_servers/vault.yml
+rules:
+  line-length:
+    max: 160
+  truthy:
+    allowed-values: ["true", "false"]
+    check-keys: false
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable
+  braces:
+    max-spaces-inside: 1
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true

@@ -1,0 +1,13 @@
+---
+# Copy to inventory/hosts.yml (git-ignored) and fill in inventory/host_vars/<host>.yml.
+all:
+  children:
+    media_servers:
+      hosts:
+        mediaserver:
+    workstations:
+      hosts:
+        gaming-pc:
+    edge:
+      hosts:
+        edge-vps:

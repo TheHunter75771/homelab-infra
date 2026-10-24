@@ -1,0 +1,6 @@
+---
+# Only ever daemon-reload. Never restart bootgate.service from a handler: docker.service
+# Requires= it, so restarting the gate restarts Docker and every container.
+- name: Bootgate daemon-reload
+  ansible.builtin.systemd_service:
+    daemon_reload: true

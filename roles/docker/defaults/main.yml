@@ -1,0 +1,15 @@
+---
+# /etc/docker/daemon.json (docs/CONTRACTS.md §6). Rendered as JSON exactly as written here.
+# - live-restore: containers keep running while dockerd restarts (package upgrades).
+# - log-driver local: compact, rotated logs (10 MB x 3 per container), no per-stack logging blocks.
+# - userland-proxy false: published ports go through iptables DNAT only, no docker-proxy processes.
+docker_daemon_config:
+  live-restore: true
+  log-driver: local
+  log-opts:
+    max-size: 10m
+    max-file: "3"
+  userland-proxy: false
+
+# community.docker.docker_compose_v2 needs the compose plugin at this version or newer.
+docker_compose_min_version: "2.18.0"

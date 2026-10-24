@@ -1,0 +1,15 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Homelab heartbeat: is the media server reachable over the tailnet?
+After=network-online.target tailscaled.service
+
+[Service]
+Type=oneshot
+ExecStart={{ heartbeat_install_dir }}/venv/bin/python {{ heartbeat_install_dir }}/homelab_heartbeat.py --config {{ heartbeat_install_dir }}/config.json
+SyslogIdentifier=homelab-heartbeat
+TimeoutStartSec=90
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths={{ heartbeat_state_dir }}

@@ -1,0 +1,118 @@
+---
+- name: Look up the automation user
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ automation_user }}"
+    fail_key: false
+
+- name: Automation user exists (created by playbooks/bootstrap.yml, only asserted here)
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.getent_passwd[automation_user] is not none
+    fail_msg: "{{ automation_user }} does not exist; run playbooks/bootstrap.yml first."
+    quiet: true
+
+# Only this file. 10-homelab-automation (bootstrap) and README are not touched.
+- name: Stale sudoers rules from the retired homepage container are removed
+  ansible.builtin.file:
+    path: "/etc/sudoers.d/{{ item }}"
+    state: absent
+  loop: "{{ users_stale_sudoers }}"
+
+- name: Media groups exist with the fixed GIDs
+  ansible.builtin.group:
+    name: "{{ item.name }}"
+    gid: "{{ item.gid }}"
+    state: present
+  loop:
+    - { name: "{{ mediasvc_user }}", gid: "{{ mediasvc_gid }}" }
+    - { name: "{{ media_group }}", gid: "{{ media_gid }}" }
+  loop_control:
+    label: "{{ item.name }}"
+
+# These normally come from udev/systemd (render) and the Docker package (docker). Making sure
+# they exist lets this role run before the docker role; the packages accept an existing group.
+- name: Device and Docker groups exist
+  ansible.builtin.group:
+    name: "{{ item }}"
+    system: true
+    state: present
+  loop:
+    - render
+    - docker
+
+# Same spec as the bootgate role (system group, no fixed GID), so either role can create it.
+# Members can trigger a gate re-run by creating /run/bootgate/rerun without sudo.
+- name: Boot gate group exists
+  ansible.builtin.group:
+    name: bootgate
+    system: true
+    state: present
+
+- name: Media service account matches the existing file ownership
+  ansible.builtin.user:
+    name: "{{ mediasvc_user }}"
+    uid: "{{ mediasvc_uid }}"
+    group: "{{ mediasvc_user }}"
+    groups:
+      - "{{ media_group }}"
+      - render
+    append: true
+    shell: /usr/sbin/nologin
+    create_home: false
+
+- name: Admin user is in the media, docker and bootgate groups
+  ansible.builtin.user:
+    name: "{{ admin_user }}"
+    groups:
+      - "{{ media_group }}"
+      - docker
+      - bootgate
+    append: true
+
+- name: Backup pull group exists
+  ansible.builtin.group:
+    name: "{{ backup_pull_user }}"
+    system: true
+    state: present
+
+# The shell must be a real shell: sshd runs the forced rrsync command through it.
+- name: Backup pull system user exists
+  ansible.builtin.user:
+    name: "{{ backup_pull_user }}"
+    group: "{{ backup_pull_user }}"
+    system: true
+    home: "{{ users_backup_pull_home }}"
+    create_home: true
+    shell: /bin/sh
+    password_lock: true
+
+- name: Backup pull home is private
+  ansible.builtin.file:
+    path: "{{ users_backup_pull_home }}"
+    state: directory
+    owner: "{{ backup_pull_user }}"
+    group: "{{ backup_pull_user }}"
+    mode: "0750"
+
+- name: The rrsync wrapper is present
+  ansible.builtin.stat:
+    path: "{{ users_rrsync_path }}"
+  register: users_rrsync
+
+- name: Fail when rrsync is missing (the forced command would refuse every pull)
+  ansible.builtin.assert:
+    that:
+      - users_rrsync.stat.exists
+      - users_rrsync.stat.executable
+    fail_msg: "{{ users_rrsync_path }} is missing; install rsync >= 3.2.4 or set users_rrsync_path."
+    quiet: true
+
+- name: Backup pull key is the only key, read-only and limited to the workstation
+  ansible.posix.authorized_key:
+    user: "{{ backup_pull_user }}"
+    key: "{{ backup_pull_pubkey }}"
+    key_options: 'restrict,from="{{ gaming_pc_lan_ip }}",command="{{ users_rrsync_path }} -ro {{ homelab_backups_dir }}"'
+    exclusive: true
+    manage_dir: true
+    state: present

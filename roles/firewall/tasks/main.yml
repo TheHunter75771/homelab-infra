@@ -1,0 +1,17 @@
+---
+- name: Interface variables are set and the Wi-Fi uplink is a separate interface
+  ansible.builtin.assert:
+    that:
+      - lan_iface | default('') | length > 0
+      - wifi_iface | default('') | length > 0
+      - lan_cidr | default('') | length > 0
+      - gaming_pc_lan_ip | default('') | length > 0
+      - wifi_iface not in [lan_iface, firewall_tailnet_iface]
+    fail_msg: "Set lan_iface, wifi_iface, lan_cidr and gaming_pc_lan_ip in host_vars; wifi_iface must differ from lan_iface and tailscale0."
+    quiet: true
+
+- name: UFW declared state
+  ansible.builtin.import_tasks: ufw.yml
+
+- name: DOCKER-USER guard
+  ansible.builtin.import_tasks: docker_user.yml

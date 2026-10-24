@@ -1,0 +1,9 @@
+---
+# Role backup_pull (docs/CONTRACTS.md §8): runs on a workstation as the desktop user, no become.
+# Needs host vars (inventory/host_vars/<workstation>.yml, git-ignored):
+#   pull_source_host  address the server's backup key is restricted to (from="...")
+#   pull_ssh_key      private key whose public half is backup_pull_pubkey on the server
+#   pull_dest         where verified copies land, e.g. ~/backups/<host>/nightly/v2
+backup_pull_on_calendar: "*-*-* 06:00:00"
+# The unit fails when the server's LAST_OK is older than this (its timer stopped, or it fails).
+backup_pull_max_age_hours: 48

@@ -1,0 +1,34 @@
+# {{ ansible_managed }}
+# Edge stack (docs/CONTRACTS.md §6): the Cloudflare tunnel, for public streaming only.
+# Its one public hostname (path /watch*) points at http://jellyfin:8096 over {{ stacks_public_network }};
+# that route is set in the Cloudflare dashboard (docs/runbooks/cloudflare.md). Not deployed in rehearsal.
+name: edge
+
+services:
+  cloudflared:
+    image: "{{ images.cloudflared }}"
+    container_name: cloudflared
+    restart: unless-stopped
+    # Token from .env (TUNNEL_TOKEN), so it never appears on the command line.
+    # The metrics/ready endpoint stays inside the container (loopback) for the healthcheck.
+    command: ["tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:20241", "run"]
+    env_file:
+      - .env
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: {{ stacks_mem_limits.cloudflared }}
+    networks:
+      - {{ stacks_public_network }}
+    healthcheck:
+      test: ["CMD", "cloudflared", "tunnel", "--metrics", "127.0.0.1:20241", "ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    labels:
+      homelab.watch: "true"
+
+networks:
+  {{ stacks_public_network }}:
+    external: true

@@ -1,0 +1,7 @@
+---
+# daemon-reload re-runs systemd-fstab-generator: once the fstab line is gone, the generated
+# media.mount and its local-fs.target.wants link disappear and /etc/systemd/system/media.mount
+# is the only definition. A reload never unmounts anything.
+- name: Storage daemon-reload
+  ansible.builtin.systemd_service:
+    daemon_reload: true

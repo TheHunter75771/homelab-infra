@@ -1,0 +1,12 @@
+# {{ ansible_managed }}
+# The backup Wi-Fi is an open network: never take its DNS servers. Otherwise they'd join
+# resolved's lists, including /run/systemd/resolve/resolv.conf, which Docker hands to containers.
+# Addresses and routes from it are still used (outbound failover).
+[DHCPv4]
+UseDNS=no
+
+[DHCPv6]
+UseDNS=no
+
+[IPv6AcceptRA]
+UseDNS=no

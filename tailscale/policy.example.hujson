@@ -1,0 +1,53 @@
+// Example tailnet policy for the homelab (public copy: tags and groups only, no logins).
+//
+// Paste it into the Tailscale admin console (Access controls), then add the group members
+// (logins) there, or in a git-ignored override once the policy moves to GitOps. Never commit
+// logins or email addresses to this file.
+//
+// Port map on the media server (tag:server), all reached over tailscale0:
+//   22    OpenSSH (Tailscale SSH is off on the server)
+//   443   tailscale serve: push alerts (/), Jellyfin (/watch), Sonarr, Radarr, Prowlarr, SABnzbd
+//   8443  tailscale serve: Jellyseerr (requests)
+//   9999  wol-relay (token-gated)
+// Port 443 carries the admin UIs, so only admins get it. Household members get Jellyseerr only;
+// they watch Jellyfin on the LAN or through the public /watch tunnel.
+{
+	"groups": {
+		// Noah's login(s). Full access, including SSH and every admin UI.
+		"group:admins": [],
+		// Other household members (for example a partner's phone): requests only.
+		"group:household": [],
+	},
+
+	"tagOwners": {
+		// The media server. Joined with a pre-authorized, tagged, single-use auth key.
+		"tag:server": ["group:admins"],
+		// The edge VPS that runs the off-site heartbeat (docs/CONTRACTS.md §8).
+		"tag:edge": ["group:admins"],
+	},
+
+	"grants": [
+		// Admins keep access to everything they own and every tagged node.
+		{"src": ["group:admins"], "dst": ["*"], "ip": ["*"]},
+
+		// Everyone can reach their own devices.
+		{"src": ["autogroup:member"], "dst": ["autogroup:self"], "ip": ["*"]},
+
+		// Household: Jellyseerr only.
+		{"src": ["group:household"], "dst": ["tag:server"], "ip": ["tcp:8443"]},
+
+		// Edge VPS heartbeat: `tailscale ping` plus a TCP check on 22. Nothing else.
+		// If the VPS also triggers Wake-on-LAN, add "tcp:9999" here.
+		{"src": ["tag:edge"], "dst": ["tag:server"], "ip": ["tcp:22"]},
+	],
+
+	// No Tailscale SSH rules: the server runs OpenSSH, limited by the grants above and by UFW.
+
+	"tests": [
+		{
+			"src": "tag:edge",
+			"accept": ["tag:server:22"],
+			"deny": ["tag:server:443", "tag:server:8443", "tag:server:9999"],
+		},
+	],
+}

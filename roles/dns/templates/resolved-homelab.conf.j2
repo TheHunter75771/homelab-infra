@@ -1,0 +1,12 @@
+# {{ ansible_managed }}
+# The only resolved drop-in the homelab uses. Named zz- so it's read last: the empty DNS= and
+# FallbackDNS= lines reset anything set earlier (resolved.conf or another drop-in) before the
+# declared lists are applied.
+[Resolve]
+DNSStubListener=yes
+DNS=
+DNS={{ dns_upstreams | join(' ') }}
+FallbackDNS=
+FallbackDNS={{ dns_fallback | join(' ') }}
+DNSOverTLS={{ dns_over_tls }}
+DNSSEC={{ dns_dnssec }}

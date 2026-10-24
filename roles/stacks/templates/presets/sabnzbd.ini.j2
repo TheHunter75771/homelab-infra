@@ -1,0 +1,14 @@
+# Written once by Ansible (role stacks) on a clean start. SABnzbd owns this file afterwards and
+# fills in every other setting with its own defaults (new API keys included).
+[misc]
+url_base = /sabnzbd
+# Host header check (DNS-rebinding guard): the tailnet name, plus "sabnzbd" for Sonarr/Radarr/Prowlarr.
+host_whitelist = {{ tailnet_fqdn | lower }}, sabnzbd
+# 4 = full web UI for "external" clients. `tailscale serve` forwards the tailnet client address
+# (100.64.0.0/10, not private) in X-Forwarded-For, so without this SABnzbd refuses every tailnet visitor.
+# The port is published on 127.0.0.1 only; set a username/password in the first-run wizard.
+inet_exposure = 4
+download_dir = /incomplete-downloads
+complete_dir = /data/downloads/complete
+# Follows `rehearsal` (role stacks keeps it in step on every run).
+start_paused = {{ 1 if rehearsal | bool else 0 }}

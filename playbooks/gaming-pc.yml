@@ -1,0 +1,13 @@
+---
+# Workstation side of the backups (docs/CONTRACTS.md §8): a user timer pulls the media
+# server's nightly archives read-only and keeps only verified copies. Runs as the desktop
+# user over the local connection; nothing here needs root.
+- name: Backup pull on the workstation
+  hosts: workstations
+  become: false
+  gather_facts: true
+  gather_subset:
+    - "!all"
+    - min
+  roles:
+    - role: backup_pull

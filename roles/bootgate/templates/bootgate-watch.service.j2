@@ -1,0 +1,13 @@
+# Managed by Ansible (role bootgate). Do not edit by hand.
+# Only acts while the gate status is ok. If the drive fails verification twice in a row it stops
+# the media compose project, sets status media-lost and pushes "Media drive lost".
+[Unit]
+Description=Boot gate: media drive drop-out watcher
+After=bootgate.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart={{ bootgate_script }} watch
+TimeoutStartSec=10min
+SyslogIdentifier=bootgate

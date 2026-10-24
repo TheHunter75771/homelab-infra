@@ -1,0 +1,153 @@
+# {{ ansible_managed }}
+# Media stack (docs/CONTRACTS.md §6). Every admin UI binds to 127.0.0.1 and is reached only through
+# `tailscale serve` (role tailscale_serve). Jellyfin is also published on the LAN address for TVs and
+# joins {{ stacks_public_network }} so the tunnel (edge stack) can reach it as http://jellyfin:8096.
+# Docker starts only after the boot gate has verified the media drive, so there is no wait-for-media init.
+name: media
+
+x-common: &common
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  labels:
+    homelab.watch: "true"
+
+x-lsio-env: &lsio_env
+  PUID: "{{ mediasvc_uid }}"
+  PGID: "{{ media_gid }}"
+  UMASK: "002"
+  TZ: "{{ timezone }}"
+
+# rslave: a remount of {{ media_mount }} by the boot gate shows up inside running containers.
+x-media-rw: &media_rw
+  type: bind
+  source: "{{ media_mount }}"
+  target: /data
+  bind:
+    propagation: rslave
+
+services:
+  jellyfin:
+    <<: *common
+    image: "{{ images.jellyfin }}"
+    container_name: jellyfin
+    mem_limit: {{ stacks_mem_limits.jellyfin }}
+    environment: *lsio_env
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "{{ stacks_render_gid }}"
+    ports:
+      - "{{ lan_ip }}:8096:8096"
+      - "127.0.0.1:8096:8096"
+    volumes:
+      - "{{ homelab_data_dir }}/jellyfin:/config"
+      - type: bind
+        source: "{{ media_mount }}"
+        target: /data
+        read_only: true
+        bind:
+          propagation: rslave
+    networks:
+      - default
+      - {{ stacks_public_network }}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8096/watch/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+
+  sonarr:
+    <<: *common
+    image: "{{ images.sonarr }}"
+    container_name: sonarr
+    mem_limit: {{ stacks_mem_limits.sonarr }}
+    environment: *lsio_env
+    ports:
+      - "127.0.0.1:8989:8989"
+    volumes:
+      - "{{ homelab_data_dir }}/sonarr:/config"
+      - *media_rw
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8989/sonarr/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  radarr:
+    <<: *common
+    image: "{{ images.radarr }}"
+    container_name: radarr
+    mem_limit: {{ stacks_mem_limits.radarr }}
+    environment: *lsio_env
+    ports:
+      - "127.0.0.1:7878:7878"
+    volumes:
+      - "{{ homelab_data_dir }}/radarr:/config"
+      - *media_rw
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:7878/radarr/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  prowlarr:
+    <<: *common
+    image: "{{ images.prowlarr }}"
+    container_name: prowlarr
+    mem_limit: {{ stacks_mem_limits.prowlarr }}
+    environment: *lsio_env
+    ports:
+      - "127.0.0.1:9696:9696"
+    volumes:
+      - "{{ homelab_data_dir }}/prowlarr:/config"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:9696/prowlarr/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  sabnzbd:
+    <<: *common
+    image: "{{ images.sabnzbd }}"
+    container_name: sabnzbd
+    mem_limit: {{ stacks_mem_limits.sabnzbd }}
+    environment: *lsio_env
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - "{{ homelab_data_dir }}/sabnzbd:/config"
+      - "{{ homelab_incomplete_dir }}:/incomplete-downloads"
+      - *media_rw
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8080/sabnzbd/api?mode=version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  jellyseerr:
+    <<: *common
+    image: "{{ images.jellyseerr }}"
+    container_name: jellyseerr
+    mem_limit: {{ stacks_mem_limits.jellyseerr }}
+    environment:
+      TZ: "{{ timezone }}"
+      LOG_LEVEL: info
+    ports:
+      - "127.0.0.1:5055:5055"
+    volumes:
+      - "{{ homelab_data_dir }}/jellyseerr:/app/config"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:5055/api/v1/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+networks:
+  {{ stacks_public_network }}:
+    external: true

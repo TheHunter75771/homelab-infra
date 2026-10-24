@@ -1,0 +1,18 @@
+---
+# Public-safe defaults. Identifiers live in inventory/host_vars (git-ignored); secrets in vault.yml.
+homelab_root: /srv/homelab
+homelab_stacks_dir: "{{ homelab_root }}/stacks"
+homelab_data_dir: "{{ homelab_root }}/data"
+homelab_backups_dir: "{{ homelab_root }}/backups"
+homelab_push_dir: "{{ homelab_root }}/push"
+homelab_incomplete_dir: "{{ homelab_root }}/downloads-incomplete"
+media_mount: /media
+admin_user: mediaadmin
+automation_user: ansible
+backup_pull_user: backuppull
+mediasvc_user: mediasvc
+mediasvc_uid: 1001
+mediasvc_gid: 1001
+media_group: media
+media_gid: 1002
+timezone: America/New_York

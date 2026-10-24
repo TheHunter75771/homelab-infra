@@ -1,0 +1,14 @@
+---
+# Off-site heartbeat (docs/CONTRACTS.md §8). The edge VPS runs other services (finance app,
+# school dashboard, an nftables game relay): this play only touches /opt/homelab-heartbeat,
+# /var/lib/homelab-heartbeat and the homelab-heartbeat.* units, and never runs nft or touches
+# the firewall. It reads (never writes) the push store on the media server, so run it after
+# site.yml, and again whenever a device subscribes or unsubscribes.
+# Re-run edge.yml after changing `rehearsal`: the flag is baked into the VPS config
+# (/opt/homelab-heartbeat/config.json) at deploy time.
+- name: Heartbeat watcher on the edge VPS
+  hosts: edge
+  become: false # the edge host is reached as root
+  gather_facts: false
+  roles:
+    - role: heartbeat

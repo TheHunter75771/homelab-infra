@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Daily pull of the media server's backups
+
+[Timer]
+OnCalendar={{ backup_pull_on_calendar }}
+# This PC is often off at 06:00: catch up at the next boot/login instead of skipping a day.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

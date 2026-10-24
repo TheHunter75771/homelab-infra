@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  author: homelab-infra
+  description: Plain systemd-resolved with its stub on and resolv.conf pointing at it; no MagicDNS dependency.
+  license: See repository
+  min_ansible_version: "2.17"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - resolute
+dependencies: []

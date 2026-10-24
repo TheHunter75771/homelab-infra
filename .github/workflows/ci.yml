@@ -1,0 +1,81 @@
+---
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install tools
+        run: pip install -r requirements-tools.txt
+      - name: Collections
+        run: ansible-galaxy collection install -r requirements.yml -p ./collections
+      - name: Public inventory stand-in
+        run: |
+          cp inventory/hosts.example.yml inventory/hosts.yml
+          printf 'dummy\n' > /tmp/vault-pass
+      - name: yamllint
+        run: yamllint .
+      - name: ansible-lint
+        env:
+          ANSIBLE_VAULT_PASSWORD_FILE: /tmp/vault-pass
+        run: ansible-lint
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  push-core:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/push-core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm test
+  role-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q sqlite3 rsync shellcheck
+          pip install pyyaml
+          PIN=$(python3 -c 'import yaml;v=yaml.safe_load(open("inventory/group_vars/all/versions.yml"));print(v["python_packages"]["pywebpush"])')
+          pip install "pywebpush==$PIN"
+      - name: shellcheck
+        run: shellcheck roles/*/files/*.sh roles/*/tests/*.sh
+      - name: backups
+        run: bash roles/backups/tests/test_backup.sh
+      - name: backup pull
+        run: bash roles/backup_pull/tests/test_pull.sh
+      - name: heartbeat
+        run: python3 -m unittest discover -s roles/heartbeat/tests -v
+      - name: bootgate
+        run: python3 -m unittest discover -s roles/bootgate/files/tests -v
+      - name: notifier
+        run: python3 -m unittest discover -s roles/notifier/files/tests -v
+      - name: storage format guard
+        run: |
+          pip install -r requirements-tools.txt
+          ansible-galaxy collection install -r requirements.yml -p ./collections
+          ansible-playbook -i localhost, -c local roles/storage/tests/test_format_guard.yml

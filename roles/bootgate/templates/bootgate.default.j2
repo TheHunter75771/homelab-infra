@@ -1,0 +1,15 @@
+# Managed by Ansible (role bootgate). Read by {{ bootgate_script }}; environment variables of the
+# same name override these values (used by the test-suite and drills).
+BOOTGATE_UUID={{ media_uuid | lower }}
+BOOTGATE_MOUNT={{ media_mount }}
+BOOTGATE_MOUNT_UNIT={{ bootgate_mount_unit }}
+BOOTGATE_SENTINEL={{ bootgate_sentinel_name }}
+BOOTGATE_WAIT_SECONDS={{ bootgate_wait_seconds }}
+BOOTGATE_RETRY_WAIT_SECONDS={{ bootgate_retry_wait_seconds }}
+BOOTGATE_REBIND_WAIT_SECONDS={{ bootgate_rebind_wait_seconds }}
+BOOTGATE_FSCK_TIMEOUT={{ bootgate_fsck_timeout_seconds }}
+BOOTGATE_POWERCYCLE_METHOD={{ bootgate_powercycle_method }}
+BOOTGATE_RTCWAKE_SECONDS={{ bootgate_rtcwake_seconds }}
+BOOTGATE_RETRY_MINUTES={{ bootgate_retry_minutes }}
+BOOTGATE_MEDIA_COMPOSE={{ bootgate_media_compose }}
+BOOTGATE_NOTIFY={{ bootgate_notify_cmd }}

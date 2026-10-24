@@ -1,0 +1,33 @@
+---
+# Role storage: the media drive's mount unit, fstab cleanup, sentinel, reserved blocks.
+# media_uuid (host_vars) and media_mount (group_vars) are inputs; see docs/CONTRACTS.md §3.
+
+# systemd unit name for media_mount (/media -> media.mount). media_mount is asserted to need
+# no systemd escaping beyond '/' -> '-'.
+storage_mount_unit: "{{ media_mount | regex_replace('^/', '') | replace('/', '-') }}.mount"
+storage_mount_options: defaults,noatime
+storage_sentinel_name: .homelab-media-sentinel
+storage_media_reserved_pct: 1
+
+# Fail the run when the media drive is not mounted with media_uuid after this role. Set false
+# only for a host that genuinely has no media drive yet (e.g. a rehearsal VM).
+storage_require_media: true
+
+# DANGER: formatting. Off by default and never part of a routine run. To initialise a BRAND-NEW
+# drive pass both on the command line:
+#   -e storage_format_media=true -e storage_format_device=/dev/disk/by-id/<id>-part1
+# Even then the role refuses unless blkid finds no signature at all on that device
+# (no filesystem, no partition table, no RAID/LVM member), and the filesystem module runs with
+# force: false. The new ext4 gets media_uuid as its UUID, so nothing else has to change.
+storage_format_media: false
+storage_format_device: ""
+storage_format_label: media
+# Where ext2/3/4 keeps backup superblocks (block groups 1 and 3, sparse_super layout) for each
+# block size. A readable one at any of these also stops a format.
+storage_format_backup_superblock_locations:
+  - {superblock: 32768, blocksize: 4096}
+  - {superblock: 98304, blocksize: 4096}
+  - {superblock: 16384, blocksize: 2048}
+  - {superblock: 49152, blocksize: 2048}
+  - {superblock: 8193, blocksize: 1024}
+  - {superblock: 24577, blocksize: 1024}

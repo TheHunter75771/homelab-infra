@@ -1,0 +1,13 @@
+---
+- name: Reload user systemd for homelab-pull
+  ansible.builtin.systemd_service:
+    scope: user
+    daemon_reload: true
+  environment: "{{ backup_pull_systemd_env }}"
+
+- name: Restart homelab-pull timer
+  ansible.builtin.systemd_service:
+    name: homelab-pull.timer
+    scope: user
+    state: restarted
+  environment: "{{ backup_pull_systemd_env }}"

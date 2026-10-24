@@ -1,0 +1,59 @@
+---
+- name: Look for the Tailscale CLI
+  ansible.builtin.stat:
+    path: /usr/bin/tailscale
+  register: tailscale_cli
+
+- name: Tailscale is installed (this role configures it, it doesn't install it)
+  ansible.builtin.assert:
+    that:
+      - tailscale_cli.stat.exists
+    fail_msg: Tailscale is not installed; install and join it first (docs/CONTRACTS.md §0).
+    quiet: true
+
+- name: Tailscaled is enabled and running
+  ansible.builtin.systemd_service:
+    name: tailscaled.service
+    enabled: true
+    state: started
+
+- name: Read the current Tailscale preferences
+  ansible.builtin.command: tailscale debug prefs
+  register: tailscale_prefs_raw
+  changed_when: false
+  check_mode: false
+
+- name: Start with no preference changes
+  ansible.builtin.set_fact:
+    tailscale_set_args: []
+
+- name: Collect the preferences that differ
+  ansible.builtin.set_fact:
+    tailscale_set_args: "{{ tailscale_set_args + [item.flag ~ '=' ~ (item.value | string | lower)] }}"
+  loop: "{{ tailscale_required_prefs }}"
+  loop_control:
+    label: "{{ item.flag }}"
+  when: (tailscale_prefs_raw.stdout | from_json)[item.pref] | default(none) != item.value
+
+- name: Preferences that differ are applied
+  ansible.builtin.command:
+    argv: "{{ ['tailscale', 'set'] + tailscale_set_args }}"
+  when: tailscale_set_args | length > 0
+  changed_when: true
+
+- name: Re-read the Tailscale preferences
+  ansible.builtin.command: tailscale debug prefs
+  register: tailscale_prefs_after
+  changed_when: false
+  when: tailscale_set_args | length > 0
+
+- name: Tailscale SSH, accept-dns and accept-routes are all off
+  ansible.builtin.assert:
+    that:
+      - (tailscale_prefs_after.stdout | from_json)[item.pref] == item.value
+    fail_msg: "{{ item.pref }} is still not {{ item.value }} after `tailscale set`."
+    quiet: true
+  loop: "{{ tailscale_required_prefs }}"
+  loop_control:
+    label: "{{ item.pref }}"
+  when: tailscale_set_args | length > 0

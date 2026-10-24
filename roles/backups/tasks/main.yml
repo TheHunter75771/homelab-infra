@@ -1,0 +1,56 @@
+---
+- name: Look up the backup group
+  ansible.builtin.getent:
+    database: group
+    key: "{{ backups_group }}"
+    fail_key: false
+
+- name: Fail clearly when the backup group is missing
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.getent_group[backups_group] is not none
+    fail_msg: >-
+      Group '{{ backups_group }}' does not exist. Role 'users' creates the {{ backup_pull_user }}
+      account and its group; run it before 'backups' (playbooks/site.yml order).
+    quiet: true
+
+- name: Backup directories are root-owned and group-readable by the pull account
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: "{{ backups_group }}"
+    mode: "0750"
+  loop:
+    - "{{ homelab_backups_dir }}"
+    - "{{ homelab_backups_dir }}/appdata"
+
+- name: Backup script is installed
+  ansible.builtin.copy:
+    src: homelab-backup.sh
+    dest: /usr/local/sbin/homelab-backup
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Backup units are installed
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: /etc/systemd/system/{{ item }}
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - homelab-backup.service
+    - homelab-backup-alert.service
+    - homelab-backup.timer
+  notify: Restart homelab-backup timer
+
+# daemon_reload runs every time (it never reports "changed") so new or edited units are
+# loaded before the timer is enabled, without flushing other roles' handlers mid-play.
+- name: Nightly backup timer is enabled and running
+  ansible.builtin.systemd_service:
+    name: homelab-backup.timer
+    enabled: true
+    state: started
+    daemon_reload: true

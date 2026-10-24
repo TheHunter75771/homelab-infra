@@ -1,0 +1,78 @@
+#!/bin/sh
+# {{ ansible_managed }}
+# DOCKER-USER guard, run by homelab-docker-user.service after docker.service.
+# Docker-published ports bypass UFW's INPUT rules, so forwarded traffic is filtered here:
+#   - new or invalid connections arriving on the Wi-Fi uplink ({{ wifi_iface }}) are dropped, so
+#     nothing can reach a container from it, while replies to the containers' own outbound
+#     traffic still flow when the Wi-Fi is the active (failover) route;
+#   - tailnet-range sources are dropped unless they arrive on {{ firewall_tailnet_iface }}
+#     (the backup Wi-Fi hands out addresses inside {{ firewall_tailnet_v4 }}).
+# Idempotent: each rule is checked (-C) before it's inserted (-I). Every rule carries a tag made
+# of its name and a fingerprint of its exact match, so any change to a rule gives it a new tag.
+# After the declared rules are in place, tagged rules that are no longer declared are deleted.
+# Declared rules are never removed, so re-running never opens a gap.
+{% set wifi_match = '-i ' ~ (wifi_iface | quote) ~ ' -m conntrack --ctstate NEW,INVALID' %}
+{% set tailnet4_match = '-s ' ~ firewall_tailnet_v4 ~ ' ! -i ' ~ (firewall_tailnet_iface | quote) %}
+{% set tailnet6_match = '-s ' ~ firewall_tailnet_v6 ~ ' ! -i ' ~ (firewall_tailnet_iface | quote) %}
+{% set wifi_tag = 'wifi-' ~ (wifi_match | hash('sha1'))[:10] %}
+{% set tailnet4_tag = 'tailnet4-' ~ (tailnet4_match | hash('sha1'))[:10] %}
+{% set tailnet6_tag = 'tailnet6-' ~ (tailnet6_match | hash('sha1'))[:10] %}
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+# Tags hold only [A-Za-z0-9_-], so `iptables -S` prints them unquoted.
+TAG=homelab-du-
+
+# ensure BINARY TAG MATCH...: insert "-A DOCKER-USER MATCH... -j DROP" (tagged) unless present.
+ensure() {
+	ipt=$1
+	tag=$2
+	shift 2
+	if ! "$ipt" -w -C DOCKER-USER "$@" -m comment --comment "$TAG$tag" -j DROP 2>/dev/null; then
+		"$ipt" -w -I DOCKER-USER 1 "$@" -m comment --comment "$TAG$tag" -j DROP
+		echo "$ipt: inserted $TAG$tag"
+	fi
+}
+
+# prune BINARY TAG...: delete tagged DOCKER-USER rules whose tag isn't listed.
+prune() {
+	ipt=$1
+	shift
+	"$ipt" -w -S DOCKER-USER | while IFS= read -r line; do
+		case $line in
+			*"--comment $TAG"*) ;;
+			*) continue ;;
+		esac
+		tag=${line##*--comment "$TAG"}
+		tag=${tag%% *}
+		keep=no
+		for want in "$@"; do
+			if [ "$tag" = "$want" ]; then
+				keep=yes
+			fi
+		done
+		if [ "$keep" = no ]; then
+			# "-A DOCKER-USER <spec>" with -D instead of -A deletes exactly that rule.
+			set -f
+			# shellcheck disable=SC2086
+			"$ipt" -w -D ${line#-A }
+			set +f
+			echo "$ipt: removed stale $TAG$tag"
+		fi
+	done
+}
+
+if ! iptables -w -S DOCKER-USER >/dev/null 2>&1; then
+	echo "DOCKER-USER chain is missing; is Docker running with its iptables firewall backend?" >&2
+	exit 1
+fi
+ensure iptables {{ wifi_tag }} {{ wifi_match }}
+ensure iptables {{ tailnet4_tag }} {{ tailnet4_match }}
+prune iptables {{ wifi_tag }} {{ tailnet4_tag }}
+
+# Docker creates the IPv6 chain when ip6tables support is on (the default since Docker 27).
+if ip6tables -w -S DOCKER-USER >/dev/null 2>&1; then
+	ensure ip6tables {{ wifi_tag }} {{ wifi_match }}
+	ensure ip6tables {{ tailnet6_tag }} {{ tailnet6_match }}
+	prune ip6tables {{ wifi_tag }} {{ tailnet6_tag }}
+fi

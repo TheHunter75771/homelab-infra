@@ -1,0 +1,7 @@
+---
+# push-core reads vapid.json; restart it when the keys change.
+- name: Restart push-core
+  community.docker.docker_compose_v2:
+    project_src: "{{ homelab_stacks_dir }}/push"
+    services: [push-core]
+    state: restarted

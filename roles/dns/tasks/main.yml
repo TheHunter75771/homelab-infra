@@ -1,0 +1,101 @@
+---
+- name: Systemd-resolved is installed
+  ansible.builtin.apt:
+    name: systemd-resolved
+    state: present
+
+- name: Resolved drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/resolved.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Drop-ins are read in name order and later files win; "zz-" sorts after any name, so this
+# beats a DNSStubListener= anywhere else (the host's resolved.conf sets it to "no", left from
+# AdGuard) and its reset-then-set DNS= lists replace any earlier ones.
+- name: Resolved runs the stub with the declared upstreams
+  ansible.builtin.template:
+    src: resolved-homelab.conf.j2
+    dest: /etc/systemd/resolved.conf.d/zz-homelab.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart systemd-resolved
+
+- name: Hand-made resolved drop-ins are removed (their settings now live in zz-homelab.conf)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ dns_stale_dropins }}"
+  notify: Restart systemd-resolved
+
+- name: Wi-Fi interface is set
+  ansible.builtin.assert:
+    that:
+      - wifi_iface | default('') | length > 0
+    fail_msg: Set wifi_iface in host_vars.
+    quiet: true
+
+# A drop-in for netplan's generated /run/systemd/network/10-netplan-<iface>.network; netplan
+# itself isn't edited (`netplan apply` can bounce the LAN link mid-run).
+- name: Wi-Fi network drop-in directory exists
+  ansible.builtin.file:
+    path: "/etc/systemd/network/10-netplan-{{ wifi_iface }}.network.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: DNS servers learned on the Wi-Fi uplink are ignored
+  ansible.builtin.template:
+    src: wifi-no-dns.conf.j2
+    dest: "/etc/systemd/network/10-netplan-{{ wifi_iface }}.network.d/zz-homelab.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd-networkd config (dns)
+
+- name: Resolv.conf points at the resolved stub
+  ansible.builtin.file:
+    src: ../run/systemd/resolve/stub-resolv.conf
+    dest: /etc/resolv.conf
+    state: link
+    force: true
+    follow: false
+
+- name: Systemd-resolved is enabled and running
+  ansible.builtin.systemd_service:
+    name: systemd-resolved.service
+    enabled: true
+    state: started
+
+- name: Apply resolved changes before checking them
+  ansible.builtin.meta: flush_handlers
+
+- name: Stub resolver answers on 127.0.0.53:53
+  ansible.builtin.wait_for:
+    host: 127.0.0.53
+    port: 53
+    timeout: 15
+
+- name: Read resolved's DNS servers
+  ansible.builtin.command: resolvectl dns
+  register: dns_servers
+  changed_when: false
+  check_mode: false
+
+- name: No lookup depends on Tailscale MagicDNS, and the declared upstreams are in use
+  ansible.builtin.assert:
+    that:
+      - "'100.100.100.100' not in dns_servers.stdout"
+      - dns_global == dns_upstreams
+    fail_msg: >-
+      resolved's servers: {{ dns_servers.stdout_lines }}. Expected global {{ dns_upstreams }} and no
+      MagicDNS (100.100.100.100; Tailscale accept-dns must be off on the server).
+    quiet: true
+  vars:
+    dns_global: >-
+      {{ (dns_servers.stdout_lines | select('match', '^Global:') | first | default('Global:'))
+         | regex_replace('^Global:\s*', '') | split() }}

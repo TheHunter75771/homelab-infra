@@ -1,0 +1,9 @@
+---
+profile: production
+exclude_paths:
+  - .venv/
+  - collections/
+  - .github/
+  - apps/
+skip_list:
+  - var-naming[no-role-prefix]

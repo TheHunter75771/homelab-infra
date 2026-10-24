@@ -1,0 +1,14 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Pull the media server's nightly backups (read-only) and keep verified copies
+
+[Service]
+Type=oneshot
+Environment="PULL_USER={{ backup_pull_user }}"
+Environment="PULL_HOST={{ pull_source_host }}"
+Environment="PULL_KEY={{ backup_pull_key_path }}"
+Environment="PULL_DEST={{ backup_pull_dest_path }}"
+Environment="PULL_MAX_AGE_HOURS={{ backup_pull_max_age_hours }}"
+ExecStart={{ backup_pull_home }}/.local/bin/homelab-pull
+TimeoutStartSec=1h
+Nice=10

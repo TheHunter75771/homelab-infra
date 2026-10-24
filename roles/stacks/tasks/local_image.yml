@@ -1,0 +1,45 @@
+---
+# Build gate for a locally built image (wol-relay, push-core). Imported with:
+#   stacks_li_stack    stack name (utils | push), the key in stacks_local_build
+#   stacks_li_context  build context directory on the host (already synced)
+#   stacks_li_image    image reference from local_images.*
+# The source hash covers every file in the context (relative path + sha256) plus the base image.
+# The compose template stamps it on the image as label homelab.source-hash. The image is built only
+# when no image with that tag carries this exact hash: first run, a source change, a base-image bump,
+# or a failed/overwritten build. Otherwise compose runs with --no-build, so the image ID cannot drift.
+# Result: stacks_local_build[<stack>] = {hash: <sha256>, build: always|never}.
+
+- name: Local image | files in the build context of {{ stacks_li_stack }}
+  ansible.builtin.find:
+    paths: "{{ stacks_li_context }}"
+    recurse: true
+    hidden: true
+    file_type: file
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: stacks_li_files
+
+- name: Local image | source hash of {{ stacks_li_stack }}
+  ansible.builtin.set_fact:
+    stacks_li_hash: >-
+      {%- set ns = namespace(lines=['NODE_BASE ' ~ images.node_base]) -%}
+      {%- for f in stacks_li_files.files | sort(attribute='path') -%}
+      {%-   set ns.lines = ns.lines + [(f.path | relpath(stacks_li_context)) ~ ' ' ~ f.checksum] -%}
+      {%- endfor -%}
+      {{ ns.lines | join('\n') | hash('sha256') }}
+
+- name: Local image | current image for {{ stacks_li_stack }}
+  community.docker.docker_image_info:
+    name: "{{ stacks_li_image }}"
+  register: stacks_li_info
+
+- name: Local image | build decision for {{ stacks_li_stack }}
+  vars:
+    stacks_li_current: >-
+      {{ ((stacks_li_info.images | first).Config.Labels | default({}, true))['homelab.source-hash'] | default('')
+         if stacks_li_info.images | length > 0 else '' }}
+  ansible.builtin.set_fact:
+    stacks_local_build: >-
+      {{ stacks_local_build | default({}) | combine({stacks_li_stack: {
+           'hash': stacks_li_hash,
+           'build': 'never' if stacks_li_current == stacks_li_hash else 'always'}}) }}

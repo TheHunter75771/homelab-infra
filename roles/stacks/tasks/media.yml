@@ -1,0 +1,92 @@
+---
+# Clean start: no app data is restored. Presets are written only when absent (force: false), before the
+# first start; each app then fills in its own defaults and owns the file from there on.
+
+- name: Media | Jellyfin network preset (URL base /watch; the tunnel network is a known proxy)
+  ansible.builtin.template:
+    src: presets/jellyfin-network.xml.j2
+    dest: "{{ homelab_data_dir }}/jellyfin/network.xml"
+    owner: "{{ mediasvc_uid }}"
+    group: "{{ media_gid }}"
+    mode: "0640"
+    force: false
+
+- name: Media | Sonarr, Radarr and Prowlarr presets (URL base, forms login required)
+  ansible.builtin.template:
+    src: presets/arr-config.xml.j2
+    dest: "{{ homelab_data_dir }}/{{ item }}/config.xml"
+    owner: "{{ mediasvc_uid }}"
+    group: "{{ media_gid }}"
+    mode: "0640"
+    force: false
+  loop: [sonarr, radarr, prowlarr]
+
+- name: Media | SABnzbd preset (URL base, host whitelist, folders)
+  ansible.builtin.template:
+    src: presets/sabnzbd.ini.j2
+    dest: "{{ homelab_data_dir }}/sabnzbd/sabnzbd.ini"
+    owner: "{{ mediasvc_uid }}"
+    group: "{{ media_gid }}"
+    mode: "0600"
+    force: false
+
+# Rehearsal: SABnzbd starts paused. start_paused is kept in step with `rehearsal` even on an existing
+# config. SABnzbd rewrites its ini while running, so it is stopped before the edit and `up` restarts it.
+- name: Media | look for the SABnzbd config
+  ansible.builtin.stat:
+    path: "{{ homelab_data_dir }}/sabnzbd/sabnzbd.ini"
+    get_checksum: false
+  register: stacks_sab_ini
+
+- name: Media | does SABnzbd's start_paused need to change?
+  community.general.ini_file:
+    path: "{{ homelab_data_dir }}/sabnzbd/sabnzbd.ini"
+    section: misc
+    option: start_paused
+    value: "{{ '1' if rehearsal | bool else '0' }}"
+    create: false
+  check_mode: true
+  register: stacks_sab_pause_probe
+  when: stacks_sab_ini.stat.exists
+
+- name: Media | look for an existing media compose file
+  ansible.builtin.stat:
+    path: "{{ homelab_stacks_dir }}/media/compose.yaml"
+    get_checksum: false
+  register: stacks_media_compose_stat
+
+- name: Media | stop SABnzbd before switching start_paused
+  community.docker.docker_compose_v2:
+    project_src: "{{ homelab_stacks_dir }}/media"
+    services: [sabnzbd]
+    state: stopped
+  when:
+    - stacks_sab_pause_probe is changed
+    - stacks_media_compose_stat.stat.exists
+
+- name: Media | SABnzbd start_paused follows rehearsal
+  community.general.ini_file:
+    path: "{{ homelab_data_dir }}/sabnzbd/sabnzbd.ini"
+    section: misc
+    option: start_paused
+    value: "{{ '1' if rehearsal | bool else '0' }}"
+    create: false
+  when: stacks_sab_ini.stat.exists
+
+- name: Media | compose definition
+  ansible.builtin.template:
+    src: media-compose.yaml.j2
+    dest: "{{ homelab_stacks_dir }}/media/compose.yaml"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: docker compose --project-directory {{ homelab_stacks_dir }}/media -f %s config --quiet
+
+- name: Media | stack is up and healthy
+  community.docker.docker_compose_v2:
+    project_src: "{{ homelab_stacks_dir }}/media"
+    state: present
+    pull: missing
+    remove_orphans: true
+    wait: true
+    wait_timeout: "{{ stacks_compose_wait_timeout }}"

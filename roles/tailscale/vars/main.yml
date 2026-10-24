@@ -1,0 +1,7 @@
+---
+# Preferences the server must have (docs/CONTRACTS.md §7): the `tailscale debug prefs` key,
+# the `tailscale set` flag that controls it, and the required value.
+tailscale_required_prefs:
+  - { pref: RunSSH, flag: --ssh, value: false }
+  - { pref: CorpDNS, flag: --accept-dns, value: false }
+  - { pref: RouteAll, flag: --accept-routes, value: false }

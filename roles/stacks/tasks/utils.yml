@@ -1,0 +1,47 @@
+---
+- name: Utils | wol-relay token (.env, root only)
+  ansible.builtin.copy:
+    dest: "{{ homelab_stacks_dir }}/utils/.env"
+    content: "WOL_RELAY_TOKEN='{{ wol_relay_token }}'\n"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+
+- name: Utils | wol-relay build context
+  ansible.builtin.copy:
+    src: wol-relay/
+    dest: "{{ homelab_stacks_dir }}/utils/wol-relay/"
+    owner: root
+    group: root
+    mode: "0644"
+    directory_mode: "0755"
+
+- name: Utils | build gate for wol-relay
+  ansible.builtin.import_tasks: local_image.yml
+  vars:
+    stacks_li_stack: utils
+    stacks_li_context: "{{ homelab_stacks_dir }}/utils/wol-relay"
+    stacks_li_image: "{{ local_images.wol_relay }}"
+
+- name: Utils | compose definition
+  ansible.builtin.template:
+    src: utils-compose.yaml.j2
+    dest: "{{ homelab_stacks_dir }}/utils/compose.yaml"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: docker compose --project-directory {{ homelab_stacks_dir }}/utils -f %s config --quiet
+
+# Built only when the build gate says so (source hash not on the current image); otherwise --no-build.
+# pull never: the local image name must never be resolved against a registry.
+- name: Utils | wol-relay is up and healthy (built only if its source changed)
+  community.docker.docker_compose_v2:
+    project_src: "{{ homelab_stacks_dir }}/utils"
+    state: present
+    build: "{{ stacks_local_build.utils.build }}"
+    pull: never
+    remove_orphans: true
+    wait: true
+    wait_timeout: "{{ stacks_compose_wait_timeout }}"

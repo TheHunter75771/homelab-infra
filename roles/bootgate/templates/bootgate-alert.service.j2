@@ -1,0 +1,13 @@
+# Managed by Ansible (role bootgate). Do not edit by hand.
+# Fired by OnFailure= of bootgate.service. Calls homelab-notify --tag bootgate
+# --title "Media drive failed" with the failure detail; retries a few times if the network is late.
+[Unit]
+Description=Boot gate: push the "Media drive failed" alert
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ bootgate_script }} alert
+TimeoutStartSec=15min
+SyslogIdentifier=bootgate-alert

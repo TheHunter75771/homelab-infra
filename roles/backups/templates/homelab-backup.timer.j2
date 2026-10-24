@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Nightly homelab app-data backup
+
+[Timer]
+OnCalendar={{ backups_on_calendar }}
+# Catch up after the box was off at the scheduled time.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

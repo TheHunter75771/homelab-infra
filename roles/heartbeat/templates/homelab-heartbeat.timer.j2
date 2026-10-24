@@ -1,0 +1,10 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Homelab heartbeat check every 2 minutes
+
+[Timer]
+OnCalendar={{ heartbeat_on_calendar }}
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

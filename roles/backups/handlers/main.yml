@@ -1,0 +1,6 @@
+---
+- name: Restart homelab-backup timer
+  ansible.builtin.systemd_service:
+    name: homelab-backup.timer
+    state: restarted
+    daemon_reload: true

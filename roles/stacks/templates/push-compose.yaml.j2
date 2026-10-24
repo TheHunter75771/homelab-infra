@@ -1,0 +1,47 @@
+# {{ ansible_managed }}
+# Push stack (docs/CONTRACTS.md §5): push-core, built on this host from ./src (a copy of apps/push-core/).
+# Reachable only through `tailscale serve` at https://<tailnet name>/ (published on 127.0.0.1 only).
+# Runs as {{ stacks_pushcore_uid }}:{{ stacks_pushcore_gid }} (host user/group {{ stacks_pushcore_user }}), the owner of the push store.
+# No provenance/SBOM attestations: they carry build timestamps and would change the image ID per build.
+# homelab.source-hash lets role stacks skip the build when the source is unchanged (tasks/local_image.yml).
+name: push
+
+services:
+  push-core:
+    image: "{{ local_images.push_core }}"
+    build:
+      context: ./src
+      args:
+        NODE_BASE: "{{ images.node_base }}"
+      provenance: false
+      sbom: false
+      labels:
+        homelab.source-hash: "{{ stacks_local_build.push.hash }}"
+    pull_policy: build
+    container_name: push-core
+    restart: unless-stopped
+    init: true
+    user: "{{ stacks_pushcore_uid }}:{{ stacks_pushcore_gid }}"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+{% for key, value in stacks_push_core_environment.items() %}
+      {{ key }}: "{{ value }}"
+{% endfor %}
+    ports:
+      - "127.0.0.1:{{ stacks_push_core_port }}:{{ stacks_push_core_port }}"
+    volumes:
+      - "{{ homelab_push_dir }}:{{ stacks_push_core_data_mount }}"
+    mem_limit: {{ stacks_mem_limits.push_core }}
+    healthcheck:
+      # The app's own probe: GET /healthz on PORT, 200 only when vapid.json and the store are usable.
+      test: ["CMD", "node", "/app/src/healthcheck.js"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    labels:
+      homelab.watch: "true"

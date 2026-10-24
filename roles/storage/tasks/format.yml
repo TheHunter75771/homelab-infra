@@ -1,0 +1,46 @@
+---
+# Reached ONLY with -e storage_format_media=true (default false). Independent refusals stand
+# between any run and a destroyed library:
+#   1. the flag, plus an explicitly named device (no default, never derived from media_uuid);
+#   2. the target must be a block device;
+#   3. blkid's low-level probe must find NO signature at all (format_probe.yml);
+#   4. no readable ext2/3/4 BACKUP superblock either (a library with a damaged primary
+#      superblock looks blank to blkid but is recoverable; format_probe.yml);
+#   5. community.general.filesystem with force: false refuses an existing filesystem.
+- name: Format guard | a target device must be named explicitly
+  ansible.builtin.assert:
+    that:
+      - storage_format_device | length > 0
+      - storage_format_device is match('^/dev/')
+    fail_msg: storage_format_media=true also needs storage_format_device=/dev/disk/by-id/... Nothing was changed.
+    quiet: true
+
+- name: Format guard | inspect the target
+  ansible.builtin.stat:
+    path: "{{ storage_format_device }}"
+    follow: true
+  register: storage_format_target
+
+- name: Format guard | the target must be a block device
+  ansible.builtin.assert:
+    that:
+      - storage_format_target.stat.exists
+      - storage_format_target.stat.isblk
+    fail_msg: "{{ storage_format_device }} is not a block device. Nothing was changed."
+    quiet: true
+
+# Probes read-only and FAILS here unless the target is completely blank (checks 3 and 4).
+- name: Format guard | probe the target and refuse anything that is not blank
+  ansible.builtin.include_tasks: format_probe.yml
+
+- name: Format | create ext4 carrying the contract UUID
+  community.general.filesystem:
+    dev: "{{ storage_format_device }}"
+    fstype: ext4
+    opts: -U {{ media_uuid }} -m {{ storage_media_reserved_pct }} -L {{ storage_format_label }}
+    force: false
+
+- name: Format | wait for udev to publish the new UUID
+  ansible.builtin.command:
+    argv: [udevadm, settle, --timeout=30]
+  changed_when: false

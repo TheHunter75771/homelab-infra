@@ -1,0 +1,11 @@
+---
+- name: Reload ufw
+  community.general.ufw:
+    state: reloaded
+
+# Re-running the guard never removes a declared rule, so a restart opens no gap.
+- name: Restart homelab-docker-user
+  ansible.builtin.systemd_service:
+    name: homelab-docker-user.service
+    state: restarted
+  when: firewall_docker_running | default(false)

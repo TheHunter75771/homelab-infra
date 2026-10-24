@@ -1,0 +1,33 @@
+---
+# Run ONCE by a human, as the admin user, typing the sudo password:
+#   .venv/bin/ansible-playbook playbooks/bootstrap.yml -K
+# Creates the automation user that every other playbook uses: key-only, reachable only
+# from the admin workstation's tailnet/LAN addresses, passwordless sudo, no password login.
+- name: Bootstrap the automation user
+  hosts: media_servers
+  become: true
+  vars:
+    ansible_user: "{{ admin_user }}"
+  tasks:
+    - name: Automation user exists with a locked password
+      ansible.builtin.user:
+        name: "{{ automation_user }}"
+        shell: /bin/bash
+        create_home: true
+        password: "!"
+        password_lock: true
+
+    - name: Admin keys authorized for the automation user, restricted by source address
+      ansible.posix.authorized_key:
+        user: "{{ automation_user }}"
+        key: "{{ admin_pubkeys | join('\n') }}"
+        key_options: 'from="{{ gaming_pc_tailnet_ip }},{{ gaming_pc_lan_ip }}"'
+        exclusive: true
+
+    - name: Automation user has passwordless sudo (validated by visudo)
+      community.general.sudoers:
+        name: 10-homelab-automation
+        user: "{{ automation_user }}"
+        commands: ALL
+        nopassword: true
+        validation: required

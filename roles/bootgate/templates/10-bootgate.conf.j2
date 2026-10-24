@@ -1,0 +1,6 @@
+# Managed by Ansible (role bootgate). Do not edit by hand.
+# Docker and every container wait for the media drive boot gate, and do not start if it fails.
+# docker.socket activation is covered too: it starts docker.service, which pulls the gate in.
+[Unit]
+Requires=bootgate.service
+After=bootgate.service

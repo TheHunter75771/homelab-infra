@@ -1,0 +1,14 @@
+# Managed by Ansible (role notifier). Do not edit by hand.
+[Unit]
+Description=Homelab alert floor: push on unhealthy, crashed or restart-looping containers
+After=docker.service bootgate.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart={{ notifier_alertfloor_script }}
+Environment=HOMELAB_ALERTFLOOR_STATE={{ notifier_alertfloor_state_dir }}/state.json
+Environment=HOMELAB_ALERTFLOOR_BOOTGATE_STATUS={{ notifier_bootgate_status_file }}
+Environment=HOMELAB_ALERTFLOOR_NOTIFY={{ notifier_cli }}
+TimeoutStartSec=10min
+SyslogIdentifier=homelab-alertfloor

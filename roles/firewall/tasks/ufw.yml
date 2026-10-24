@@ -1,0 +1,129 @@
+---
+# Converges UFW to firewall_rules without `ufw reset`: add the declared rules first, then delete
+# whatever else is there. The SSH-over-tailnet rule is never absent while UFW is enabled.
+- name: UFW and iptables are installed
+  ansible.builtin.apt:
+    name:
+      - ufw
+      - iptables
+    state: present
+
+- name: UFW applies its policy to IPv6 too
+  ansible.builtin.lineinfile:
+    path: /etc/default/ufw
+    regexp: "^IPV6="
+    line: IPV6=yes
+  notify: Reload ufw
+
+# A DOCKER-USER block in UFW's own files (the ufw-docker recipe) would flush the guard's rules
+# on every UFW reload. Refuse to run on top of one.
+- name: Look for DOCKER-USER in UFW's rule files
+  ansible.builtin.command:
+    argv:
+      - grep
+      - -l
+      - -e
+      - DOCKER-USER
+      - /etc/ufw/before.rules
+      - /etc/ufw/before6.rules
+      - /etc/ufw/after.rules
+      - /etc/ufw/after6.rules
+  register: firewall_ufw_docker_block
+  changed_when: false
+  failed_when: firewall_ufw_docker_block.rc not in [0, 1]
+  check_mode: false
+
+- name: UFW's rule files leave DOCKER-USER to homelab-docker-user.service
+  ansible.builtin.assert:
+    that:
+      - firewall_ufw_docker_block.rc == 1
+    fail_msg: "{{ firewall_ufw_docker_block.stdout_lines | join(', ') }} touch DOCKER-USER; remove that block first."
+    quiet: true
+
+# `ufw <rule>` skips an identical rule, updates a rule that differs only in comment or action
+# in place, and appends a new one. Nothing is ever removed here.
+- name: Declared rules are present (SSH over tailnet first)
+  ansible.builtin.command:
+    cmd: "ufw {{ item }}"
+  environment: "{{ firewall_ufw_env }}"
+  loop: "{{ firewall_rules }}"
+  register: firewall_add
+  changed_when: firewall_add.stdout is search('Rules? (added|updated|inserted)')
+
+- name: Default policies are deny in, allow out, deny routed
+  community.general.ufw:
+    default: "{{ item.policy }}"
+    direction: "{{ item.direction }}"
+  loop:
+    - { direction: incoming, policy: deny }
+    - { direction: outgoing, policy: allow }
+    - { direction: routed, policy: deny }
+  loop_control:
+    label: "{{ item.direction }}"
+
+- name: Read whether UFW is enabled
+  ansible.builtin.command: ufw status
+  environment: "{{ firewall_ufw_env }}"
+  register: firewall_status
+  changed_when: false
+  check_mode: false
+
+- name: UFW is enabled (the declared rules are already loaded with it)
+  community.general.ufw:
+    state: enabled
+  when: "'Status: active' not in firewall_status.stdout"
+
+- name: Prune rules that are not declared
+  when: not ansible_check_mode
+  block:
+    - name: Read the rules UFW has
+      ansible.builtin.command: ufw show added
+      environment: "{{ firewall_ufw_env }}"
+      register: firewall_show_added
+      changed_when: false
+
+    - name: Work out which rules are not declared
+      ansible.builtin.set_fact:
+        firewall_present: "{{ firewall_present_rules }}"
+        firewall_unmanaged: "{{ firewall_present_rules | difference(firewall_rules) }}"
+      vars:
+        firewall_present_rules: "{{ firewall_show_added.stdout_lines | select('match', '^ufw ') | map('regex_replace', '^ufw ', '') | list }}"
+
+    # Fail-safe: if UFW normalized a declared rule (say lan_cidr given as a host address),
+    # comparing strings would mark the real rule as unmanaged. Stop before deleting anything.
+    - name: Every declared rule reads back exactly as declared, and the lockout guard is never pruned
+      ansible.builtin.assert:
+        that:
+          - firewall_rules | difference(firewall_present) | length == 0
+          - firewall_unmanaged | select('match', firewall_lockout_guard_regex) | list | length == 0
+        fail_msg: >-
+          UFW stores these declared rules differently: {{ firewall_rules | difference(firewall_present) }}.
+          Nothing was deleted. Check that lan_cidr is a network address (x.y.z.0/24, not a host address).
+        quiet: true
+
+    - name: Rules that are not declared are deleted
+      ansible.builtin.command:
+        cmd: >-
+          ufw {{ ('route delete ' ~ (item | regex_replace('^route ', ''))) if item is match('route ') else ('delete ' ~ item) }}
+      loop: "{{ firewall_unmanaged | map('regex_replace', firewall_comment_regex, '') | list }}"
+      environment: "{{ firewall_ufw_env }}"
+      register: firewall_delete
+      changed_when: true
+      failed_when: firewall_delete.rc != 0 or firewall_delete.stdout is not search('Rule deleted|Rules updated')
+
+    - name: Read the rules UFW has after pruning
+      ansible.builtin.command: ufw show added
+      environment: "{{ firewall_ufw_env }}"
+      register: firewall_show_final
+      changed_when: false
+      when: firewall_unmanaged | length > 0
+
+    - name: UFW holds exactly the declared rules
+      ansible.builtin.assert:
+        that:
+          - firewall_final | symmetric_difference(firewall_rules) | length == 0
+        fail_msg: "UFW rules after pruning: {{ firewall_final }}"
+        quiet: true
+      vars:
+        firewall_final: "{{ firewall_show_final.stdout_lines | select('match', '^ufw ') | map('regex_replace', '^ufw ', '') | list }}"
+      when: firewall_unmanaged | length > 0

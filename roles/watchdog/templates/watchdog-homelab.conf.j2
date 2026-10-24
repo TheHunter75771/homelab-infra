@@ -1,0 +1,5 @@
+# {{ ansible_managed }}
+# Written only when {{ watchdog_device }} exists (role watchdog).
+[Manager]
+RuntimeWatchdogSec={{ watchdog_runtime_sec }}
+RebootWatchdogSec={{ watchdog_reboot_sec }}

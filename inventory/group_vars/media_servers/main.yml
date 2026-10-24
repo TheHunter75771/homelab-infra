@@ -1,0 +1,17 @@
+---
+# Ubuntu 25.10+ defaults to sudo-rs, whose password prompt Ansible's sudo plugin doesn't recognize
+# ("Timeout waiting for privilege escalation prompt"). Classic sudo ships alongside as sudo.ws.
+ansible_become_exe: /usr/bin/sudo.ws
+# Rehearsal mode (drills / VM runs): no tunnel token, downloads paused, pushes to a test subscription.
+rehearsal: false
+# Boot gate (see docs/CONTRACTS.md §3)
+bootgate_wait_seconds: 720
+bootgate_powercycle_method: reboot   # switch to rtcwake after the BIOS check (P1/P7)
+bootgate_retry_minutes: 5
+# Secrets mapped from vault.yml
+cloudflared_tunnel_token: "{{ vault_cloudflared_tunnel_token }}"
+wol_relay_token: "{{ vault_wol_relay_token }}"
+vapid_public_key: "{{ vault_vapid_public_key }}"
+vapid_private_key: "{{ vault_vapid_private_key }}"
+# Apple rejects some VAPID subjects (e.g. mailto:…@localhost). An https URL is known to work on iPhone.
+vapid_subject: "https://{{ public_watch_host }}"

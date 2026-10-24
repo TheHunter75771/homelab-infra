@@ -1,0 +1,140 @@
+---
+- name: Check the storage inputs
+  ansible.builtin.assert:
+    that:
+      - media_uuid is defined
+      - media_uuid is match('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+      - media_mount is match('^/[A-Za-z0-9_]+(/[A-Za-z0-9_]+)*$')
+      - storage_media_reserved_pct | float >= 0
+      - storage_media_reserved_pct | float <= 50
+    fail_msg: media_uuid must be an ext4 UUID and media_mount a plain absolute path (no '-', no spaces).
+    quiet: true
+
+# Never part of a routine run: see defaults/main.yml and tasks/format.yml.
+- name: Format a brand-new media drive (only with -e storage_format_media=true)
+  ansible.builtin.include_tasks: format.yml
+  when: storage_format_media | bool
+
+- name: Install the media mount unit (no WantedBy; only the boot gate starts it)
+  ansible.builtin.template:
+    src: media.mount.j2
+    dest: /etc/systemd/system/{{ storage_mount_unit }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Storage daemon-reload
+
+# Safe while mounted: editing fstab unmounts nothing. The daemon-reload below re-runs the fstab
+# generator, the generated media.mount and its local-fs.target.wants link vanish, and the
+# still-active mount carries on under /etc/systemd/system/media.mount (systemd tracks live mounts
+# from /proc/self/mountinfo, whichever file defines the unit).
+- name: Remove the media drive's line from /etc/fstab (the mount itself stays up)
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    regexp: '(?i)^\s*(UUID="?|/dev/disk/by-uuid/){{ media_uuid | regex_escape }}"?\s'
+    state: absent
+    backup: true
+  notify: Storage daemon-reload
+
+- name: Load the unit and fstab change now
+  ansible.builtin.meta: flush_handlers
+
+- name: Look for any other fstab entry on the media mount point
+  ansible.builtin.command:
+    argv: [findmnt, --fstab, --noheadings, --output, SOURCE, --mountpoint, "{{ media_mount }}"]
+  register: storage_fstab_left
+  changed_when: false
+  failed_when: storage_fstab_left.rc not in [0, 1]
+  check_mode: false
+
+- name: Refuse a second fstab entry for the media mount point
+  ansible.builtin.assert:
+    that: storage_fstab_left.stdout | trim | length == 0
+    fail_msg: >-
+      /etc/fstab still mounts {{ media_mount }} from {{ storage_fstab_left.stdout | trim }}. Only the
+      boot gate may mount it: remove that line by hand, then re-run.
+    quiet: true
+  when: not ansible_check_mode
+
+- name: Check whether the media device is present
+  ansible.builtin.stat:
+    path: /dev/disk/by-uuid/{{ media_uuid }}
+  register: storage_media_dev
+
+- name: Read what is mounted on the media mount point
+  ansible.builtin.command:
+    argv: [findmnt, --noheadings, --output, UUID, --mountpoint, "{{ media_mount }}"]
+  register: storage_mounted_before
+  changed_when: false
+  failed_when: storage_mounted_before.rc not in [0, 1]
+  check_mode: false
+
+- name: Mount the media drive through its unit when it is present but not mounted
+  ansible.builtin.systemd_service:
+    name: "{{ storage_mount_unit }}"
+    state: started
+  when:
+    - storage_media_dev.stat.exists
+    - storage_mounted_before.rc != 0
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Re-read the mount
+  ansible.builtin.command:
+    argv: [findmnt, --noheadings, --output, UUID, --mountpoint, "{{ media_mount }}"]
+  register: storage_mounted
+  changed_when: false
+  failed_when: storage_mounted.rc not in [0, 1]
+  check_mode: false
+
+# Top-most mount wins if anything is stacked on the mount point.
+- name: Decide whether the right drive is mounted
+  ansible.builtin.set_fact:
+    storage_media_mounted: "{{ (storage_mounted.stdout_lines | last | default('') | trim | lower) == (media_uuid | lower) }}"
+
+- name: Fail when the media drive is not mounted
+  ansible.builtin.assert:
+    that: storage_media_mounted | bool
+    fail_msg: >-
+      {{ media_mount }} is not the media drive (device present: {{ storage_media_dev.stat.exists }},
+      mounted UUID: '{{ storage_mounted.stdout_lines | last | default('none') }}'). Plug in / check the
+      drive, then re-run. Set storage_require_media=false only for a host without the drive.
+    quiet: true
+  when:
+    - storage_require_media | bool
+    - not ansible_check_mode
+
+# The gate passes only when this file exists on the mounted drive, so it must never be created
+# on the empty mount-point directory underneath: guarded by the UUID check just above.
+- name: Create the sentinel on the verified media drive
+  ansible.builtin.copy:
+    dest: "{{ media_mount }}/{{ storage_sentinel_name }}"
+    content: "homelab media drive sentinel: the boot gate only passes when this file exists here.\n"
+    owner: root
+    group: root
+    mode: "0644"
+  when: storage_media_mounted | bool
+
+- name: Read the ext4 superblock
+  ansible.builtin.command:
+    argv: [tune2fs, -l, "/dev/disk/by-uuid/{{ media_uuid }}"]
+  register: storage_superblock
+  changed_when: false
+  check_mode: false
+  when: storage_media_mounted | bool
+
+- name: Work out the current reserved-block percentage
+  ansible.builtin.set_fact:
+    storage_reserved_pct_now: >-
+      {{ ((storage_superblock.stdout_lines | select('match', 'Reserved block count:') | first | split(':') | last | trim | int)
+      * 100.0 / (storage_superblock.stdout_lines | select('match', 'Block count:') | first | split(':') | last | trim | int))
+      | round(2) }}
+  when: storage_media_mounted | bool
+
+# tune2fs -m is safe on a mounted ext4. The default 5% would reserve ~180 GB of a 4 TB media disk.
+- name: Set the reserved blocks to the declared percentage
+  ansible.builtin.command:
+    argv: [tune2fs, -m, "{{ storage_media_reserved_pct }}", "/dev/disk/by-uuid/{{ media_uuid }}"]
+  changed_when: true
+  when:
+    - storage_media_mounted | bool
+    - (storage_reserved_pct_now | float - storage_media_reserved_pct | float) | abs > 0.01

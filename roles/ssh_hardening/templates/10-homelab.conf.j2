@@ -1,0 +1,18 @@
+# {{ ansible_managed }}
+# sshd keeps the first value it reads, and sshd_config includes this directory before its own
+# settings, so these win over anything later in sshd_config.
+
+# Keys only.
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+GSSAPIAuthentication no
+# Accounts have locked passwords; with PAM on, sshd still accepts their keys.
+UsePAM yes
+
+PermitRootLogin no
+X11Forwarding no
+MaxAuthTries {{ ssh_hardening_max_auth_tries }}
+AllowUsers {{ ssh_hardening_allow_users | join(' ') }}

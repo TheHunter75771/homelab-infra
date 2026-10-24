@@ -1,0 +1,51 @@
+---
+# docs/CONTRACTS.md §2. The push store (homelab_push_dir) is laid out in push.yml.
+
+- name: Layout | homelab root, stacks and data dirs
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ homelab_root }}"
+    - "{{ homelab_stacks_dir }}"
+    - "{{ homelab_data_dir }}"
+
+- name: Layout | one directory per stack (root only)
+  ansible.builtin.file:
+    path: "{{ homelab_stacks_dir }}/{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ ['media', 'utils', 'push'] + ([] if rehearsal | bool else ['edge']) }}"
+
+- name: Layout | app config dirs
+  ansible.builtin.file:
+    path: "{{ homelab_data_dir }}/{{ item.name }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ stacks_app_dir_mode }}"
+  loop: "{{ stacks_app_dirs }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Layout | SABnzbd scratch space on the NVMe
+  ansible.builtin.file:
+    path: "{{ homelab_incomplete_dir }}"
+    state: directory
+    owner: "{{ mediasvc_uid }}"
+    group: "{{ media_gid }}"
+    mode: "2775"
+
+- name: Layout | library folders on the (verified) media drive
+  ansible.builtin.file:
+    path: "{{ media_mount }}/{{ item }}"
+    state: directory
+    owner: "{{ mediasvc_uid }}"
+    group: "{{ media_gid }}"
+    mode: "2775"
+  loop: "{{ stacks_media_dirs }}"

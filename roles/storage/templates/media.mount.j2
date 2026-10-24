@@ -1,0 +1,12 @@
+# Managed by Ansible (role storage). Do not edit by hand.
+# Mounted ONLY by the boot gate (bootgate.service starts this unit once the device is present).
+# There is deliberately no [Install] section and no /etc/fstab line, so nothing can mount the
+# drive behind the gate's back and no app can start against an empty mount point.
+[Unit]
+Description=Media drive (started only by the boot gate)
+
+[Mount]
+What=/dev/disk/by-uuid/{{ media_uuid }}
+Where={{ media_mount }}
+Type=ext4
+Options={{ storage_mount_options }}

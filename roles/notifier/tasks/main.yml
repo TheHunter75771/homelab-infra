@@ -1,0 +1,125 @@
+---
+- name: Check the notifier inputs
+  ansible.builtin.assert:
+    that:
+      - notifier_pywebpush_version is match('^[0-9]+(\.[0-9]+)+$')
+      - notifier_push_dir | length > 0
+      - notifier_pushcore_url is match('^http://(127\.0\.0\.1|localhost|\[::1\]):[0-9]+/?$')
+      # Fixed by CONTRACTS §4 and by the CLI's shebang line.
+      - notifier_venv == '/opt/homelab-notify'
+    fail_msg: >-
+      notifier_pywebpush_version must be an exact version, notifier_pushcore_url a loopback http URL,
+      and notifier_venv must stay /opt/homelab-notify.
+    quiet: true
+
+- name: Install the Python venv module
+  ansible.builtin.apt:
+    name: python3-venv
+    state: present
+
+# A distro Python upgrade leaves a venv pointing at a site-packages that no longer exists.
+- name: Check that an existing notifier venv still imports pywebpush
+  ansible.builtin.command:
+    argv: ["{{ notifier_venv }}/bin/python3", -c, import pywebpush, py_vapid]
+  register: notifier_venv_probe
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Remove a broken notifier venv so it is rebuilt
+  ansible.builtin.file:
+    path: "{{ notifier_venv }}"
+    state: absent
+  when: notifier_venv_probe.rc != 0
+
+- name: Install pywebpush (exact pin) into the notifier venv
+  ansible.builtin.pip:
+    name: pywebpush
+    version: "{{ notifier_pywebpush_version }}"
+    virtualenv: "{{ notifier_venv }}"
+    virtualenv_command: "{{ notifier_python }} -m venv"
+
+- name: Create the homelab config directory
+  ansible.builtin.file:
+    path: "{{ notifier_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Write the notifier settings
+  ansible.builtin.template:
+    src: notify.json.j2
+    dest: "{{ notifier_config_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Set the rehearsal flag while rehearsal is on
+  ansible.builtin.copy:
+    dest: "{{ notifier_rehearsal_flag }}"
+    content: "Rehearsal: pushes get a [REHEARSAL] title prefix and go only to subscriptions labelled '{{ notifier_test_label }}'.\n"
+    owner: root
+    group: root
+    mode: "0644"
+  when: rehearsal | bool
+
+- name: Clear the rehearsal flag while rehearsal is off
+  ansible.builtin.file:
+    path: "{{ notifier_rehearsal_flag }}"
+    state: absent
+  when: not (rehearsal | bool)
+
+- name: Create the notifier state directory
+  ansible.builtin.file:
+    path: "{{ notifier_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Install homelab-notify
+  ansible.builtin.copy:
+    src: homelab_notify.py
+    dest: "{{ notifier_cli }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the alert floor
+  ansible.builtin.copy:
+    src: homelab_alertfloor.py
+    dest: "{{ notifier_alertfloor_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create the alert floor state directory
+  ansible.builtin.file:
+    path: "{{ notifier_alertfloor_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Install the alert floor units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: /etc/systemd/system/{{ item }}
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - homelab-alertfloor.service
+    - homelab-alertfloor.timer
+  notify: Notifier daemon-reload
+
+- name: Load the new units
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start the alert floor timer
+  ansible.builtin.systemd_service:
+    name: homelab-alertfloor.timer
+    enabled: true
+    state: started
+  ignore_errors: "{{ ansible_check_mode }}"

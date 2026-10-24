@@ -1,0 +1,11 @@
+# Managed by Ansible (role bootgate). Do not edit by hand.
+[Unit]
+Description=Boot gate: retry every {{ bootgate_retry_minutes }} min while the media drive is failed or lost
+
+[Timer]
+OnActiveSec={{ bootgate_retry_minutes }}min
+OnUnitInactiveSec={{ bootgate_retry_minutes }}min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

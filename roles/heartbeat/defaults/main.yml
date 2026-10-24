@@ -1,0 +1,14 @@
+---
+# Role heartbeat (docs/CONTRACTS.md §8), applied by playbooks/edge.yml to the edge VPS.
+# Host var (inventory/host_vars/<edge host>.yml, git-ignored): heartbeat_target, the media
+# server's tailnet name. The VPS runs other services: this role only ever touches
+# /opt/homelab-heartbeat, /var/lib/homelab-heartbeat and /etc/systemd/system/homelab-heartbeat.*
+heartbeat_push_source: "{{ groups['media_servers'] | first }}" # whose push store is copied
+heartbeat_display_name: "{{ heartbeat_push_source }}" # "<name> offline" / "<name> back online"
+heartbeat_fail_threshold: 3
+heartbeat_timeout_seconds: 5
+heartbeat_tcp_port: 22
+heartbeat_on_calendar: "*:0/2"
+heartbeat_push_ttl_seconds: 86400 # an "offline" alert is still worth delivering hours late
+heartbeat_log_keep_lines: 21600 # 30 days at one check per 2 min
+heartbeat_rehearsal: "{{ hostvars[heartbeat_push_source]['rehearsal'] | default(false) | bool }}"

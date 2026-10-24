@@ -1,0 +1,7 @@
+---
+# Absolute paths for the unit files; "~" is the connecting user's home on the workstation.
+backup_pull_home: "{{ ansible_facts['user_dir'] }}"
+backup_pull_dest_path: "{{ pull_dest | regex_replace('^~(?=/|$)', backup_pull_home) | regex_replace('/+$', '') }}"
+backup_pull_key_path: "{{ pull_ssh_key | regex_replace('^~(?=/|$)', backup_pull_home) }}"
+backup_pull_systemd_env:
+  XDG_RUNTIME_DIR: "/run/user/{{ ansible_facts['user_uid'] }}"

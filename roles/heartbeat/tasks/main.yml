@@ -1,0 +1,126 @@
+---
+- name: Heartbeat inputs are set
+  ansible.builtin.assert:
+    that:
+      - heartbeat_target | default('') | length > 0
+      - heartbeat_push_source in groups['media_servers']
+      - python_packages.pywebpush is defined
+    fail_msg: >-
+      Needs heartbeat_target in inventory/host_vars/{{ inventory_hostname }}.yml, a media_servers
+      host to copy the push store from, and python_packages.pywebpush in
+      inventory/group_vars/all/versions.yml.
+    quiet: true
+
+# --- Push store: read from the media server, kept in memory only (never written to the controller)
+- name: Look for the push store on the media server
+  ansible.builtin.stat:
+    path: "{{ heartbeat_source_push_dir }}/{{ item }}"
+    get_checksum: false
+  loop:
+    - vapid.json
+    - subscriptions.json
+  register: heartbeat_push_stat
+  delegate_to: "{{ heartbeat_push_source }}"
+  become: true
+  run_once: true
+
+- name: Fail clearly when the media server has no VAPID keys yet
+  ansible.builtin.assert:
+    that:
+      - heartbeat_push_stat.results[0].stat.exists
+    fail_msg: >-
+      {{ heartbeat_source_push_dir }}/vapid.json is missing on {{ heartbeat_push_source }}.
+      Run playbooks/site.yml first (role stacks writes it), then this playbook.
+    quiet: true
+
+- name: Read the push store from the media server
+  ansible.builtin.slurp:
+    src: "{{ item.stat.path }}"
+  loop: "{{ heartbeat_push_stat.results | selectattr('stat.exists') | list }}"
+  loop_control:
+    label: "{{ item.item }}"
+  register: heartbeat_push_slurp
+  delegate_to: "{{ heartbeat_push_source }}"
+  become: true
+  run_once: true
+  no_log: true
+
+# --- Install (only the paths above)
+- name: Heartbeat directories exist
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ heartbeat_install_dir }}", mode: "0755" }
+    - { path: "{{ heartbeat_state_dir }}", mode: "0750" }
+
+- name: Push store copies are installed (root 0600)
+  ansible.builtin.copy:
+    content: "{{ item.content | b64decode }}"
+    dest: "{{ heartbeat_install_dir }}/{{ item.item.item }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ heartbeat_push_slurp.results }}"
+  loop_control:
+    label: "{{ item.item.item }}"
+  no_log: true
+  diff: false
+
+- name: No subscribed devices on the media server yet, so none here either
+  ansible.builtin.copy:
+    content: "[]\n"
+    dest: "{{ heartbeat_install_dir }}/subscriptions.json"
+    owner: root
+    group: root
+    mode: "0600"
+  when: not heartbeat_push_stat.results[1].stat.exists
+
+- name: Python venv with pinned pywebpush
+  ansible.builtin.pip:
+    name: "pywebpush=={{ python_packages.pywebpush }}"
+    virtualenv: "{{ heartbeat_install_dir }}/venv"
+    virtualenv_command: /usr/bin/python3 -m venv
+
+- name: Heartbeat script is installed
+  ansible.builtin.copy:
+    src: homelab_heartbeat.py
+    dest: "{{ heartbeat_install_dir }}/homelab_heartbeat.py"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Heartbeat config is installed
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ heartbeat_install_dir }}/config.json"
+    owner: root
+    group: root
+    mode: "0640"
+
+- name: Heartbeat units are installed
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: /etc/systemd/system/{{ item }}
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - homelab-heartbeat.service
+    - homelab-heartbeat.timer
+  notify:
+    - Reload systemd for homelab-heartbeat
+    - Restart homelab-heartbeat timer
+
+# daemon-reload only when our unit files changed (the VPS hosts other services' units).
+- name: Load changed heartbeat units before enabling the timer
+  ansible.builtin.meta: flush_handlers
+
+- name: Heartbeat timer is enabled and running
+  ansible.builtin.systemd_service:
+    name: homelab-heartbeat.timer
+    enabled: true
+    state: started

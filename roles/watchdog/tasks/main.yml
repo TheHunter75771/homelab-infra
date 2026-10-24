@@ -1,0 +1,106 @@
+---
+# The driver can refuse to load (for example when the BIOS locks the TCO "no reboot" bit).
+# That isn't an error here: the device check below decides what gets enabled.
+- name: Hardware watchdog driver is loaded now
+  community.general.modprobe:
+    name: "{{ watchdog_module }}"
+    state: present
+  register: watchdog_modprobe
+  failed_when: false
+
+# Returns at once when nothing is queued.
+- name: Let udev finish with any new device
+  ansible.builtin.command: udevadm settle --timeout=10
+  changed_when: false
+  check_mode: false
+
+- name: Look for the watchdog device
+  ansible.builtin.stat:
+    path: "{{ watchdog_device }}"
+  register: watchdog_dev
+
+- name: Note whether a hardware watchdog is available
+  ansible.builtin.set_fact:
+    watchdog_available: "{{ watchdog_dev.stat.exists }}"
+
+- name: Say why systemd's watchdog stays off
+  ansible.builtin.debug:
+    msg: >-
+      No {{ watchdog_device }} after loading {{ watchdog_module }}
+      ({{ watchdog_modprobe.msg | default('driver loaded, no device') | trim }}). systemd's watchdog stays off.
+  when: not watchdog_available
+
+- name: Watchdog driver loader unit is installed
+  ansible.builtin.template:
+    src: homelab-watchdog-load.service.j2
+    dest: /etc/systemd/system/homelab-watchdog-load.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: watchdog_loader_unit
+  when: watchdog_available
+
+- name: Watchdog driver loads on every boot
+  ansible.builtin.systemd_service:
+    name: homelab-watchdog-load.service
+    enabled: true
+    state: started
+    daemon_reload: "{{ watchdog_loader_unit is changed }}"
+  when: watchdog_available
+
+- name: Systemd manager drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Systemd uses the hardware watchdog (only when the device exists)
+  ansible.builtin.template:
+    src: watchdog-homelab.conf.j2
+    dest: /etc/systemd/system.conf.d/10-homelab-watchdog.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when: watchdog_available
+  notify: Re-execute systemd
+
+- name: Systemd watchdog setting is absent when there's no device
+  ansible.builtin.file:
+    path: /etc/systemd/system.conf.d/10-homelab-watchdog.conf
+    state: absent
+  when: not watchdog_available
+  notify: Re-execute systemd
+
+- name: Apply the systemd manager setting before checking it
+  ansible.builtin.meta: flush_handlers
+
+- name: Read PID 1's runtime watchdog setting
+  ansible.builtin.command: >-
+    busctl get-property org.freedesktop.systemd1 /org/freedesktop/systemd1
+    org.freedesktop.systemd1.Manager RuntimeWatchdogUSec
+  register: watchdog_pid1
+  changed_when: false
+  check_mode: false
+  when: watchdog_available
+
+- name: Read whether the watchdog device is armed
+  ansible.builtin.slurp:
+    src: "/sys/class/watchdog/{{ watchdog_device | basename }}/state"
+  register: watchdog_state
+  failed_when: false
+  when: watchdog_available
+
+# busctl prints "t <microseconds>"; anything but 0 means PID 1 runs the watchdog. The sysfs
+# state (when the kernel exposes it) says whether the hardware timer is actually armed.
+- name: Systemd is driving the hardware watchdog
+  ansible.builtin.assert:
+    that:
+      - watchdog_pid1.stdout.split() | last | int > 0
+      - watchdog_state.content is not defined or (watchdog_state.content | b64decode | trim) == 'active'
+    fail_msg: >-
+      PID 1 reports RuntimeWatchdogUSec={{ watchdog_pid1.stdout }}, device state
+      {{ (watchdog_state.content | default('') | b64decode | trim) or 'unknown' }}, after the drop-in was applied.
+    quiet: true
+  when: watchdog_available

@@ -1,0 +1,103 @@
+---
+# One declared serve config for this node (docs/CONTRACTS.md §6), applied only when it differs.
+#
+# Why not `tailscale serve set-config`: in Tailscale 1.102 set-config is for Tailscale Services only.
+# It requires --service=svc:<name> or --all, takes TCP endpoints only (no path handlers), and drops
+# node-level settings even from a status --json file. So this role declares the whole handler set,
+# compares it with `tailscale serve status --json`, and on any drift resets and re-applies it with the
+# documented `tailscale serve --bg` CLI. A config that already matches is never touched (changed=0).
+# Funnel is never enabled: the declared config has no AllowFunnel, so any funnel counts as drift.
+
+- name: Serve | read this node's Tailscale status
+  ansible.builtin.command:
+    argv: [tailscale, status, --self, --peers=false, --json]
+  register: tailscale_serve_self_status
+  changed_when: false
+  check_mode: false
+
+- name: Serve | this node's tailnet name and backend state
+  ansible.builtin.set_fact:
+    tailscale_serve_node_name: "{{ (tailscale_serve_self_status.stdout | from_json).Self.DNSName | regex_replace('\\.$', '') }}"
+    tailscale_serve_backend_state: "{{ (tailscale_serve_self_status.stdout | from_json).BackendState }}"
+    tailscale_serve_keys: >-
+      {{ tailscale_serve_handlers | map(attribute='port') | map('string')
+         | zip(tailscale_serve_handlers | map(attribute='mount')) | map('join', ' ') | list }}
+
+- name: Serve | preconditions (logged in, names agree, sane handler list)
+  ansible.builtin.assert:
+    that:
+      - tailscale_serve_backend_state == 'Running'
+      - tailscale_serve_node_name | lower == tailnet_fqdn | lower
+      - tailscale_serve_handlers | length > 0
+      - tailscale_serve_keys | length == tailscale_serve_keys | unique | length
+      - tailscale_serve_handlers | rejectattr('mount', 'match', '^/$|^(/[A-Za-z0-9._-]+)+$') | list | length == 0
+      - tailscale_serve_handlers | rejectattr('backend', 'match', '^http://127\.0\.0\.1:[0-9]+(/[A-Za-z0-9._-]+)*$') | list | length == 0
+    fail_msg: >-
+      Tailscale must be logged in (state {{ tailscale_serve_backend_state }}), host_vars tailnet_fqdn must equal
+      this node's tailnet name, and every handler needs a unique port+mount, a mount like /name and a
+      backend on http://127.0.0.1:<port>[/path].
+    quiet: true
+
+- name: Serve | the declared config, in the shape status --json reports
+  ansible.builtin.set_fact:
+    tailscale_serve_desired: "{{ lookup('ansible.builtin.template', 'serve-config.json.j2') | from_json }}"
+
+- name: Serve | read the live serve config
+  ansible.builtin.command:
+    argv: [tailscale, serve, status, --json]
+  register: tailscale_serve_live
+  changed_when: false
+  check_mode: false
+
+- name: Serve | compare live with declared
+  ansible.builtin.set_fact:
+    tailscale_serve_drift: >-
+      {{ (tailscale_serve_live.stdout | from_json | to_json(sort_keys=true))
+         != (tailscale_serve_desired | to_json(sort_keys=true)) }}
+
+- name: Serve | drift - clear this node's serve config
+  ansible.builtin.command:
+    argv: [tailscale, serve, reset]
+  changed_when: true
+  timeout: "{{ tailscale_serve_command_timeout }}"
+  when: tailscale_serve_drift | bool
+
+- name: Serve | drift - apply each declared HTTPS handler (tailnet only)
+  ansible.builtin.command:
+    argv:
+      - tailscale
+      - serve
+      - --bg
+      - --yes
+      - "--https={{ item.port }}"
+      - "--set-path={{ item.mount }}"
+      - "{{ item.backend }}"
+  changed_when: true
+  timeout: "{{ tailscale_serve_command_timeout }}"
+  loop: "{{ tailscale_serve_handlers }}"
+  loop_control:
+    label: "https:{{ item.port }}{{ item.mount }} -> {{ item.backend }}"
+  when: tailscale_serve_drift | bool
+
+- name: Serve | re-read the serve config after applying
+  ansible.builtin.command:
+    argv: [tailscale, serve, status, --json]
+  register: tailscale_serve_applied
+  changed_when: false
+  when:
+    - tailscale_serve_drift | bool
+    - not ansible_check_mode
+
+- name: Serve | the live config is exactly the declared one and nothing is funneled
+  vars:
+    tailscale_serve_final: >-
+      {{ ((tailscale_serve_applied if tailscale_serve_drift | bool else tailscale_serve_live).stdout) | from_json }}
+  ansible.builtin.assert:
+    that:
+      - tailscale_serve_final | to_json(sort_keys=true) == tailscale_serve_desired | to_json(sort_keys=true)
+      - tailscale_serve_final.AllowFunnel | default({}) | length == 0
+    fail_msg: >-
+      After applying, `tailscale serve status --json` still differs from the declared handlers (or has
+      AllowFunnel). Compare it with roles/tailscale_serve/templates/serve-config.json.j2.
+    quiet: true
+  when: not ansible_check_mode

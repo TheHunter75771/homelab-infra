@@ -1,0 +1,136 @@
+---
+# Test for the storage role's format guard (tasks/format_probe.yml + tasks/format.yml) against
+# sparse disk images in a temp dir. No root, no real disk, nothing outside the temp dir is
+# touched, and the role's mkfs task is never reached.
+#   .venv/bin/ansible-playbook -i localhost, roles/storage/tests/test_format_guard.yml </dev/null 2>&1 | cat
+- name: The format guard refuses anything that could hold data
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+  vars:
+    media_uuid: 0f0e0d0c-1111-4222-8333-944445555666  # synthetic test value, not a real disk
+    guard_images: [blank, ext4, ext4-primary-damaged, ext4-1k-primary-damaged, gpt-only]
+  tasks:
+    - name: Make a scratch directory
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: .format-guard
+      register: guard_tmp
+
+    - name: Build images, probe them, check the verdicts
+      block:
+        - name: Create sparse 256 MiB images
+          ansible.builtin.command:
+            argv: [truncate, -s, 256M, "{{ guard_tmp.path }}/{{ item }}.img"]
+          loop: "{{ guard_images }}"
+          changed_when: true
+
+        - name: Put ext4 (4 KiB blocks, like the 4 TB media drive) on three images
+          ansible.builtin.command:
+            argv: [mkfs.ext4, -q, -F, -b, "{{ item.blocksize }}", "{{ guard_tmp.path }}/{{ item.image }}.img"]
+          loop:
+            - {image: ext4, blocksize: 4096}
+            - {image: ext4-primary-damaged, blocksize: 4096}
+            - {image: ext4-1k-primary-damaged, blocksize: 1024}
+          changed_when: true
+
+        - name: Destroy the PRIMARY superblock (bytes 1024-2047) on the damaged images
+          ansible.builtin.command:
+            argv: [dd, if=/dev/zero, "of={{ guard_tmp.path }}/{{ item }}.img", bs=1024, seek=1, count=1, conv=notrunc, status=none]
+          loop: [ext4-primary-damaged, ext4-1k-primary-damaged]
+          changed_when: true
+
+        - name: Write only a GPT partition table
+          ansible.builtin.command:
+            argv: [sfdisk, -q, "{{ guard_tmp.path }}/gpt-only.img"]
+            stdin: "label: gpt\n"
+          changed_when: true
+
+        - name: Probe every image with the role's own tasks
+          ansible.builtin.include_tasks: probe_one.yml
+          loop: "{{ guard_images }}"
+          loop_control:
+            loop_var: guard_image
+
+        - name: Show the verdicts
+          ansible.builtin.debug:
+            var: guard_results
+
+        - name: Blank image is the only one allowed through
+          ansible.builtin.assert:
+            that:
+              - not guard_results['blank'].refused
+              - guard_results['blank'].signatures == []
+              - guard_results['blank'].backups == []
+            quiet: true
+
+        - name: A healthy ext4 is refused (blkid sees it; it has backups too)
+          ansible.builtin.assert:
+            that:
+              - guard_results['ext4'].refused
+              - guard_results['ext4'].signatures | select('match', 'TYPE=ext4') | list | length == 1
+              - 32768 in guard_results['ext4'].backups
+            quiet: true
+
+        - name: A library with a damaged primary superblock is invisible to blkid but still refused
+          ansible.builtin.assert:
+            that:
+              - guard_results['ext4-primary-damaged'].refused
+              - guard_results['ext4-primary-damaged'].signatures == []
+              - guard_results['ext4-primary-damaged'].backups == [32768]
+              - guard_results['ext4-primary-damaged'].message is search('backup superblocks at \\[32768\\]')
+              - guard_results['ext4-1k-primary-damaged'].refused
+              - guard_results['ext4-1k-primary-damaged'].signatures == []
+              - 8193 in guard_results['ext4-1k-primary-damaged'].backups
+            quiet: true
+
+        - name: A partition table alone is refused
+          ansible.builtin.assert:
+            that:
+              - guard_results['gpt-only'].refused
+              - guard_results['gpt-only'].signatures | select('match', 'PTTYPE=gpt') | list | length == 1
+            quiet: true
+
+        - name: Checksum the damaged library before handing it to format.yml
+          ansible.builtin.stat:
+            path: "{{ guard_tmp.path }}/ext4-primary-damaged.img"
+            checksum_algorithm: sha256
+          register: guard_before
+
+        # Whole format.yml with the flag on: an image file is refused at the block-device check
+        # already; the point here is that nothing in format.yml can write to it.
+        - name: Run the real format.yml on it with the flag on
+          block:
+            - name: Include the guarded format tasks
+              ansible.builtin.include_tasks: ../tasks/format.yml
+              vars:
+                storage_format_media: true
+                storage_format_device: "{{ guard_tmp.path }}/ext4-primary-damaged.img"
+            - name: Format.yml must not get here
+              ansible.builtin.fail:
+                msg: format.yml did not refuse
+          rescue:
+            - name: Record the refusal
+              ansible.builtin.set_fact:
+                guard_refused: "{{ ansible_failed_result.msg | default('') }}"
+
+        - name: Checksum it again
+          ansible.builtin.stat:
+            path: "{{ guard_tmp.path }}/ext4-primary-damaged.img"
+            checksum_algorithm: sha256
+          register: guard_after
+
+        - name: Format.yml refused and the image is byte-for-byte unchanged
+          ansible.builtin.assert:
+            that:
+              - guard_refused is defined
+              - guard_refused is not search('did not refuse')
+              - guard_before.stat.checksum == guard_after.stat.checksum
+            quiet: true
+      always:
+        - name: Remove the scratch directory
+          ansible.builtin.file:
+            path: "{{ guard_tmp.path }}"
+            state: absent

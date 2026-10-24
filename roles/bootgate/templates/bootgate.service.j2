@@ -1,0 +1,18 @@
+# Managed by Ansible (role bootgate). Do not edit by hand.
+# docker.service Requires= and is After= this unit (docker.service.d/10-bootgate.conf), so Docker
+# and every container wait for the media drive, and do not start if the gate fails.
+# No network dependency on purpose: the gate must work with the network down.
+[Unit]
+Description=Boot gate: verify the media drive before Docker starts
+After=systemd-udevd.service local-fs.target
+OnFailure=bootgate-alert.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={{ bootgate_script }} check --boot
+TimeoutStartSec={{ bootgate_wait_seconds | int + bootgate_timeout_margin_seconds | int }}
+SyslogIdentifier=bootgate
+
+[Install]
+WantedBy=multi-user.target
