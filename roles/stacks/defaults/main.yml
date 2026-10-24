@@ -10,11 +10,15 @@ stacks_public_bridge: br-hl-public
 # The boot gate's proof that /media is the real drive (created by role storage).
 stacks_media_sentinel: "{{ media_mount }}/.homelab-media-sentinel"
 # Library folders on the drive. Created 1001:1002 2775 only after the mount is verified.
+# downloads/complete/{tv,movies} are SABnzbd's category folders (relative paths `tv`/`movies`). SABnzbd only
+# creates them on the first download; pre-creating them keeps the Sonarr/Radarr path checks quiet.
 stacks_media_dirs:
   - tv
   - movies
   - downloads
   - downloads/complete
+  - downloads/complete/tv
+  - downloads/complete/movies
 
 # App config dirs under homelab_data_dir. linuxserver images chown /config to PUID:PGID on every
 # start, so their dirs are declared with that same owner/group or every run would flip them back.

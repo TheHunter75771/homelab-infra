@@ -11,6 +11,14 @@ same push store and the same push endpoints.
 - **Docker:** it never touches Docker itself. Every Docker operation goes through the root helper
   `homelab-dockerctl` (module H), and only after a fresh `docker-state` says `active`.
 - **Secrets** (API keys, the VAPID private key, push endpoints) never reach a response or a log line.
+  - Every log line is redacted value by value (message, fields, nested objects and arrays) before
+    `JSON.stringify`, so lines stay valid JSON. The redactor catches credential shapes from the start and
+    every configured key once the dashboard is up.
+  - Fields named like credentials (`token`, `apiKey`, `password`, `authorization`, `cookie`, …) are
+    replaced by name.
+  - The walk is cycle-safe (`[circular]`); values past 32 levels become `[truncated]`. Buffers become
+    `[binary N bytes]` (never their contents), BigInt a string, an Error its redacted
+    `{name, message, stack}`. A log call never throws.
   - Text copied from the apps (SABnzbd warnings and queue names, *arr health messages, container logs) is
     redacted before any truncation: `apikey=`/`api_key=`/`token=` values, `API Key:`, bearer tokens, and
     every configured key.
@@ -94,9 +102,24 @@ code 78 and a JSON `config error` line on stderr.
 There's no CORS, and every response carries a strict CSP: same-origin scripts, styles, fonts and workers,
 no inline code.
 
+**`/api/*` GETs** also refuse `Sec-Fetch-Site: same-site|cross-site` with 403 (§11.3 Guards, amended), so
+another site can't make the admin's browser drive helper calls. The shell, static files and `/healthz` are
+exempt.
+
 **Resource limits** (§11.2 Concurrency and §11.3 Resource limits):
 - **Request targets:** only origin-form paths are accepted. `//…`, backslashes, bad `%` escapes,
   absolute-form (`GET http://x/`) and `*` get a 400, never a crash.
+- **Docker state before acting:** log streams and app actions check `docker-state` first, because the cached
+  summary can be about 10 s old. Docker not active gives a 409 with the reason; an unreachable helper gives
+  a 503.
+- **Cheap checks before the helper:** every refusal (guards, the stream slot, the log-start rate, Busy, the
+  one-update lock) happens before any helper call. A refused request makes zero helper connections.
+  systemd's `Accept=yes` socket latches failed after 200 activations in 2 s.
+- **Single-flight `docker-state`:** concurrent callers share one helper call, and reads reuse the answer for
+  about 1 s. Start, stop, restart and update ask fresh: they join a call in flight but never reuse a finished
+  one.
+- **Log-stream rate:** starts are rate-limited (burst 10, then 5 a second); past that, 429 with
+  `Retry-After: 1`.
 - **Caught async paths:** every request promise is caught, every background job has a `.catch`, and a
   process-level `unhandledRejection` handler logs and keeps serving.
 - **Backpressure:** every SSE stream (`/api/events`, logs, actions) honours it. A client with more than about
@@ -151,7 +174,7 @@ gate:    {status: ok|waiting|failed|media-lost|unknown, line, since, powercycled
           history: [{boot, current, startedAt, events: [{ts, event, detail, waitSeconds}]}]}   newest first
 apps:    [{name, label, purpose, open: {port, path}|null, stack, mediaGated,
            status: healthy|unhealthy|starting|updating|held|stopped|down|unknown,
-           stoppedReason: gate|docker-down|intentional|null,      non-null only for held/stopped
+           stoppedReason: gate|docker-down|intentional|null,      gate: held; docker-down: unknown (live-restore); intentional: stopped
            state, health, startedAt, restartCount, image, tag, pinned, pinnedTag, updateAvailable, localBuild,
            action: {id, kind, step}|null,
            locks: {restart, stop, start, update, logs}}]          each lock: null, or the reason to show
@@ -177,7 +200,7 @@ media:   {jellyfin:   {state, message, sessions: [{title, user, device, position
           checks: [{key, label, status: ok|warn|fail|idle, detail}]}
           tile state: ok | error (message, detail, since) | held | down | stopped | unconfigured | pending
 push:    {devices: [{id, label, created}], storeError, alertsAvailable,
-          alerts: [{ts, title, body, tag, delivered, failed, state: active|resolved|info}]}   newest first
+          alerts: [{ts, title, body, tag, delivered, failed, state: active|resolved|info, note}]}   newest first
 subscriptions: [{key, name, date, daysLeft, remindOn, reminderDue, reminded}]
 settings: {thresholds: {diskWarnPct, backupMaxAgeH}}
 links:   {runbooks: [{title, url}]}                       [] unless runbook_base_url + runbooks are configured
@@ -186,7 +209,14 @@ issues:  [{severity: fail|warn, text, target: drive|apps|media|alerts|backups|se
 
 **Rules behind the fields:**
 - **`apps[].status`:**
-  - Docker not active: `held` when the gate status is `failed`, otherwise `stopped`. No helper call is made.
+  - `failed` and `waiting` hold all of Docker: every app is `held` / `gate`.
+  - `media-lost` holds the media stack only: those six apps are `held` / `gate`. If Docker is down too,
+    cloudflared and wol-relay are `unknown` / `docker-down`, and the "Docker isn't running." issue is shown
+    alongside the drive issue.
+  - Docker not active while the gate is `ok`: `unknown` / `docker-down`, never `stopped`, because with
+    `live-restore` the containers may still be serving. The overview gets one issue, "Docker isn't running.",
+    not one per app, and the media tiles say `unknown` without calling the apps.
+  - No helper Docker op is made while Docker isn't active.
   - `media-lost`: the six media apps are `held`.
   - The app list is what the deployed compose files declare. The helper's `declared` list is kept on disk,
     so it survives a held reboot.
@@ -197,9 +227,9 @@ issues:  [{severity: fail|warn, text, target: drive|apps|media|alerts|backups|se
 - **`server.timeZone`:** resolved once at start: the configured `timezone`, else `/etc/timezone`, else
   `timedatectl show -p Timezone`, else the process zone. Server-side calendar days and the times inside
   `gate.line` use the same zone.
-- **`apps[].stoppedReason`:** `gate` when the status is `held` (the gate is `failed`, or `media-lost` and the
-  app is in the media stack). `docker-down` when it is `stopped` because Docker isn't active for another
-  reason. `intentional` when it was stopped on purpose (or paused).
+- **`apps[].stoppedReason`:** `gate` when the status is `held`. `docker-down` when the status is `unknown`
+  because docker.service isn't active and the gate isn't holding it. `intentional` when it was stopped on
+  purpose (or paused). Otherwise `null`, including when the helper is unreachable.
 - **`links.runbooks`:** built from `runbook_base_url` (plain `https://` only) and `runbooks` (`{title, path}`,
   where the path is a relative `.md` file with no `..`, `.`, leading `/` or scheme; an optional `#anchor` is
   allowed).
@@ -225,6 +255,10 @@ issues:  [{severity: fail|warn, text, target: drive|apps|media|alerts|backups|se
     themselves.
   - It is `info` when its tag is empty, `test` or `reminder`, or when it is unresolved and older than 7 days.
   - The rule is conservative on purpose: a false "resolved" would hide a live incident.
+  - **"<app> crashed and restarted"** (the alert floor's crash notice, tag `alertfloor:<app>:crash`) is
+    informational. It is `resolved` with `note: "Recovered on its own"`, never `active`, and opens or resolves
+    nothing. It is recognised by its title or its `:crash` tag, unless the title has a failure qualifier.
+    `note` is `null` on every other alert.
 - **Subscriptions:** a reminder push goes out from 7 days before each renewal date. It is sent once per
   date, follows rehearsal, and is retried until delivered.
 

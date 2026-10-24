@@ -155,6 +155,61 @@ class RunIsReadOnly(unittest.TestCase):
         self.assertNotRegex(text, r"(?m)^ReadWritePaths=")
 
 
+# The real worst case on the helper socket in one 2 s window: 8 log streams opened together
+# (docker-state + logs each), one update (docker-state + update), a summary refresh (up to 3) and
+# docker-state about once a second (2).
+PEAK_CONNECTIONS_PER_2S = 8 * 2 + 2 + 3 + 2
+
+
+def directives(text: str) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for line in text.splitlines():
+        m = re.match(r"^([A-Za-z]+)=(.*)$", line)
+        if m:
+            out.setdefault(m.group(1), []).append(m.group(2))
+    return out
+
+
+class SocketFloodProtection(unittest.TestCase):
+    """Static: the socket can't latch off from a burst, and if it ever does, it recovers without Docker."""
+
+    def test_the_socket_template(self) -> None:
+        d = directives((TEMPLATES / "homelab-dockerctl.socket.j2").read_text())
+        self.assertEqual(d["OnFailure"], ["homelab-dockerctl-recover.service"])
+        for key in ("PollLimitIntervalSec", "PollLimitBurst", "TriggerLimitIntervalSec", "TriggerLimitBurst"):
+            with self.subTest(key=key):
+                self.assertEqual(len(d.get(key, [])), 1, f"{key} must be set exactly once")
+
+    def test_the_recovery_never_touches_docker_and_is_rate_limited(self) -> None:
+        text = (TEMPLATES / "homelab-dockerctl-recover.service.j2").read_text()
+        d = directives(text)
+        self.assertEqual(d["Type"], ["oneshot"])
+        self.assertEqual(d["ExecCondition"], ["/usr/bin/systemctl is-failed --quiet homelab-dockerctl.socket"])
+        self.assertEqual(d["ExecStart"], ["/usr/bin/systemctl restart homelab-dockerctl.socket"])
+        self.assertEqual(len(d["ExecStartPre"]), 1)
+        self.assertTrue(d["ExecStartPre"][0].startswith("/usr/bin/sleep "))
+        self.assertIn("StartLimitIntervalSec", d)
+        self.assertIn("StartLimitBurst", d)
+        commands = " ".join(d.get(k, [""])[0] for k in ("ExecCondition", "ExecStartPre", "ExecStart"))
+        self.assertNotRegex(commands, r"docker\.(service|socket)|/usr/bin/docker|\bstart\b")
+        timer = directives((TEMPLATES / "homelab-dockerctl-recover.timer.j2").read_text())
+        self.assertEqual(len(timer["OnCalendar"]), 1)
+        self.assertNotIn("OnUnitActiveSec", timer, "a refused start must not make the timer re-fire at once")
+
+    @unittest.skipIf(yaml is None, "PyYAML not installed")
+    def test_the_numbers(self) -> None:
+        dv = yaml.safe_load((ROLE / "defaults/main.yml").read_text())
+        poll, trigger = dv["dashboard_dockerctl_poll_limit_burst"], dv["dashboard_dockerctl_trigger_limit_burst"]
+        self.assertEqual(dv["dashboard_dockerctl_poll_limit_interval"], "2s")
+        self.assertEqual(dv["dashboard_dockerctl_trigger_limit_interval"], "2s")
+        self.assertGreaterEqual(poll, 2 * PEAK_CONNECTIONS_PER_2S, "the poll limit needs 2x headroom over the real peak")
+        self.assertGreater(trigger, poll, "the latching trigger limit must sit above the transient poll limit")
+        self.assertGreaterEqual(trigger, dv["dashboard_dockerctl_max_connections"])
+        self.assertLessEqual(trigger, 200, "still caps a runaway loop (systemd's own default is 200 per 2 s)")
+        self.assertGreaterEqual(dv["dashboard_dockerctl_recover_delay_seconds"], 10)
+        self.assertGreaterEqual(dv["dashboard_dockerctl_recover_start_limit_burst"], 1)
+
+
 @unittest.skipIf(yaml is None, "PyYAML not installed")
 class Rendered(unittest.TestCase):
     def setUp(self) -> None:
@@ -208,6 +263,20 @@ class Rendered(unittest.TestCase):
         max_conn = int(re.search(r"^MaxConnections=(\d+)$", socket_unit, re.MULTILINE).group(1))
         self.assertGreaterEqual(max_conn, 32, "CONTRACTS §11.2: 8 log streams + an update + refreshes")
         self.assertRegex(service, r"(?m)^ReadOnlyPaths=/run$")
+
+    def test_the_rendered_flood_protection_and_recovery(self) -> None:
+        sock = directives(self.render("homelab-dockerctl.socket.j2"))
+        self.assertEqual(sock["OnFailure"], ["homelab-dockerctl-recover.service"])
+        self.assertEqual((sock["PollLimitIntervalSec"], sock["PollLimitBurst"]), (["2s"], ["50"]))
+        self.assertEqual((sock["TriggerLimitIntervalSec"], sock["TriggerLimitBurst"]), (["2s"], ["100"]))
+        self.assertEqual(sock["MaxConnections"], ["32"])
+        recover = directives(self.render("homelab-dockerctl-recover.service.j2"))
+        self.assertEqual(recover["ExecStartPre"], ["/usr/bin/sleep 30"])
+        self.assertEqual((recover["StartLimitIntervalSec"], recover["StartLimitBurst"]), (["30min"], ["6"]))
+        self.assertEqual(recover["TimeoutStartSec"], ["90"])
+        timer = directives(self.render("homelab-dockerctl-recover.timer.j2"))
+        self.assertEqual(timer["OnCalendar"], ["*:0/15"])
+        self.assertEqual(timer["WantedBy"], ["timers.target"])
 
     def test_the_dashboard_unit_keeps_run_read_only_but_bootgate_writable(self) -> None:
         unit = self.render("homelab-dashboard.service.j2")

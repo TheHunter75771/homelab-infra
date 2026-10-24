@@ -2,7 +2,7 @@
 // "Media drive back, Docker did not start" when the drive is back but Docker failed).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyAlerts, isRecovery } from '../src/collectors/alerts.js';
+import { classifyAlerts, isRecovery, isSelfRecovered } from '../src/collectors/alerts.js';
 
 const NOW = Date.parse('2026-10-24T14:00:00Z');
 let minute = 0;
@@ -115,4 +115,58 @@ test('every qualifier word on its own blocks a recovery', () => {
     assert.equal(isRecovery(title), false, title);
   }
   assert.equal(isRecovery('Docker down, media drive back'), true, 'control: no qualifier word, so a recovery');
+});
+
+// ---- "<app> crashed and restarted" (alert floor, CONTRACTS §4 amendments) ---------------------------------------
+// B's real format (roles/notifier/files/homelab_alertfloor.py): incidents use per-condition tags
+// "alertfloor:<app>:unhealthy|down|restarts", recoveries "<app> recovered" on the same tag, and the crash notice
+// "<app> crashed and restarted" on "alertfloor:<app>:crash".
+
+const at2 = (title, tag, body = '') => ({ ...alert(title, tag), body });
+const crash = (prefix = '', body = 'Exit code 137 (out of memory); Docker restarted it.') =>
+  at2(`${prefix}jellyfin crashed and restarted`, 'alertfloor:jellyfin:crash', body);
+const full = (raw) => classifyAlerts(raw, NOW).reverse().map((a) => [a.title, a.state, a.note]);
+
+test('"crashed and restarted" is informational: resolved, "Recovered on its own", never active', () => {
+  assert.deepEqual(full([crash()]), [['jellyfin crashed and restarted', 'resolved', 'Recovered on its own']]);
+  assert.deepEqual(full([crash('[REHEARSAL] ', 'Exit code 1; Docker restarted it. 2 crashes since the last check.')]), [
+    ['[REHEARSAL] jellyfin crashed and restarted', 'resolved', 'Recovered on its own'],
+  ]);
+  assert.equal(isSelfRecovered('Docker crashed and restarted.'), true, 'by title alone');
+  assert.equal(isSelfRecovered('jellyfin restart notice', 'alertfloor:jellyfin:crash'), true, 'by the :crash tag alone');
+});
+
+test('"crashed and restarted" neither resolves an open incident nor opens one', () => {
+  const unhealthy = () => at2('jellyfin unhealthy', 'alertfloor:jellyfin:unhealthy', 'Health check failing on 2 consecutive checks.');
+  const recovered = () => at2('jellyfin recovered', 'alertfloor:jellyfin:unhealthy', 'Cleared: jellyfin unhealthy.');
+  // B's real tags: the open incident stays open
+  assert.deepEqual(full([unhealthy(), crash()]).map((x) => x[1]), ['active', 'resolved']);
+  assert.deepEqual(full([unhealthy(), crash(), recovered()]).map((x) => x[1]), ['resolved', 'resolved', 'resolved']);
+  assert.deepEqual(full([crash(), recovered()]).map((x) => x.slice(1)), [
+    ['resolved', 'Recovered on its own'],
+    ['resolved', null],
+  ]);
+  // even sharing a tag (defensive), it resolves nothing and opens nothing
+  const same = (t) => alert(t, 'alertfloor:jellyfin');
+  assert.deepEqual(full([same('jellyfin unhealthy'), same('jellyfin crashed and restarted')]).map((x) => x[1]), ['active', 'resolved']);
+  // with the rehearsal prefix
+  assert.deepEqual(full([at2('[REHEARSAL] jellyfin unhealthy', 'alertfloor:jellyfin:unhealthy'), crash('[REHEARSAL] ')]).map((x) => x[1]), ['active', 'resolved']);
+});
+
+test('"crashed and restarted" with a qualifier or a trailing clause follows the normal rules (stays active)', () => {
+  for (const t of ['jellyfin crashed and restarted, still failing', 'jellyfin crashed and restarted but not healthy', 'jellyfin crashed and restarted twice, now down']) {
+    assert.equal(isSelfRecovered(t), false, t);
+    assert.deepEqual(full([alert(t, 'alertfloor:jellyfin:down')]).map((x) => x[1]), ['active'], t);
+  }
+  // ends with the phrase but carries a qualifier: only the qualifier guard catches it (also on the :crash tag)
+  assert.equal(isSelfRecovered('jellyfin (unhealthy, not recovered) crashed and restarted'), false);
+  assert.equal(isSelfRecovered('jellyfin crash loop, not recovered', 'alertfloor:jellyfin:crash'), false);
+  assert.equal(isSelfRecovered('jellyfin crashed'), false);
+  assert.equal(isSelfRecovered('jellyfin restarted'), false);
+  assert.equal(isSelfRecovered('jellyfin unhealthy', 'alertfloor:jellyfin:unhealthy'), false);
+});
+
+test('every alert has a note field (null unless self-recovered)', () => {
+  const out = classifyAlerts([alert('Media drive lost'), alert('Media drive back'), alert('Test', 'test')], NOW);
+  assert.ok(out.every((a) => 'note' in a && a.note === null));
 });

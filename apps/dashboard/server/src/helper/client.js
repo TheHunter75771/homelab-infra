@@ -181,18 +181,33 @@ function normDeclared(d) {
   return { name: d.name, stack: str(d.stack), service: str(d.service), pinned: str(d.pinned), local_build: d.local_build === true };
 }
 
-// Typed operations on top of the client. Every Docker op is preceded by its own docker-state request (no
-// caching), so the window between "Docker went down" and "we stop asking" is one round trip, not a cache TTL.
-export function createDocker({ helper }) {
-  async function dockerState() {
-    const data = await helper.request('docker-state');
-    const state = typeof data === 'string' ? data : data?.state;
-    if (typeof state !== 'string') throw new HelperError('protocol', 'docker-state returned no state');
-    return state;
+// Typed operations on top of the client. Every Docker op is preceded by a docker-state check.
+// docker-state is single-flight: concurrent callers share one helper call (one socket activation), and a result
+// is reused for `reuseMs` (about 1 s), so no burst of requests can turn into a burst of helper connections
+// (systemd's Accept=yes socket latches failed after 200 activations in 2 s). Mutations ask `fresh`: they still
+// join a call in flight but never reuse a finished one.
+export function createDocker({ helper, reuseMs = 1000, clock = () => Date.now() }) {
+  let inflight = null;
+  let last = null; // {state, at}
+
+  function dockerState({ fresh = false } = {}) {
+    if (!fresh && last && clock() - last.at < reuseMs) return Promise.resolve(last.state);
+    inflight ??= helper
+      .request('docker-state')
+      .then((data) => {
+        const state = typeof data === 'string' ? data : data?.state;
+        if (typeof state !== 'string') throw new HelperError('protocol', 'docker-state returned no state');
+        last = { state, at: clock() };
+        return state;
+      })
+      .finally(() => {
+        inflight = null;
+      });
+    return inflight;
   }
 
-  async function guard() {
-    const state = await dockerState();
+  async function guard({ fresh = false } = {}) {
+    const state = await dockerState({ fresh });
     if (state !== 'active') throw new DockerInactiveError(state);
   }
 
@@ -214,13 +229,13 @@ export function createDocker({ helper }) {
 
     async control(op, name) {
       if (!['start', 'stop', 'restart'].includes(op)) throw new HelperError('protocol', `bad op ${op}`);
-      await guard();
+      await guard({ fresh: true });
       return helper.request(op, { name }, { timeout: 200_000 }); // the helper's action_timeout is 180 s
     },
 
     // onStep gets {step, at, message?, failed_step?}; the final step is "done" or "failed".
     async update(name, { onStep, signal } = {}) {
-      await guard();
+      await guard({ fresh: true });
       return helper.stream('update', { name }, { onItem: (m) => m.type === 'step' && onStep?.(m), signal, timeout: 30 * 60_000 });
     },
 

@@ -249,8 +249,13 @@ export function createMedia({ cfg, settings, fetchImpl = globalThis.fetch, secre
   async function tile(app, appStatus) {
     if (!RUNNING.has(appStatus)) {
       failingSince.delete(app);
-      const state = appStatus === 'held' ? 'held' : appStatus === 'stopped' ? 'stopped' : 'down';
-      const message = state === 'held' ? `${NAMES[app]} is held by the gate.` : state === 'stopped' ? `${NAMES[app]} is stopped.` : `${NAMES[app]} isn't running.`;
+      const state = appStatus === 'held' ? 'held' : appStatus === 'stopped' ? 'stopped' : appStatus === 'unknown' ? 'unknown' : 'down';
+      const message = {
+        held: `${NAMES[app]} is held by the gate.`,
+        stopped: `${NAMES[app]} is stopped.`,
+        unknown: `${NAMES[app]}'s state is unknown.`,
+        down: `${NAMES[app]} isn't running.`,
+      }[state];
       return { state, message };
     }
     const key = keyFor(app);
@@ -307,6 +312,8 @@ export function buildChecks(media, { driveMounted }) {
           ? { status: 'idle', detail: 'Held by gate' }
           : sab.state === 'stopped'
             ? { status: 'idle', detail: 'Stopped' }
+            : sab.state === 'unknown'
+              ? { status: 'idle', detail: 'Unknown' }
             : sab.state === 'unconfigured'
               ? { status: 'idle', detail: 'API key not readable' }
               : { status: 'fail', detail: "SABnzbd isn't running" };

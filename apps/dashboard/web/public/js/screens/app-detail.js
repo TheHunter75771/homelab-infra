@@ -201,7 +201,7 @@ export function AppDetail({ view, route, ctx, actions }) {
     </div>`;
   }
   const facts = [
-    ['Status', app.st.label],
+    ['Status', app.st.long || app.st.label],
     ['Uptime', app.uptimeSeconds !== null ? fmtUptime(app.uptimeSeconds) : '—'],
     ['Restarts', app.restartCount === null ? '—' : String(app.restartCount)],
     ['Health check', healthText(app)],

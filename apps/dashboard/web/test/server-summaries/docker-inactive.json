@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generatedAt": "2026-10-24T14:08:00.004Z",
+  "generatedAt": "2026-10-24T14:08:00.000Z",
   "server": {
     "name": "testhost",
     "version": "2.0.0",
@@ -98,7 +98,7 @@
       "open": null,
       "stack": "edge",
       "mediaGated": false,
-      "status": "stopped",
+      "status": "unknown",
       "stoppedReason": "docker-down",
       "state": null,
       "health": null,
@@ -129,7 +129,7 @@
       },
       "stack": "media",
       "mediaGated": true,
-      "status": "stopped",
+      "status": "unknown",
       "stoppedReason": "docker-down",
       "state": null,
       "health": null,
@@ -160,7 +160,7 @@
       },
       "stack": "media",
       "mediaGated": true,
-      "status": "stopped",
+      "status": "unknown",
       "stoppedReason": "docker-down",
       "state": null,
       "health": null,
@@ -191,7 +191,7 @@
       },
       "stack": "media",
       "mediaGated": true,
-      "status": "stopped",
+      "status": "unknown",
       "stoppedReason": "docker-down",
       "state": null,
       "health": null,
@@ -222,7 +222,7 @@
       },
       "stack": "media",
       "mediaGated": true,
-      "status": "stopped",
+      "status": "unknown",
       "stoppedReason": "docker-down",
       "state": null,
       "health": null,
@@ -253,7 +253,7 @@
       },
       "stack": "media",
       "mediaGated": true,
-      "status": "stopped",
+      "status": "unknown",
       "stoppedReason": "docker-down",
       "state": null,
       "health": null,
@@ -284,7 +284,7 @@
       },
       "stack": "media",
       "mediaGated": true,
-      "status": "stopped",
+      "status": "unknown",
       "stoppedReason": "docker-down",
       "state": null,
       "health": null,
@@ -312,7 +312,7 @@
       "open": null,
       "stack": "utils",
       "mediaGated": false,
-      "status": "stopped",
+      "status": "unknown",
       "stoppedReason": "docker-down",
       "state": null,
       "health": null,
@@ -1008,35 +1008,35 @@
   },
   "media": {
     "jellyfin": {
-      "state": "stopped",
-      "message": "Jellyfin is stopped."
+      "state": "unknown",
+      "message": "Jellyfin's state is unknown."
     },
     "sabnzbd": {
-      "state": "stopped",
-      "message": "SABnzbd is stopped."
+      "state": "unknown",
+      "message": "SABnzbd's state is unknown."
     },
     "jellyseerr": {
-      "state": "stopped",
-      "message": "Jellyseerr is stopped."
+      "state": "unknown",
+      "message": "Jellyseerr's state is unknown."
     },
     "prowlarr": {
-      "state": "stopped",
-      "message": "Prowlarr is stopped."
+      "state": "unknown",
+      "message": "Prowlarr's state is unknown."
     },
     "sonarr": {
-      "state": "stopped",
-      "message": "Sonarr is stopped."
+      "state": "unknown",
+      "message": "Sonarr's state is unknown."
     },
     "radarr": {
-      "state": "stopped",
-      "message": "Radarr is stopped."
+      "state": "unknown",
+      "message": "Radarr's state is unknown."
     },
     "checks": [
       {
         "key": "download-client",
         "label": "Download client reachable",
         "status": "idle",
-        "detail": "Stopped"
+        "detail": "Unknown"
       },
       {
         "key": "library-folders",
@@ -1054,30 +1054,30 @@
         "key": "sonarr-health",
         "label": "Sonarr health",
         "status": "idle",
-        "detail": "Sonarr is stopped."
+        "detail": "Sonarr's state is unknown."
       },
       {
         "key": "radarr-health",
         "label": "Radarr health",
         "status": "idle",
-        "detail": "Radarr is stopped."
+        "detail": "Radarr's state is unknown."
       }
     ]
   },
   "push": {
     "devices": [
       {
-        "id": "c625fad0b2e458ec",
+        "id": "f893c7c2c9b84714",
         "label": "iPhone",
         "created": "2026-09-30T12:00:00.000Z"
       },
       {
-        "id": "3e87cf24b2edca54",
+        "id": "5f8c52891f6a49c6",
         "label": "MacBook · Safari",
         "created": "2026-09-29T12:00:00.000Z"
       },
       {
-        "id": "0dc36b4ee66be51f",
+        "id": "da95c4c4adf94d19",
         "label": "test",
         "created": "2026-09-28T12:00:00.000Z"
       }
@@ -1091,7 +1091,8 @@
         "tag": "bootgate",
         "delivered": 3,
         "failed": 0,
-        "state": "resolved"
+        "state": "resolved",
+        "note": null
       },
       {
         "ts": "2026-10-20T03:12:00.000Z",
@@ -1100,7 +1101,8 @@
         "tag": "bootgate",
         "delivered": 3,
         "failed": 0,
-        "state": "resolved"
+        "state": "resolved",
+        "note": null
       },
       {
         "ts": "2026-10-19T20:04:00.000Z",
@@ -1109,7 +1111,8 @@
         "tag": "test",
         "delivered": 3,
         "failed": 0,
-        "state": "info"
+        "state": "info",
+        "note": null
       }
     ],
     "alertsAvailable": true

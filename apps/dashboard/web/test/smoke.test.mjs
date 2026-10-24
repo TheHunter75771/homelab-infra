@@ -34,7 +34,7 @@ const EXPECT = {
     apps: ['Update to 6.1.1.10360-ls303', 'Pinned version 6.1.1.10360-ls303 is newer than the running image'],
     drive: ['Next check', 'next boot', 'Full around', 'Gate history', 'powercycle', 'A re-run only acts when it has failed or been lost.'],
     media: ['Arrival (2016)', 'Direct play', '912 / 1000 API calls today', 'Requests · 2 pending', 'Usenet provider', 'Edit dates in Settings'],
-    alerts: ['Media drive back', 'Resolved', '3 subscribed', 'Sends a push to 3 devices.'],
+    alerts: ['Media drive back', 'Resolved', '3 subscribed', 'Sends a push to 3 devices.', 'sonarr crashed and restarted', 'Resolved · recovered on its own'],
     uptime: ['99.95%', 'Monthly uptime per app', 'Media-drive failures per month', 'later'],
     settings: ['Disk warning at', 'Subscription renewal dates', 'API keys', 'Pinned versions', 'dashboard 2.0.0'],
   },
@@ -52,7 +52,8 @@ const EXPECT = {
   },
   'docker-down': {
     '': ["Docker isn't running."],
-    apps: ['Stopped', 'not running', "Docker isn't running."],
+    apps: ['Unknown', 'not running', "Docker isn't running (apps may still be serving)."],
+    'apps/radarr': ["Unknown: Docker isn't running (apps may still be serving)"],
   },
   clean: {
     '': ['All systems normal', 'drive empty · first backup tonight', '3.98 TB free', 'No media yet', 'No backup yet', 'First nightly run at 03:30', 'Not pulled to the PC yet'],
@@ -82,8 +83,19 @@ const EXPECT = {
   'real-bad-night': { '': ['Media drive failed after a power-cycle. 8 apps held.', 'Reboot needed'], apps: ['Held by gate'] },
   'real-media-lost': { '': ['Media drive lost at 14:02. 6 apps held.'], apps: ['Held by gate', 'Healthy'] },
   'real-one-app-down': { '': ['Radarr is down.'], media: ["SABnzbd isn't answering", 'Rechecks automatically every 30 s.'] },
-  'real-docker-inactive': { '': ["Docker isn't running."], apps: ['Stopped', "Docker isn't running."] },
+  'real-docker-inactive': {
+    '': ["Docker isn't running.", "Docker isn't running (apps may still be serving)"],
+    apps: ['Unknown', "Docker isn't running (apps may still be serving)."],
+    media: ["Jellyfin's state is unknown.", "SABnzbd's state is unknown."],
+  },
   'real-clean': { '': ['No backup yet'] },
+};
+
+// What must never appear.
+const NEVER = {
+  'docker-down': { '': ['stopped on purpose'], apps: ['Stopped on purpose', 'Stopped by'], 'apps/radarr': ['Stopped'] },
+  'real-docker-inactive': { apps: ['Stopped on purpose'], media: ['Nothing playing right now.', 'Queue is empty.'] },
+  normal: { alerts: ['Active'] },
 };
 
 async function renderRoute(scenario, route, title, width) {
@@ -92,9 +104,11 @@ async function renderRoute(scenario, route, title, width) {
   try {
     await b.until(() => b.$('.title')?.textContent === title && !b.$('[aria-busy="true"]'), `${scenario} ${route} ${width}`);
     const want = EXPECT[scenario]?.[route] || [];
+    const never = NEVER[scenario]?.[route] || [];
     await b.until(() => want.every((w) => b.text().includes(w)), `${scenario}/${route}@${width}: ${want.filter((w) => !b.text().includes(w)).join(' | ')}`).catch((err) => {
       throw new Error(`${err.message}\n--- page text ---\n${b.text().slice(0, 1500)}`);
     });
+    for (const n of never) assert.ok(!b.text().includes(n), `${scenario}/${route}: must not show "${n}"`);
     if (width >= 900) {
       assert.ok(b.$('.sidebar'), 'desktop: sidebar');
       assert.equal(b.$('.tabbar'), null);

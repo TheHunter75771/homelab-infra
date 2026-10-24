@@ -1,6 +1,6 @@
 import { html, Icon, Btn, Reason, useId } from '../ui.js';
 import { useState, useEffect } from '../../vendor/hooks.mjs';
-import { ALERT_CHIP } from '../model.js';
+import { alertChip } from '../model.js';
 import { fmtDayTime, fmtDayYear, plural } from '../format.js';
 import { pushEnv, guessLabel, deviceIcon, BLOCKED_REASON, storageGet, LABEL_KEY } from '../push.js';
 
@@ -10,7 +10,7 @@ function AlertList({ view }) {
   return html`<section class="card list" aria-label="Recent alerts">
     <span class="label">Recent alerts</span>
     ${list.map((al, i) => {
-      const c = ALERT_CHIP[al.state];
+      const c = alertChip(al);
       return html`<div class=${`alert-row tone-${c.tone}`} key=${i}>
         <${Icon} name=${c.icon} />
         <div class="body">

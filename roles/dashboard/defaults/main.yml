@@ -100,6 +100,26 @@ dashboard_dockerctl_config: "{{ dashboard_config_dir }}/dockerctl.json"
 dashboard_dockerctl_cache_name: homelab-dockerctl   # CacheDirectory= -> /var/cache/homelab-dockerctl
 dashboard_dockerctl_max_connections: 32         # CONTRACTS §11.2: 8 log streams + 1 update + refreshes, with headroom
 dashboard_dockerctl_runtime_max: 40min              # backstop above the 30 min follow limit
+# Flood protection on the helper socket. The real peak is about 23 connections in a 2 s window:
+# 8 log streams opened together (8 x docker-state + logs = 16), one update (docker-state + update
+# = 2), a summary refresh (2-3) and the dashboard's docker-state about once a second (2). Plus the
+# 32 concurrent connections MaxConnections allows.
+#  - Poll limit (systemd 255+): over the burst, systemd pauses accepting for the rest of the window.
+#    Transient, never latches. 50 per 2 s is twice the peak and caps a runaway client at 25
+#    connections (helper starts) per second.
+#  - Trigger limit: latches the socket into "failed" when hit. Set above the poll limit, so the poll
+#    limit normally keeps it out of reach; it stays as a backstop (50 per second).
+dashboard_dockerctl_poll_limit_interval: 2s
+dashboard_dockerctl_poll_limit_burst: 50
+dashboard_dockerctl_trigger_limit_interval: 2s
+dashboard_dockerctl_trigger_limit_burst: 100
+# Self-heal if the socket ever latches: OnFailure= starts homelab-dockerctl-recover.service, which
+# waits, then restarts only the socket (never Docker). Rate-limited, so a flood that keeps tripping
+# the socket can't become a restart loop; a timer retries after the budget is spent.
+dashboard_dockerctl_recover_delay_seconds: 30
+dashboard_dockerctl_recover_start_limit_interval: 30min
+dashboard_dockerctl_recover_start_limit_burst: 6
+dashboard_dockerctl_recover_calendar: "*:0/15"
 # Stacks the boot gate holds when the media drive is lost: start/restart/update of their apps
 # is refused unless the gate status is "ok" (stop is always allowed).
 dashboard_dockerctl_held_stacks:

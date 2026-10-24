@@ -88,7 +88,8 @@ export async function startFakeHelper(t, overrides = {}) {
         sock.end(`${JSON.stringify({ ok: false, error: { code: 'bad-request', message: 'invalid JSON' } })}\n`);
         return;
       }
-      calls.push({ ...req, dockerStateAtCall: state.dockerState });
+      const askedAt = state.dockerState; // an answer reflects the moment it was asked
+      calls.push({ ...req, dockerStateAtCall: askedAt });
       if (state.hang.has(req.op)) return;
       if (state.delay[req.op]) await new Promise((r) => setTimeout(r, state.delay[req.op]));
       const send = (obj) => !sock.destroyed && sock.write(`${JSON.stringify(obj)}\n`);
@@ -102,11 +103,11 @@ export async function startFakeHelper(t, overrides = {}) {
       const known = (name) => state.containers.some((c) => c.name === name);
       switch (req.op) {
         case 'docker-state':
-          return reply({ state: state.dockerState, unit_state: state.dockerState });
+          return reply({ state: askedAt, unit_state: askedAt });
         case 'ps':
           return reply({
-            docker: state.dockerState,
-            containers: state.dockerState === 'active' ? structuredClone(state.containers) : [],
+            docker: askedAt,
+            containers: askedAt === 'active' ? structuredClone(state.containers) : [],
             declared: state.declared ?? declaredFor(state.containers),
           });
         case 'last-pull':

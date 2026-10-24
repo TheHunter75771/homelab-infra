@@ -110,6 +110,11 @@ npm run dump-summaries # refresh test/server-summaries/ from the real server cod
 **Fixtures:** `test/fixtures.mjs` follows the server's shape. `test/server-summaries/*.json` are real
 `/api/summary` documents from the server's own test scenarios (normal, bad-night, clean, one-app-down,
 docker-inactive, media-lost). The tests render both.
+- `npm run dump-summaries` is deterministic: a fixed clock and fixed device endpoints make a re-dump
+  byte-identical.
+- `test/dumps.test.mjs` regenerates the dumps in memory from `../server` and fails with "run npm run
+  dump-summaries" when they drift.
+- It skips, with that reason, when `../server/node_modules` isn't installed.
 
 `npm test` fails if `public/` and the lockfile disagree. Icons come from `scripts/icons.txt` (one Phosphor
 name per line) and are built into `public/icons/phosphor.svg`.
@@ -149,6 +154,11 @@ The app icons are copied from push-core's (this repo, MIT).
 - **Apps:**
   - Open links go to the apps' own ports (ADR 0015); Jellyseerr gets one too (8443).
   - Apps stopped because Docker isn't running show "Stopped", not "Stopped on purpose".
+- **Docker not running, gate not holding it:** the apps show "Unknown" (warn), with the reason "Docker isn't
+  running (apps may still be serving)" on every action. They are never "Stopped", and never counted as down
+  or stopped on purpose (CONTRACTS §11.3, amended).
+- **"<app> crashed and restarted":** shown as "Resolved · recovered on its own", never active. It uses the
+  server's `note`, with the server's own title rule as the fallback.
 - **Status dots:** the Apps tab and sidebar item get a dot when an app is down (fail) or unhealthy (warn),
   as the other areas do. A failure dot is a circle and a warning dot a diamond, each with a text label.
 - **Uptime day bars:** a day with downtime is shorter, a day mostly down is short and striped. Each bar has

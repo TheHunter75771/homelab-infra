@@ -37,8 +37,10 @@ export function buildIssues(s, { now = Date.now(), timeZone } = {}) {
   }
 
   if (s.helper.reachable === false) add('warn', "Can't reach the Docker helper. App status is unknown.", 'apps');
-  else if (s.docker.state !== 'active' && s.gate.status !== 'failed') {
-    add('fail', s.docker.state === 'failed' ? 'Docker failed to start.' : "Docker isn't running.", 'apps');
+  else if (s.docker.state !== 'active' && !['failed', 'waiting'].includes(s.gate.status)) {
+    // media-lost holds only the media stack: Docker being down then is its own problem and is reported
+    // one issue for the whole of Docker, never one per app (with live-restore the apps may still be serving)
+    add('fail', "Docker isn't running.", 'apps');
   }
 
   for (const a of s.apps) {

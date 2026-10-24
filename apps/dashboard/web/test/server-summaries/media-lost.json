@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generatedAt": "2026-10-24T14:08:00.002Z",
+  "generatedAt": "2026-10-24T14:08:00.000Z",
   "server": {
     "name": "testhost",
     "version": "2.0.0",
@@ -1023,17 +1023,17 @@
   "push": {
     "devices": [
       {
-        "id": "a24d7c119a34202f",
+        "id": "f893c7c2c9b84714",
         "label": "iPhone",
         "created": "2026-09-30T12:00:00.000Z"
       },
       {
-        "id": "2192164a90e119ad",
+        "id": "5f8c52891f6a49c6",
         "label": "MacBook · Safari",
         "created": "2026-09-29T12:00:00.000Z"
       },
       {
-        "id": "c078de58c3609952",
+        "id": "da95c4c4adf94d19",
         "label": "test",
         "created": "2026-09-28T12:00:00.000Z"
       }
@@ -1047,7 +1047,8 @@
         "tag": "bootgate",
         "delivered": 3,
         "failed": 0,
-        "state": "resolved"
+        "state": "resolved",
+        "note": null
       },
       {
         "ts": "2026-10-20T03:12:00.000Z",
@@ -1056,7 +1057,8 @@
         "tag": "bootgate",
         "delivered": 3,
         "failed": 0,
-        "state": "resolved"
+        "state": "resolved",
+        "note": null
       },
       {
         "ts": "2026-10-19T20:04:00.000Z",
@@ -1065,7 +1067,8 @@
         "tag": "test",
         "delivered": 3,
         "failed": 0,
-        "state": "info"
+        "state": "info",
+        "note": null
       }
     ],
     "alertsAvailable": true

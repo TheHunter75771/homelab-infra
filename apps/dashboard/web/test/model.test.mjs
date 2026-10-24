@@ -48,11 +48,11 @@ test('gate → app hold mapping (fallback when the server sends no status): CORR
   const ml = view(strip(mediaLost(NOW)));
   assert.deepEqual(ml.apps.filter((a) => a.statusKey === 'held').map((a) => a.name).sort(), ['jellyfin', 'jellyseerr', 'prowlarr', 'radarr', 'sabnzbd', 'sonarr']);
   assert.deepEqual(ml.apps.filter((a) => a.statusKey === 'healthy').map((a) => a.name).sort(), ['cloudflared', 'wol-relay']);
-  // Docker down while the gate is fine: "Stopped", not held
+  // Docker down while the gate is fine: unknown (live-restore may keep them serving), not held, not stopped
   const dd = view(strip(dockerDown(NOW)));
-  assert.ok(dd.apps.every((a) => a.statusKey === 'stopped'));
-  assert.ok(dd.apps.every((a) => a.st.label === 'Stopped'), 'Docker down is not "stopped on purpose"');
-  assert.equal(m.appsSummary(dd.apps, dd.docker).sub, "Docker isn't running");
+  assert.ok(dd.apps.every((a) => a.statusKey === 'unknown' && a.stopKind === 'docker-down'));
+  assert.ok(dd.apps.every((a) => a.st.label === 'Unknown' && a.st.tone === 'warn'));
+  assert.equal(m.appsSummary(dd.apps, dd.docker).sub, "Docker isn't running (apps may still be serving)");
   const one = normal(NOW);
   one.apps[0] = { ...one.apps[0], status: 'stopped', state: 'exited' };
   assert.equal(view(one).apps.find((a) => a.name === 'cloudflared').st.label, 'Stopped on purpose');
@@ -66,15 +66,42 @@ test('stopped apps: the server\'s stoppedReason wins over inferring from docker.
   set('sonarr', { stoppedReason: 'intentional' });
   let v = view(s);
   const label = (n) => v.apps.find((a) => a.name === n).st.label;
-  assert.equal(label('cloudflared'), 'Stopped', 'docker-down although Docker reads active');
+  assert.equal(label('cloudflared'), 'Unknown', 'docker-down is shown as unknown even from a server that says "stopped"');
   assert.equal(label('wol-relay'), 'Stopped by the gate');
   assert.equal(label('sonarr'), 'Stopped on purpose');
   assert.match(m.healthBanner({ ...v, issues: [] }).sub, /1 stopped on purpose/, 'only intentional stops count as "on purpose"');
-  assert.equal(m.appsSummary(v.apps, v.docker).sub, "Docker isn't running");
+  assert.equal(m.appsSummary(v.apps, v.docker).sub, "Docker isn't running (apps may still be serving)");
   s.docker = { state: 'inactive' };
   v = view(s);
   assert.equal(label('sonarr'), 'Stopped on purpose', 'the server\'s reason wins over the inference');
   assert.equal(m.normalizeApp({ name: 'x', stoppedReason: 'bogus' }).stoppedReason, null);
+});
+
+test('Docker down, gate not holding it: unknown, not counted as down or stopped, actions locked with that reason', async () => {
+  const { appActions } = await import('../public/js/screens/apps.js');
+  globalThis.location = { protocol: 'https:', hostname: 'box.example' }; // Open links are built from it
+  const v = view(dockerDown(NOW));
+  for (const a of v.apps) {
+    assert.equal(a.statusKey, 'unknown');
+    assert.deepEqual([a.st.label, a.st.tone, a.st.icon], ['Unknown', 'warn', 'question']);
+    assert.equal(a.st.long, "Unknown: Docker isn't running (apps may still be serving)");
+  }
+  const sum = m.appsSummary(v.apps, v.docker);
+  assert.equal(sum.sub, "Docker isn't running (apps may still be serving)");
+  assert.equal(v.apps.filter((a) => ['down', 'stopped'].includes(a.statusKey)).length, 0, 'neither down nor stopped');
+  assert.doesNotMatch(m.healthBanner({ ...v, issues: [] }).sub, /stopped on purpose/);
+  const sonarr = v.apps.find((a) => a.name === 'sonarr');
+  const { list, notes } = appActions(sonarr, { paused: null, remote: false, docker: v.docker });
+  const byKey = Object.fromEntries(list.map((b) => [b.key, b]));
+  for (const k of ['restart', 'stop']) assert.equal(byKey[k].reason, "Docker isn't running (apps may still be serving).", k);
+  assert.equal(byKey.open.reason, undefined, 'Open stays: the app may still be serving');
+  assert.deepEqual(notes, ["Docker isn't running (apps may still be serving)."]);
+  // the fallback (no server status) reaches the same view
+  const fb = view(strip(dockerDown(NOW)));
+  assert.ok(fb.apps.every((a) => a.st.long === v.apps[0].st.long));
+  // with the gate holding Docker, apps stay held
+  assert.ok(view(badNight(NOW)).apps.every((a) => a.statusKey === 'held'));
+  delete globalThis.location;
 });
 
 test('app status: the server decides; pending actions and server actions overlay it', () => {
@@ -209,6 +236,33 @@ test('nav dots: drive/more on a gate problem, alerts on an active alert, media o
   const t = view(troubled(NOW)).dots;
   assert.equal(t.apps, 'fail');
   assert.equal(t.drive, 'warn', 'disk over the warning threshold');
+});
+
+test('"<app> crashed and restarted": always resolved, labelled "recovered on its own", never active', () => {
+  const at = (h) => new Date(NOW - h * 3600e3).toISOString();
+  const list = m.alertStates(
+    [
+      { ts: at(1), title: 'sonarr crashed and restarted', tag: 'alertfloor:sonarr', state: 'active' }, // title rule beats a stale "active"
+      { ts: at(2), title: 'radarr crashed and restarted', tag: 'alertfloor:radarr', state: 'resolved', note: 'Recovered on its own' }, // the server's shape
+      { ts: at(3), title: 'jellyfin crashed and restarted, still unhealthy', tag: 'alertfloor:jellyfin' }, // a qualifier: not self-healed
+      { ts: at(4), title: 'sonarr unhealthy', tag: 'alertfloor:sonarr' },
+    ],
+    NOW,
+  );
+  assert.deepEqual(
+    list.map((a) => [a.title, a.state, a.selfHealed, m.alertChip(a).label]),
+    [
+      ['sonarr crashed and restarted', 'resolved', true, 'Resolved · recovered on its own'],
+      ['radarr crashed and restarted', 'resolved', true, 'Resolved · recovered on its own'],
+      ['jellyfin crashed and restarted, still unhealthy', 'active', false, 'Active'],
+      ['sonarr unhealthy', 'active', false, 'Active'],
+    ],
+    'a self-healed alert resolves nothing else',
+  );
+  const v = view(normal(NOW));
+  const crash = v.alerts.find((a) => /crashed and restarted/.test(a.title));
+  assert.equal(crash.state, 'resolved');
+  assert.equal(v.dots.alerts, null, 'no active-alert dot for it');
 });
 
 test('alert states: the server state wins; fallback pairs lost → back by tag', () => {
@@ -441,7 +495,7 @@ test('the real server summaries (test/server-summaries) build views that match w
   const ml = view(REAL['media-lost']);
   assert.deepEqual(ml.apps.filter((a) => a.statusKey === 'held').map((a) => a.state), Array(6).fill('exited'), 'media-lost keeps the exited containers');
   const dd = view(REAL['docker-inactive']);
-  assert.ok(dd.apps.every((a) => a.st.label === 'Stopped'), 'docker-down is not "on purpose"');
+  assert.ok(dd.apps.every((a) => a.st.long === "Unknown: Docker isn't running (apps may still be serving)"), 'docker-down: unknown, never "Stopped"');
 });
 
 test('offline snapshot rows', () => {

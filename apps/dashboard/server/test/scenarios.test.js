@@ -165,13 +165,15 @@ test('one app down: Radarr exited is a fail issue; SABnzbd timing out marks only
   assert.ok(!d.fetch.calls.some((c) => c.url.startsWith('/radarr')));
 });
 
-test('docker inactive with the gate ok: apps "stopped", one fail issue, still no Docker op', async (t) => {
+test('docker inactive with the gate ok (live-restore): apps "unknown"/docker-down, ONE issue, still no Docker op', async (t) => {
   const d = await startDashboard(t, 'docker-inactive');
   const s = await summaryOf(d);
   assert.equal(s.docker.state, 'inactive');
-  assert.ok(s.apps.every((a) => a.status === 'stopped' && a.stoppedReason === 'docker-down'));
+  assert.ok(s.apps.every((a) => a.status === 'unknown' && a.stoppedReason === 'docker-down'), 'never "stopped": they may still be serving');
   assert.equal(s.apps[0].locks.restart, "Docker isn't running.");
-  assert.equal(s.issues[0].text, "Docker isn't running.");
+  assert.deepEqual(s.issues.filter((i) => i.target === 'apps').map((i) => [i.severity, i.text]), [['fail', "Docker isn't running."]], 'one issue, not one per app');
+  assert.ok(['jellyfin', 'sabnzbd', 'sonarr'].every((a) => s.media[a].state === 'unknown'), 'media tiles make no claim either');
+  assert.equal(s.media.checks.find((c) => c.key === 'download-client').detail, 'Unknown');
   assert.equal(d.helper.dockerCalls().length, 0);
   assert.equal(d.fetch.calls.length, 0, 'no media API is called while its app is not running');
   // the pinned list still comes from config while Docker is down (Settings > Pinned versions)
@@ -264,15 +266,19 @@ test('the declared app list is kept on disk, so a held boot right after a reboot
 });
 
 test('while Docker is held, a refresh asks the helper exactly one thing: docker-state', async (t) => {
-  const d = await startDashboard(t, 'bad-night');
+  const dc = { now: 0 };
+  const d = await startDashboard(t, 'bad-night', { dockerOptions: { clock: () => dc.now } });
+  dc.now += 5000; // past the 1 s docker-state reuse
   const before = d.helper.calls.length;
   await d.dash.summary.refreshCore();
   assert.deepEqual(d.helper.calls.slice(before).map((c) => c.op), ['docker-state'], 'the summary layer does not even try ps');
-  // and with Docker up, it is docker-state, then ps behind its own docker-state check
-  const ok = await startDashboard(t, 'normal');
+  // and with Docker up: one docker-state, then ps (whose own check reuses that answer)
+  const dc2 = { now: 0 };
+  const ok = await startDashboard(t, 'normal', { dockerOptions: { clock: () => dc2.now } });
+  dc2.now += 5000;
   const b2 = ok.helper.calls.length;
   await ok.dash.summary.refreshCore();
-  assert.deepEqual(ok.helper.calls.slice(b2).map((c) => c.op), ['docker-state', 'docker-state', 'ps']);
+  assert.deepEqual(ok.helper.calls.slice(b2).map((c) => c.op), ['docker-state', 'ps']);
 });
 
 test('server.timeZone and server-side times follow the host zone when none is configured', async (t) => {
@@ -293,4 +299,44 @@ test('runbook links from config reach the summary', async (t) => {
     host: { extraConfig: { runbook_base_url: base, runbooks: [{ title: "Media drive won't mount", path: 'media-drive-failure.md' }, { title: 'Nope', path: '../x' }] } },
   });
   assert.deepEqual((await summaryOf(d)).links, { runbooks: [{ title: "Media drive won't mount", url: `${base}/media-drive-failure.md` }] });
+});
+
+test('media-lost with Docker down: media apps held by the gate, the others unknown/docker-down, and both issues shown', async (t) => {
+  const d = await startDashboard(t, 'normal', { helper: { dockerState: 'inactive' }, start: false });
+  d.host.write('var/lib/bootgate/status', 'media-lost\n');
+  d.host.write('var/lib/bootgate/history.jsonl', `${JSON.stringify({ ts: '2026-10-24T14:02:00Z', boot_id: '4e1c', event: 'media-lost', detail: 'verify failed', wait_seconds: 0 })}\n`);
+  await d.dash.start({ background: false });
+  const s = await summaryOf(d);
+  const by = Object.fromEntries(s.apps.map((a) => [a.name, [a.status, a.stoppedReason]]));
+  assert.deepEqual(by, {
+    cloudflared: ['unknown', 'docker-down'],
+    jellyfin: ['held', 'gate'],
+    jellyseerr: ['held', 'gate'],
+    prowlarr: ['held', 'gate'],
+    radarr: ['held', 'gate'],
+    sabnzbd: ['held', 'gate'],
+    sonarr: ['held', 'gate'],
+    'wol-relay': ['unknown', 'docker-down'],
+  });
+  assert.deepEqual(
+    s.issues.filter((i) => i.severity === 'fail').map((i) => i.text),
+    ['Media drive lost at 14:02. 6 apps held.', "Docker isn't running."],
+    'the Docker outage is not hidden behind the drive',
+  );
+  assert.equal(s.apps.find((a) => a.name === 'cloudflared').locks.restart, "Docker isn't running.");
+  assert.equal(s.apps.find((a) => a.name === 'sonarr').locks.restart, 'Held by the boot gate until the media drive is back.');
+  assert.equal((await getJson(d.base, '/api/apps/cloudflared/logs')).json.error, "Docker isn't running.");
+  assert.equal((await getJson(d.base, '/api/apps/sonarr/logs')).json.error, 'Held by the boot gate until the media drive is back.');
+  assert.equal(d.helper.dockerCalls().length, 0);
+});
+
+test('failed and waiting still hold everything, Docker up or down', async (t) => {
+  for (const gate of ['failed', 'waiting']) {
+    const d = await startDashboard(t, 'normal', { helper: { dockerState: 'inactive' }, start: false });
+    d.host.write('var/lib/bootgate/status', `${gate}\n`);
+    await d.dash.start({ background: false });
+    const s = await summaryOf(d);
+    assert.ok(s.apps.every((a) => a.status === 'held' && a.stoppedReason === 'gate'), gate);
+    assert.ok(!s.issues.some((i) => i.text === "Docker isn't running."), `${gate}: the gate explains it`);
+  }
 });

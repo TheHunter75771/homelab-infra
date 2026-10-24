@@ -295,6 +295,7 @@ export function normal(now) {
         { ts: iso(now - 4 * D - 8 * H + 341e3), title: 'Media drive back', body: 'Mounted on retry 2. Apps released.', tag: 'bootgate', delivered: 3, failed: 0, state: 'resolved' },
         { ts: iso(now - 4 * D - 8 * H), title: 'Media drive failed', body: 'Gate gave up after a power-cycle. Docker held.', tag: 'bootgate', delivered: 3, failed: 0, state: 'resolved' },
         { ts: iso(now - 5 * D), title: 'Test from homelab', body: 'Sent from the dashboard.', tag: 'test', delivered: 3, failed: 0, state: 'info' },
+        { ts: iso(now - 6 * D), title: 'sonarr crashed and restarted', body: 'Exited (137) and came back on its own.', tag: 'alertfloor:sonarr', delivered: 3, failed: 0, state: 'resolved', note: 'Recovered on its own' },
       ],
       alertsAvailable: true,
     },
@@ -372,13 +373,15 @@ export function mediaLost(now) {
   return s;
 }
 
-// Docker isn't running while the gate is fine (someone stopped it, or it failed).
+// Docker isn't running while the gate is fine (someone stopped it, or it failed). With live-restore the
+// containers may still serve, so the server reports them unknown (CONTRACTS §11.3, amended).
 export function dockerDown(now) {
   const s = normal(now);
   s.docker = { state: 'inactive' };
-  s.apps = NAMES.map((n) => app(n, now, { status: 'stopped', noPs: true }));
+  s.apps = NAMES.map((n) => app(n, now, { status: 'unknown', noPs: true }));
   s.media = heldMedia([]);
-  for (const n of ['jellyfin', 'sabnzbd', 'jellyseerr', 'prowlarr', 'sonarr', 'radarr']) s.media[n] = { state: 'stopped', message: `${n} is stopped.` };
+  const label = { jellyfin: 'Jellyfin', sabnzbd: 'SABnzbd', jellyseerr: 'Jellyseerr', prowlarr: 'Prowlarr', sonarr: 'Sonarr', radarr: 'Radarr' };
+  for (const n of Object.keys(label)) s.media[n] = { state: 'unknown', message: `${label[n]}'s state is unknown.` };
   s.media.checks = s.media.checks.map((c) => ({ ...c, status: 'idle', detail: c.key === 'library-folders' ? 'OK' : 'Unknown' }));
   s.issues = [{ severity: 'fail', text: "Docker isn't running.", target: 'apps' }];
   return s;

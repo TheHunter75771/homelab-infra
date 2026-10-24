@@ -503,6 +503,167 @@ class RealObserveWithAStubDocker(Harness):
             del os.environ["HOMELAB_ALERTFLOOR_EVENTS_MARGIN"]
             os.environ["HOMELAB_ALERTFLOOR_EVENTS_MARGIN"] = "0"
 
+    def events_after_last_window(self, name, cid, seq):
+        """Events just after the previous run's window, i.e. between two runs. seq: [(action,
+        offset_ns, attrs)]. Waits until they are in the past."""
+        t = int(self.state()["until"] * 1e9) + 1_000_000
+        out = [
+            {
+                "Type": "container",
+                "Action": a,
+                "id": cid,
+                "timeNano": t + dt,
+                "Actor": {"ID": cid, "Attributes": {"name": name, **attrs}},
+            }
+            for a, dt, attrs in seq
+        ]
+        time.sleep(0.05 + max(dt for _, dt, _ in seq) / 1e9)
+        return out
+
+    def push_log(self):
+        return [title for _, title in self.notify.pushes]
+
+    def test_host_kill_9_pushes_crashed_and_restarted_exactly_once(self):
+        # Integrator: `kill -9` of the app's PID on the host (no docker kill event), Docker's
+        # restart policy brings it back 100 ms later, all between two checks.
+        self.world([item("jellyfin", "id1")])
+        self.real_run()
+        seq = [("die", 0, {"exitCode": "137"}), ("start", 100_000_000, {})]
+        ev_ = self.events_after_last_window("jellyfin", "id1", seq)
+        self.world([dict(item("jellyfin", "id1"), RestartCount=1)], events=ev_)
+        self.assertEqual(self.real_run(), ["jellyfin crashed and restarted"])
+        tag, _ = self.notify.pushes[0]
+        self.assertEqual(tag, "alertfloor:jellyfin:crash")
+        self.world([dict(item("jellyfin", "id1"), RestartCount=1)])
+        self.real_run()
+        self.real_run()
+        self.assertEqual(self.push_log(), ["jellyfin crashed and restarted"], "once, and no 'recovered'")
+
+    def test_three_kills_between_checks_is_only_the_restart_loop(self):
+        self.world([item("jellyfin", "id1")])
+        self.real_run()
+        seq = []
+        for k in range(3):
+            seq += [("die", k * 200_000_000, {"exitCode": "137"}), ("start", k * 200_000_000 + 100_000_000, {})]
+        ev_ = self.events_after_last_window("jellyfin", "id1", seq)
+        self.world([dict(item("jellyfin", "id1"), RestartCount=3)], events=ev_)
+        self.assertEqual(self.real_run(), ["jellyfin restart loop"])
+
+    def test_intentional_restart_and_update_push_nothing(self):
+        self.world([item("jellyfin", "id1")])
+        self.real_run()
+        seq = [
+            ("kill", 0, {"signal": "15"}),
+            ("die", 1_000_000, {"exitCode": "143"}),
+            ("stop", 2_000_000, {}),
+            ("start", 50_000_000, {}),
+            ("restart", 51_000_000, {}),
+        ]
+        ev_ = self.events_after_last_window("jellyfin", "id1", seq)
+        self.world([item("jellyfin", "id1")], events=ev_)
+        self.assertEqual(self.real_run(), [])
+        # update via the helper: the old container is killed and destroyed, a new one started
+        seq = [("kill", 0, {"signal": "15"}), ("die", 1_000_000, {"exitCode": "143"}), ("destroy", 2_000_000, {})]
+        ev_ = self.events_after_last_window("jellyfin", "id1", seq)
+        ev_ += self.events_after_last_window("jellyfin", "id7", [("start", 3_000_000, {})])
+        self.world([item("jellyfin", "id7")], events=ev_)
+        self.assertEqual(self.real_run(), [])
+
+    def test_oom_crash_body_says_out_of_memory(self):
+        self.world([item("sabnzbd", "id4")])
+        self.real_run()
+        seq = [("oom", 0, {}), ("die", 1_000_000, {"exitCode": "137"}), ("start", 100_000_000, {})]
+        ev_ = self.events_after_last_window("sabnzbd", "id4", seq)
+        self.world([dict(item("sabnzbd", "id4"), RestartCount=1)], events=ev_)
+        notify = Recorder()
+        bodies = []
+
+        def capture(tag, title, body):
+            bodies.append(body)
+            return notify(tag, title, body)
+
+        af.run(notify=capture)
+        self.assertEqual([t for _, t in notify.pushes], ["sabnzbd crashed and restarted"])
+        self.assertIn("Exit code 137 (out of memory)", bodies[0])
+
+    def test_crash_that_stays_down_is_only_the_down_incident(self):
+        self.world([item("jellyfin", "id1")])
+        self.real_run()
+        ev_ = self.events_after_last_window("jellyfin", "id1", [("die", 0, {"exitCode": "1"})])
+        self.world([item("jellyfin", "id1", status="exited")], events=ev_)
+        self.assertEqual(self.real_run(), ["jellyfin is down"])
+        ev_ = self.events_after_last_window("jellyfin", "id1", [("start", 0, {})])
+        self.world([item("jellyfin", "id1")], events=ev_)
+        self.assertEqual(self.real_run(), ["jellyfin is down", "jellyfin recovered"], "no crash push on top")
+
+    def test_crash_and_restart_split_across_two_checks_pushes_once(self):
+        os.environ["HOMELAB_ALERTFLOOR_EVENTS_MARGIN"] = "0.5"
+        try:
+            self.world([item("jellyfin", "id1")])
+            self.real_run()
+            self.world(
+                [item("jellyfin", "id1")],
+                triggers=[{"on": "events", "nth": 1, "set_status": {"id1": "exited"}, "events": [["jellyfin", "die"]]}],
+            )
+            self.assertEqual(self.real_run(), [], "run 1: saw it running; the die came after")
+            ev_ = self.events_after_last_window("jellyfin", "id1", [("start", 0, {})])
+            self.world([dict(item("jellyfin", "id1"), RestartCount=1)], events=ev_)
+            self.assertEqual(self.real_run(), ["jellyfin crashed and restarted"])
+        finally:
+            os.environ["HOMELAB_ALERTFLOOR_EVENTS_MARGIN"] = "0"
+
+    def test_a_failed_notice_is_retried_once_delivered(self):
+        self.world([item("jellyfin", "id1")])
+        self.real_run()
+        seq = [("die", 0, {"exitCode": "139"}), ("start", 100_000_000, {})]
+        ev_ = self.events_after_last_window("jellyfin", "id1", seq)
+        self.world([dict(item("jellyfin", "id1"), RestartCount=1)], events=ev_)
+        self.notify.rcs = [1]  # first delivery fails
+        self.real_run()
+        self.assertEqual(sorted(self.state()["notices"]), ["jellyfin:crash"])
+        self.world([dict(item("jellyfin", "id1"), RestartCount=1)])
+        self.real_run()
+        self.real_run()
+        self.assertEqual(self.push_log(), ["jellyfin crashed and restarted"] * 2, "retried once, then done")
+        self.assertEqual(self.state()["notices"], {})
+
+    def test_reload_signal_then_crash_alerts(self):
+        for sig, restarted in (("1", False), ("10", False), ("10", True)):
+            with self.subTest(signal=sig, restarted=restarted):
+                self.notify.pushes.clear()
+                pathlib.Path(os.environ["HOMELAB_ALERTFLOOR_STATE"]).unlink(missing_ok=True)
+                self.world([item("sonarr", "id2")])
+                self.real_run()
+                seq = [("kill", 0, {"signal": sig}), ("die", 300_000_000, {"exitCode": "1"})]
+                if restarted:
+                    seq.append(("start", 400_000_000, {}))
+                ev_ = self.events_after_last_window("sonarr", "id2", seq)
+                box = (
+                    dict(item("sonarr", "id2"), RestartCount=1) if restarted else item("sonarr", "id2", status="exited")
+                )
+                self.world([box], events=ev_)
+                expect = "sonarr crashed and restarted" if restarted else "sonarr is down"
+                self.assertEqual(self.real_run(), [expect], "a reload signal is not a stop")
+
+    def test_the_containers_own_stop_signal_is_intent(self):
+        winch = dict(item("httpd", "id5"), Config={"StopSignal": "SIGWINCH"})
+        self.world([winch])
+        self.real_run()
+        seq = [("kill", 0, {"signal": "28"}), ("die", 1_000_000, {"exitCode": "0"}), ("stop", 2_000_000, {})]
+        ev_ = self.events_after_last_window("httpd", "id5", seq)
+        self.world([dict(winch, State={"Status": "exited", "ExitCode": 0})], events=ev_)
+        self.assertEqual(self.real_run(), [], "docker stop of an image whose StopSignal is SIGWINCH")
+        # the same signal on a container without that StopSignal is a reload, not a stop
+        self.notify.pushes.clear()
+        pathlib.Path(os.environ["HOMELAB_ALERTFLOOR_STATE"]).unlink(missing_ok=True)
+        self.world([item("sonarr", "id2")])
+        self.real_run()
+        ev_ = self.events_after_last_window(
+            "sonarr", "id2", [("kill", 0, {"signal": "28"}), ("die", 1_000_000, {"exitCode": "0"})]
+        )
+        self.world([item("sonarr", "id2", status="exited")], events=ev_)
+        self.assertEqual(self.real_run(), ["sonarr is down"])
+
     def test_stop_then_start_then_crash_alerts(self):
         self.world([item("jellyfin", "id1")])
         self.real_run()
@@ -721,13 +882,44 @@ class Pure(unittest.TestCase):
         m = fold(self.NEW, [(5, "seen-down"), (5, "kill")])
         self.assertTrue(m["exit_intentional"])
 
+    def test_parse_signal(self):
+        self.assertEqual(af.parse_signal("15"), 15)
+        self.assertEqual(af.parse_signal("SIGQUIT"), 3)
+        self.assertEqual(af.parse_signal("winch"), 28)
+        self.assertEqual(af.parse_signal("SIGRTMIN+3"), int(af.signal.SIGRTMIN) + 3)
+        self.assertIsNone(af.parse_signal(""))
+        self.assertIsNone(af.parse_signal("SIGNOPE"))
+
+    def test_only_fatal_kills_are_intent(self):
+        fold = af.fold_lifecycle
+        for sig in ("9", "15", "2", "3"):
+            m = fold(self.NEW, [(1, "kill", {"signal": sig}), (2, "die", {"exit_code": "137"})])
+            self.assertTrue(m["exit_intentional"], sig)
+        for sig in ("1", "10", "12"):
+            m = fold(self.NEW, [(1, "kill", {"signal": sig}), (2, "die", {"exit_code": "1"})])
+            self.assertFalse(m["exit_intentional"], sig)
+        m = fold(self.NEW, [(1, "kill", {"signal": "28"}), (2, "die", {"exit_code": "0"})], stop_signal=28)
+        self.assertTrue(m["exit_intentional"], "the container's own StopSignal is intent")
+
+    def test_crash_becomes_a_notice_only_when_it_comes_back(self):
+        fold = af.fold_lifecycle
+        m = fold(self.NEW, [(1, "die", {"exit_code": "137"})])
+        self.assertEqual((m["notice"], m["crash"]["exit_code"]), (None, 137), "still down: pending")
+        m = fold(m, [(2, "start", {})])
+        self.assertEqual(m["notice"], {"exit_code": 137, "oom": False, "count": 1})
+        m = fold(self.NEW, [(1, "die", {"exit_code": "0"}), (2, "start", {})])
+        self.assertIsNone(m["notice"], "a clean exit is not a crash")
+        m = fold(self.NEW, [(1, "oom", {}), (2, "die", {"exit_code": "137"}), (3, "start", {})])
+        self.assertTrue(m["notice"]["oom"])
+
     def test_events_are_keyed_by_container_id(self):
         events = [
             {"Action": "destroy", "Actor": {"ID": "old", "Attributes": {"name": "jellyfin"}}, "timeNano": 5},
             {"Action": "start", "Actor": {"ID": "new", "Attributes": {"name": "jellyfin"}}, "timeNano": 4},
         ]
         by_id, by_name = af.lifecycle_events(events)
-        self.assertEqual(by_id, {"old": [(5, "destroy")], "new": [(4, "start")]})
+        none = {"signal": None, "exit_code": None}
+        self.assertEqual(by_id, {"old": [(5, "destroy", none)], "new": [(4, "start", none)]})
         self.assertEqual(by_name, {})
 
     def test_reconcile_counts_no_subscribers_as_done(self):

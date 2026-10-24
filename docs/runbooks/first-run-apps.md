@@ -1,9 +1,10 @@
 # Runbook: first run of the media apps (clean start)
 
 After the first successful `playbooks/site.yml`, every app is running with **empty** settings.
-Nothing was restored. Role `stacks` wrote a few presets before the first start (URL bases, forms
-login, SABnzbd folders and host check, the Jellyfin base URL and known proxy). This runbook covers
-the rest, in order, about 30–45 minutes.
+Nothing was restored. Role `stacks` wrote a few presets before the first start (URL bases, "login
+required" for the *arr apps, SABnzbd folders and host check, the Jellyfin base URL and known proxy).
+This runbook covers the rest, in order, about 30–45 minutes. The *arr logins (sections 3–5) come
+first: until you create them, those apps are open to anyone who can reach them.
 
 **Where:** a device on the tailnet. All admin URLs use the server's tailnet name over HTTPS
 (`tailscale serve`). Below, `<ts>` is the value of `tailnet_fqdn` from `inventory/host_vars/`
@@ -61,8 +62,9 @@ Paths inside the containers: the media drive is `/data` (`/data/tv`, `/data/movi
 3. **Config → General → Security**: set a **Username and Password** (required: the UI is reachable
    from the whole tailnet). Save, then copy the **API Key** from the same page for Sonarr/Radarr.
 4. **Config → Categories**: make sure categories **`tv`** and **`movies`** exist, with
-   **Folder/Path** `tv` and `movies` (relative, so they land in `/data/downloads/complete/tv|movies`).
-   Save each row.
+   **Folder/Path** `tv` and `movies` (relative, so they land in `/data/downloads/complete/tv|movies`;
+   both folders are pre-created). Save each row.
+   **Never an absolute path** like `/data/tv`: SABnzbd would drop raw downloads straight into the library.
 5. Leave **Config → Sorting** off. Sonarr/Radarr do the renaming.
 
 > "Access denied - Hostname verification failed" means you used a name other than `<ts>` (the port
@@ -73,8 +75,26 @@ Paths inside the containers: the media drive is `/data` (`/data/tv`, `/data/movi
 
 ## 3. Sonarr: `https://<ts>:8444/sonarr`
 
-1. First visit shows **Authentication Required** (forms login is preset) → choose a username and
-   password → Save.
+1. First visit: the Sonarr UI loads behind an **Authentication Required** box that has no close
+   button ("To prevent remote access without authentication, Sonarr now requires authentication to
+   be enabled…"). Fill it in:
+   - **Authentication Method**: **Forms (Login Page)**
+   - **Authentication Required**: **Enabled** (preset; don't pick *Disabled for Local Addresses*:
+     every request through `tailscale serve` or Docker looks local)
+   - **Username**, **Password**, **Password Confirmation**: your new login
+   → **Save**. Sonarr reloads to its login page; sign in with what you just set.
+
+   > **Do this right after the first deploy, for Sonarr, Radarr and Prowlarr.** Until the box is
+   > saved, the app has no login at all: anyone who can reach it (any tailnet device the ACL allows,
+   > any container on the media network) can use the UI and read its API key.
+   >
+   > **Plain login page instead of the box, and no login works?** (log: `Auth-Failure … username
+   > 'admin'`): an older version of the preset set the method to Forms before any user existed.
+   > Remove that line with the app stopped, then start it and fill in the box above:
+   > `sudo docker compose -f /srv/homelab/stacks/media/compose.yaml stop sonarr` →
+   > `sudo sed -i '/<AuthenticationMethod>/d' /srv/homelab/data/sonarr/config.xml` →
+   > `sudo docker compose -f /srv/homelab/stacks/media/compose.yaml start sonarr`
+   > (same for `radarr` / `prowlarr` with their own `config.xml`).
 2. **Settings → Media Management** (click *Show Advanced*):
    - **Root Folders → Add Root Folder** → `/data/tv`.
    - **Use Hardlinks instead of Copy** = on (default). Downloads and the library share the drive, so
@@ -91,13 +111,17 @@ Paths inside the containers: the media drive is `/data` (`/data/tv`, `/data/movi
 ## 4. Radarr: `https://<ts>:8444/radarr`
 
 Same as Sonarr, with these differences:
+- First visit shows the same **Authentication Required** box: Forms (Login Page), Enabled, a
+  username and password → Save, then sign in.
 - Root folder **`/data/movies`**; **Unmonitor Deleted Movies** = on.
 - Download client SABnzbd with Category **`movies`** (Host `sabnzbd`, Port `8080`, URL Base `/sabnzbd`).
 - Copy the API key from **Settings → General**.
 
 ## 5. Prowlarr: `https://<ts>:8444/prowlarr`
 
-1. **Authentication Required** → username/password → Save.
+1. First visit shows the same **Authentication Required** box as Sonarr (no close button):
+   **Authentication Method** Forms (Login Page), **Authentication Required** Enabled, **Username**,
+   **Password**, **Password Confirmation** → **Save**, then sign in on the login page.
 2. **Indexers → Add Indexer** → your Usenet indexer(s) (Newznab) → API key → **Test** → Save.
 3. **Settings → Apps → + → Sonarr**:
    - Prowlarr Server **`http://prowlarr:9696/prowlarr`**

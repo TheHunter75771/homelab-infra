@@ -21,6 +21,13 @@
     state: started
   ignore_errors: "{{ ansible_check_mode }}"
 
+- name: Service | the helper socket's recovery timer runs on every boot
+  ansible.builtin.systemd_service:
+    name: homelab-dockerctl-recover.timer
+    enabled: true
+    state: started
+  ignore_errors: "{{ ansible_check_mode }}"
+
 - name: Service | the dashboard runs on every boot
   ansible.builtin.systemd_service:
     name: "{{ dashboard_service }}"

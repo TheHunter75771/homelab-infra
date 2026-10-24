@@ -95,6 +95,23 @@ incident**, then "`<name>` recovered" when the incident clears:
   isn't judged on a stale "exited".
 - restart count up by 3 or more between checks. This clears once the count holds still while
   running;
+- **a single crash that Docker restarted** (CONTRACTS §4 amendment): pushed **once** as
+  "`<app>` crashed and restarted".
+  - Counts: a `die` without intent, with a non-zero exit or after an `oom`.
+  - Body: the exit code, plus "(out of memory)" for an OOM, plus a count if it crashed more
+    than once.
+  - It is informational: it opens no incident and sends no "recovered". Tag
+    `alertfloor:<app>:crash`, so the notifier's 30-minute dedupe applies and it never clears
+    the dedupe of that app's other incidents.
+  - A die and its restart split across two checks still push once: the pending crash is
+    persisted.
+  - A 3+ restart loop stays the loop incident, and a crash that stays down stays the "down"
+    incident, with no per-crash push on top of either.
+  - A push that fails is retried for up to an hour.
+
+Only a **fatal** `kill` counts as intent: SIGKILL, SIGTERM, SIGINT, SIGQUIT, or the
+container's own `Config.StopSignal` (e.g. SIGWINCH for httpd). The kill event's `signal`
+attribute decides it. A `kill -s HUP`/`USR1` reload followed by a crash alerts.
 - the Docker daemon unreachable on 2 consecutive checks (one extra incident);
 - `docker events` failing on 3 consecutive checks ("Alert floor blind"). A check that can't
   read the event history is skipped rather than guessed, and the next run re-reads the same

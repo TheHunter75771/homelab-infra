@@ -38,3 +38,16 @@
     group: root
     mode: "0644"
   notify: Dashboard daemon-reload
+
+# Self-heal for a socket that latched into "failed" (OnFailure= of the socket, plus a timer).
+- name: Helper | socket recovery units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: /etc/systemd/system/{{ item }}
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - homelab-dockerctl-recover.service
+    - homelab-dockerctl-recover.timer
+  notify: Dashboard daemon-reload

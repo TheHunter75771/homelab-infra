@@ -121,7 +121,7 @@ test('docker guard: no Docker op is ever sent unless docker-state says active', 
     await assert.rejects(docker.control('start', 'sonarr'), DockerInactiveError);
     await assert.rejects(docker.update('sonarr'), DockerInactiveError);
     await assert.rejects(docker.logs('sonarr', { follow: true }), DockerInactiveError);
-    assert.deepEqual(h.calls.map((c) => c.op), Array(5).fill('docker-state'), 'only the state was asked, five times');
+    assert.ok(h.calls.length >= 1 && h.calls.every((c) => c.op === 'docker-state'), 'only the state was asked');
     assert.equal(h.dockerCalls().length, 0, `no docker ops while ${state}`);
     // non-Docker ops are fine while Docker is down
     assert.deepEqual(await docker.boots(), []);
@@ -129,16 +129,21 @@ test('docker guard: no Docker op is ever sent unless docker-state says active', 
   }
 });
 
-test('docker guard: every Docker op does its own docker-state check, so a stop is seen at once', async (t) => {
-  const h = await startFakeHelper(t);
-  const docker = createDocker({ helper: createHelperClient({ socketPath: h.socketPath }) });
+test('docker-state: single-flight, reused for about 1 s by reads; mutations always ask fresh', async (t) => {
+  const h = await startFakeHelper(t, { delay: { 'docker-state': 50 } });
+  let now = 0;
+  const docker = createDocker({ helper: createHelperClient({ socketPath: h.socketPath }), clock: () => now });
+  const states = await Promise.all(Array.from({ length: 50 }, () => docker.dockerState()));
+  assert.ok(states.every((s) => s === 'active'));
+  assert.equal(h.calls.filter((c) => c.op === 'docker-state').length, 1, '50 concurrent callers, one helper call');
   await docker.ps();
   await docker.ps();
-  assert.deepEqual(h.calls.map((c) => c.op), ['docker-state', 'ps', 'docker-state', 'ps']);
-  h.state.dockerState = 'inactive'; // Docker goes down between two reads
-  await assert.rejects(docker.ps(), DockerInactiveError);
-  await assert.rejects(docker.control('restart', 'sonarr'), DockerInactiveError);
+  assert.deepEqual(h.calls.map((c) => c.op), ['docker-state', 'ps', 'ps'], 'reads reuse the state within 1 s');
+  h.state.dockerState = 'inactive';
+  await assert.rejects(docker.control('restart', 'sonarr'), DockerInactiveError, 'a mutation asks fresh, so it sees the stop at once');
   assert.equal(h.calls.filter((c) => c.op === 'restart').length, 0);
+  now += 1001;
+  await assert.rejects(docker.ps(), DockerInactiveError, 'past the reuse window, reads see it too');
   assert.ok(h.dockerCalls().every((c) => c.dockerStateAtCall === 'active'), 'every Docker op reached the helper while active');
 });
 

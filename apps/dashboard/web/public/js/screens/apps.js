@@ -1,6 +1,6 @@
 import { html, Icon, Chip, Btn, Reason, hrefFor, useId } from '../ui.js';
 import { fmtUptime, shortImage, plural } from '../format.js';
-import { openHref } from '../model.js';
+import { openHref, DOCKER_DOWN_UNKNOWN } from '../model.js';
 
 export const HELD_REASON = 'Held by the boot gate until the media drive is back.';
 export const TAILNET_ONLY = 'Only available on the tailnet';
@@ -16,9 +16,11 @@ export function appActions(app, { paused, remote, docker }) {
   const busy = app.statusKey === 'starting' || app.statusKey === 'updating';
   const L = app.locks || {};
   const has = (k) => Object.prototype.hasOwnProperty.call(L, k);
-  const dockerDown = docker && docker !== 'active' && !held ? "Docker isn't running." : null;
+  // Docker down, gate not holding it: the apps may still be serving, but nothing can act on them.
+  const unknownDocker = app.stopKind === 'docker-down' ? `${DOCKER_DOWN_UNKNOWN}.` : null;
+  const dockerDown = unknownDocker || (docker && docker !== 'active' && !held ? "Docker isn't running." : null);
   const blocked = (held ? HELD_REASON : null) || dockerDown;
-  const lock = (k, fallback) => paused || (has(k) ? L[k] : fallback);
+  const lock = (k, fallback) => paused || unknownDocker || (has(k) ? L[k] : fallback);
   const list = [];
   const href = openHref(app.open);
   if (href) list.push({ key: 'open', label: 'Open', icon: 'arrow-square-out', href, newTab: true });

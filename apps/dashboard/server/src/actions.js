@@ -16,7 +16,7 @@ import nodeFs from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { DEFAULT_APPS } from './catalog.js';
 import { readGateStatus } from './collectors/gate.js';
-import { TAILNET_ONLY } from './collectors/apps.js';
+import { heldByGate, HELD_REASON, TAILNET_ONLY } from './collectors/apps.js';
 import { readJson, writeJsonAtomic } from './util/fsx.js';
 import { parseKeyValues } from './util/run.js';
 
@@ -53,6 +53,8 @@ export function createActions({
   const stopped = new Set(Array.isArray(loaded) ? loaded.filter((n) => typeof n === 'string') : []);
   const all = new Map(); // id -> action
   const byApp = new Map(); // app -> running action
+  const starting = new Set(); // apps whose action is being checked (before it runs)
+  let startingUpdate = null; // the app whose update is being checked
   let gateAction = null;
   const listeners = new Map(); // id -> Set(fn)
 
@@ -232,17 +234,36 @@ export function createActions({
     async startApp(kind, name, { access }) {
       if (!APP_ACTIONS.includes(kind)) throw new ActionError(404, 'unknown action');
       if (TAILNET_ONLY_ACTIONS.has(kind) && access !== 'tailnet') throw new ActionError(403, TAILNET_ONLY);
-      const fresh = await summary.refreshCore();
-      const app = fresh.apps.find((x) => x.name === name);
-      if (!app) throw new ActionError(404, 'no such app');
-      if (byApp.has(name)) throw new ActionError(409, 'Busy');
-      const lock = app.locks[kind];
-      if (lock) throw new ActionError(409, lock);
+      // Cheap refusals and reservations before any helper call (the refresh below talks to the helper).
+      if (byApp.has(name) || starting.has(name)) throw new ActionError(409, 'Busy');
       // CONTRACTS §11.2 Concurrency: one update at a time (each one pulls an image and holds a helper slot).
-      const otherUpdate = kind === 'update' ? [...byApp.values()].find((x) => x.kind === 'update') : null;
-      if (otherUpdate) throw new ActionError(409, `Another update is running (${nice(otherUpdate.app)}). Try again when it finishes.`);
-      const a = create(kind, name);
-      byApp.set(name, a);
+      const otherUpdate = kind === 'update' ? ([...byApp.values()].find((x) => x.kind === 'update')?.app ?? startingUpdate) : null;
+      if (otherUpdate) throw new ActionError(409, `Another update is running (${nice(otherUpdate)}). Try again when it finishes.`);
+      starting.add(name);
+      if (kind === 'update') startingUpdate = name;
+      let a;
+      try {
+        const fresh = await summary.refreshCore();
+        const app = fresh?.apps.find((x) => x.name === name);
+        if (!app) throw new ActionError(404, 'no such app');
+        const lock = app.locks[kind];
+        if (lock) throw new ActionError(409, lock);
+        // The refresh above may have been one already in flight; ask once more, fresh, right before acting.
+        let dockerNow;
+        try {
+          dockerNow = await docker.dockerState({ fresh: true });
+        } catch {
+          throw new ActionError(503, "Can't reach the Docker helper.");
+        }
+        if (dockerNow !== 'active') {
+          throw new ActionError(409, heldByGate(fresh.gate.status, app.mediaGated) ? HELD_REASON : "Docker isn't running.");
+        }
+        a = create(kind, name);
+        byApp.set(name, a);
+      } finally {
+        starting.delete(name);
+        if (startingUpdate === name) startingUpdate = null;
+      }
       log?.info('action started', { id: a.id, kind, app: name });
       summary.touch?.();
       runApp(a).catch((err) => finish(a, false, { error: String(err?.message ?? 'The action failed.').slice(0, 200) }));

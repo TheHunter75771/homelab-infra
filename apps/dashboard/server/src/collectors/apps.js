@@ -34,7 +34,9 @@ export function updateAvailable(image, pinned) {
 
 export function appStatus({ ps, dockerState, gateStatus, mediaGated, stoppedOnPurpose, action }) {
   if (action && ['update', 'restart', 'start'].includes(action.kind)) return action.kind === 'update' ? 'updating' : 'starting';
-  if (dockerState !== 'active') return gateStatus === 'failed' ? 'held' : 'stopped';
+  // Docker down: held when the gate holds this app; otherwise unknown, because with live-restore the containers
+  // may still be running and serving (CONTRACTS §11.3, amended follow-ups).
+  if (dockerState !== 'active') return heldByGate(gateStatus, mediaGated) ? 'held' : 'unknown';
   if (!ps) return gateStatus === 'media-lost' && mediaGated ? 'held' : 'down';
   const running = ps.state === 'running';
   if (!running && gateStatus === 'media-lost' && mediaGated) return 'held';
@@ -49,9 +51,15 @@ export function appStatus({ ps, dockerState, gateStatus, mediaGated, stoppedOnPu
 }
 
 export const LOCAL_BUILD_REASON = 'Built on the host. A deploy updates it.';
+// What the gate holds. failed / waiting: all of Docker (docker.service Requires the gate). media-lost: only the
+// media stack (the drop-out watcher stopped it; Docker itself keeps running).
+export const GATE_HOLDS_DOCKER = new Set(['failed', 'waiting']);
+export function heldByGate(gateStatus, mediaGated) {
+  return GATE_HOLDS_DOCKER.has(gateStatus) || (gateStatus === 'media-lost' && Boolean(mediaGated));
+}
 
 function locksFor({ status, dockerState, gateStatus, mediaGated, running, busy, hasUpdate, localBuild }) {
-  const held = (dockerState !== 'active' && gateStatus === 'failed') || (gateStatus === 'media-lost' && mediaGated);
+  const held = heldByGate(gateStatus, mediaGated);
   const notActive = dockerState === 'unknown' ? HELPER_DOWN_REASON : DOCKER_DOWN_REASON;
   const blocked = held ? HELD_REASON : dockerState !== 'active' ? notActive : null;
   return {
@@ -59,7 +67,7 @@ function locksFor({ status, dockerState, gateStatus, mediaGated, running, busy, 
     stop: blocked ?? (busy ? 'Busy' : !running ? 'Already stopped' : null),
     start: blocked ?? (busy ? 'Busy' : running ? 'Already running' : null),
     update: blocked ?? (busy ? 'Busy' : localBuild ? LOCAL_BUILD_REASON : !hasUpdate ? 'Already on the pinned version' : null),
-    logs: dockerState !== 'active' ? (gateStatus === 'failed' ? HELD_REASON : notActive) : null,
+    logs: dockerState !== 'active' ? (held ? HELD_REASON : notActive) : null,
     _status: status,
   };
 }
@@ -91,12 +99,17 @@ export function buildApps({ cfg, psList, declared = null, dockerState, gateStatu
     const localBuild = decl?.local_build === true;
     const hasUpdate = !localBuild && updateAvailable(image, pinned);
     let status;
-    if (dockerState === 'unknown' && !action) status = gateStatus === 'failed' ? 'held' : 'unknown'; // helper unreachable
+    if (dockerState === 'unknown' && !action) status = heldByGate(gateStatus, mediaGated) ? 'held' : 'unknown'; // helper unreachable
     else if (psList === null && dockerState === 'active' && !action) status = 'unknown';
     else status = appStatus({ ps, dockerState, gateStatus, mediaGated, stoppedOnPurpose: stopped.has(name), action });
     const running = ps?.state === 'running';
-    // Why an app is down without being an incident (non-null only for held / stopped).
-    const stoppedReason = status === 'held' ? 'gate' : status === 'stopped' ? (dockerState !== 'active' ? 'docker-down' : 'intentional') : null;
+    // Why an app is down (or of unknown state) without being an incident:
+    //   gate: held by the gate; docker-down: docker.service isn't active and the gate isn't holding it (status
+    //   unknown: live-restore may keep it serving); intentional: stopped on purpose (or paused). Otherwise null.
+    let stoppedReason = null;
+    if (status === 'held') stoppedReason = 'gate';
+    else if (status === 'unknown' && dockerState !== 'active' && dockerState !== 'unknown') stoppedReason = 'docker-down';
+    else if (status === 'stopped') stoppedReason = 'intentional';
     const locks = locksFor({ status, dockerState, gateStatus, mediaGated, running, busy: Boolean(action), hasUpdate, localBuild });
     delete locks._status;
     return {

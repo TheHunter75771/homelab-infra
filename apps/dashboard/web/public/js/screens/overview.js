@@ -7,7 +7,7 @@ import {
   mediaHealthSummary,
   lastDays,
   dayTone,
-  ALERT_CHIP,
+  alertChip,
   pick,
 } from '../model.js';
 import {
@@ -175,6 +175,8 @@ export function tileMessage(name, tile) {
       return `${label} is stopped.`;
     case 'down':
       return `${label} isn't running.`;
+    case 'unknown':
+      return `${label}'s state is unknown.`;
     case 'unconfigured':
       return `Add the ${label} API key in Settings.`;
     case 'error':
@@ -194,7 +196,7 @@ export function playingEmptyText(view) {
 export function downloadsSummary(view) {
   const t = view.media.tiles.sabnzbd;
   if (t.state === 'error') return 'not answering';
-  if (t.state !== 'ok') return { held: 'held', stopped: 'stopped', down: 'down', unconfigured: 'no API key', pending: '…' }[t.state] || '—';
+  if (t.state !== 'ok') return { held: 'held', stopped: 'stopped', down: 'down', unknown: 'unknown', unconfigured: 'no API key', pending: '…' }[t.state] || '—';
   const n = Number.isFinite(Number(t.total)) && Number(t.total) > 0 ? Number(t.total) : (Array.isArray(t.items) ? t.items.length : 0);
   if (t.paused) return n ? `${plural(n, 'item')} · paused` : 'paused';
   if (!n) return 'empty';
@@ -229,7 +231,7 @@ function DesktopRow({ view }) {
     <section class="ov-card" aria-label="Recent alerts">
       <a class="card-link" href="#/alerts"><span>Recent alerts</span><span class="more">All alerts</span><${Icon} name="caret-right" /></a>
       ${alerts.map((al) => {
-        const c = ALERT_CHIP[al.state];
+        const c = alertChip(al);
         return html`<div class="alert-line">
           <${Icon} name=${c.icon} cls=${`tc tone-${c.tone}`} label=${c.label} />
           <div class="body">

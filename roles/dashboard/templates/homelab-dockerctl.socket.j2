@@ -7,6 +7,9 @@
 [Unit]
 Description=Homelab dockerctl socket (the dashboard's privileged Docker helper)
 Documentation=file://{{ dashboard_dockerctl_script }}
+# If the trigger limit below ever latches the socket into "failed", re-open it (paced and
+# rate-limited; restarts only this socket, never Docker).
+OnFailure=homelab-dockerctl-recover.service
 
 [Socket]
 ListenStream={{ dashboard_dockerctl_socket }}
@@ -15,6 +18,13 @@ SocketGroup={{ dashboard_user }}
 SocketMode=0660
 Accept=yes
 MaxConnections={{ dashboard_dockerctl_max_connections }}
+# Flood protection (numbers justified in roles/dashboard/defaults/main.yml; real peak ~23 per 2 s).
+# The poll limit throttles without latching; the trigger limit, set above it, is the latching
+# backstop that OnFailure= recovers from.
+PollLimitIntervalSec={{ dashboard_dockerctl_poll_limit_interval }}
+PollLimitBurst={{ dashboard_dockerctl_poll_limit_burst }}
+TriggerLimitIntervalSec={{ dashboard_dockerctl_trigger_limit_interval }}
+TriggerLimitBurst={{ dashboard_dockerctl_trigger_limit_burst }}
 RemoveOnStop=yes
 
 [Install]

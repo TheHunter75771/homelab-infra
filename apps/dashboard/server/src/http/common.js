@@ -55,6 +55,14 @@ export function sendJson(res, status, obj, headers = {}) {
   });
 }
 
+// /api/* GETs (CONTRACTS §11.3 Guards, amended): another site must not be able to make the admin's browser drive
+// helper calls. Missing, same-origin and none pass; same-site and cross-site get 403. The shell and static files
+// are exempt.
+export function checkReadGuards(req) {
+  const site = req.headers['sec-fetch-site'];
+  if (site !== undefined && site !== 'same-origin' && site !== 'none') throw new HttpError(403, 'cross-site request refused');
+}
+
 export function checkWriteGuards(req) {
   if (req.headers['x-homelab'] !== '1') throw new HttpError(403, 'missing X-Homelab: 1 header');
   const site = req.headers['sec-fetch-site'];

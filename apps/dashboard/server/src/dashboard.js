@@ -44,7 +44,7 @@ export function createDashboard(cfg, deps = {}) {
   settings.onChange(registerKeys);
 
   const helper = deps.helper ?? createHelperClient({ socketPath: cfg.helperSocket });
-  const docker = createDocker({ helper });
+  const docker = createDocker({ helper, clock, ...(deps.dockerOptions ?? {}) });
   const run = deps.run === undefined ? createRunner() : deps.run;
   const wp = deps.webpush ?? webpush;
   const driveState = createDriveState({ stateDir: cfg.stateDir });

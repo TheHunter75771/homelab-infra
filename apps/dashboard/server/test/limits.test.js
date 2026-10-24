@@ -332,3 +332,266 @@ test('uncaughtException: logged redacted (never Node\'s raw trace on stderr), th
   for (const secret of [INDEXER, KEYS.sonarr, KEYS.sonarr.slice(0, 10)]) assert.ok(!line.includes(secret), `leaked ${secret.slice(0, 6)}…`);
   assert.equal(s.io.err, '', 'nothing raw on stderr');
 });
+
+// ---- the stale-cache window (follow-ups) ---------------------------------------------------------------------
+
+test('logs: Docker stopped since the last refresh -> 409 from a fresh docker-state, no stream, no helper logs call', async (t) => {
+  const dc = { now: 0 };
+  const d = await startDashboard(t, 'normal', { dockerOptions: { clock: () => dc.now } });
+  dc.now += 5000; // the cached summary is old, and so is the last docker-state answer
+  assert.equal(d.dash.summary.core().dockerState, 'active', 'the cached state still says active');
+  d.helper.state.dockerState = 'inactive';
+  const r = await getJson(d.base, '/api/apps/sonarr/logs?follow=1');
+  assert.equal(r.status, 409);
+  assert.equal(r.json.error, "Docker isn't running.");
+  assert.ok(!d.helper.calls.some((c) => c.op === 'logs'));
+  assert.equal(d.dash.httpStats().slots.logs, 0, 'no slot taken');
+  d.host.write('var/lib/bootgate/status', 'failed\n');
+  assert.equal((await getJson(d.base, '/api/apps/sonarr/logs')).json.error, 'Held by the boot gate until the media drive is back.');
+  dc.now += 5000;
+  d.helper.state.fail['docker-state'] = { code: 'failed', message: 'x' };
+  assert.equal((await getJson(d.base, '/api/apps/sonarr/logs')).status, 503);
+});
+
+test('actions: a refresh already in flight may be stale; the fresh docker-state right before acting refuses with 409', async (t) => {
+  const d = await startDashboard(t, 'normal', { helper: { delay: { ps: 300 } } });
+  // A refresh already past both of its docker-state checks (both "active") and waiting on ps...
+  const before = d.helper.calls.length;
+  const inflight = d.dash.summary.refreshCore();
+  for (let i = 0; i < 100 && !d.helper.calls.slice(before).some((c) => c.op === 'ps'); i++) await wait(5);
+  assert.ok(d.helper.calls.slice(before).every((c) => c.dockerStateAtCall === 'active'), 'the in-flight refresh saw Docker active');
+  d.helper.state.dockerState = 'inactive'; // ...when Docker stops. The action joins that stale refresh.
+  const r = await postJson(d.base, '/api/apps/sonarr/restart', {});
+  await inflight;
+  assert.equal(r.status, 409);
+  assert.equal(r.json.error, "Docker isn't running.");
+  assert.ok(!d.helper.calls.some((c) => c.op === 'restart'), 'nothing was sent');
+});
+
+// ---- redaction never breaks the JSON line (follow-ups) ----------------------------------------------------------
+
+test("logger: the Reviewer's sample stays valid JSON and loses the token", async () => {
+  const { createLogger } = await import('../src/log.js');
+  const lines = [];
+  const log = createLogger({ write: (l) => lines.push(l) });
+  log.error('x', { error: 'token=abcdefg"rest of it' });
+  const entry = JSON.parse(lines[0]);
+  assert.equal(entry.error, 'token=[redacted]"rest of it');
+});
+
+test('logger fuzz: 1000 random strings around credential shapes; every line parses and no secret survives', async () => {
+  const { createLogger } = await import('../src/log.js');
+  const { createSecrets } = await import('../src/redact.js');
+  let seed = 0x2f6e2b1;
+  const rnd = (n) => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff; // deterministic, so a failure reproduces
+    return seed % n;
+  };
+  const pick = (a) => a[rnd(a.length)];
+  const JUNK = ['"', "'", '\\', '\n', '\t', '{', '}', ':', '=', '&', '%', ' ', ',', ';', '\u0000', 'é', '😀', ' ', 'x', 'A', '9', '/', '?', '#', '[', ']'];
+  const junk = (n) => Array.from({ length: n }, () => pick(JUNK)).join('');
+  const word = (n) => Array.from({ length: n }, () => pick('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789')).join('');
+  const PATTERNS = ['token=', 'apikey=', 'api_key=', 'API Key: ', 'X-Api-Key: ', 'password=', 'Authorization: Bearer ', 'Bearer ', 'apikey%3D', 'API%20Key%3A%20', 'Bearer%20'];
+  const STOP = [' ', '"', '&', ',', ';', "'", '\n', '\t'];
+  const configured = word(24);
+  const secrets = createSecrets();
+  secrets.add(configured);
+  const lines = [];
+  const log = createLogger({ write: (l) => lines.push(l) });
+  log.setRedactor((t) => secrets.redact(t));
+  const cases = [];
+  for (let i = 0; i < 1000; i++) {
+    const secret = word(10 + rnd(11));
+    const pattern = pick(PATTERNS);
+    const sep = pick([' ', '"', '(', '?', '&', '\n', '/', '\\']); // a non-word character, so \bbearer can match
+    const tail = rnd(3) === 0 ? '' : pick(STOP) + junk(rnd(20));
+    const text = rnd(5) === 0 ? `${junk(rnd(15))}${configured}${junk(rnd(15))}` : `${junk(rnd(20))}${sep}${pattern}${secret}${tail}`;
+    cases.push({ text, secret: text.includes(configured) ? configured : secret });
+    log.error(rnd(4) === 0 ? text : 'fuzz', { error: text, nested: { list: [text, { deep: text }] } });
+  }
+  assert.equal(lines.length, 1000);
+  lines.forEach((line, i) => {
+    let entry;
+    assert.doesNotThrow(() => {
+      entry = JSON.parse(line);
+    }, `line ${i} is not JSON: ${line.slice(0, 200)}`);
+    for (const v of [entry.msg, entry.error, entry.nested.list[0], entry.nested.list[1].deep]) {
+      assert.ok(!v.includes(cases[i].secret), `line ${i} leaked its secret: ${JSON.stringify(cases[i].text)}`);
+    }
+    assert.ok(!line.includes(cases[i].secret), `line ${i}: raw line leaked`);
+  });
+});
+
+// ---- review: a cross-site flood must not reach the helper socket ----------------------------------------------
+// systemd's Accept=yes socket allows 200 activations per 2 s; past that it latches failed until restarted.
+
+async function fillLogSlots(d) {
+  const follows = [];
+  for (let i = 0; i < 8; i++) {
+    const s = sse(d.port, '/api/apps/sonarr/logs?follow=1&tail=1');
+    follows.push(s);
+    await s.next('lines');
+  }
+  assert.equal(d.dash.httpStats().slots.logs, 8);
+  return follows;
+}
+
+test("the Reviewer's flood: 300 cross-site log requests with the slots full -> 0 helper connections; 300 same-origin -> 503 and still 0", { timeout: 30_000 }, async (t) => {
+  const dc = { now: 0 };
+  const d = await startDashboard(t, 'normal', { helper: { logsFollow: true, logs: { sonarr: [{ ts: null, text: 'x' }] } }, dockerOptions: { clock: () => dc.now } });
+  const follows = await fillLogSlots(d);
+  dc.now += 5000; // no reusable docker-state answer: a request that asked the helper would show up below
+  const before = d.helper.calls.length;
+  const flood = (site) =>
+    Promise.all(Array.from({ length: 300 }, () => fetch(`${d.base}/api/apps/sonarr/logs?follow=1`, { headers: site ? { 'Sec-Fetch-Site': site } : {} }).then((r) => r.status)));
+  const cross = await flood('cross-site');
+  assert.ok(cross.every((s) => s === 403), 'every cross-site request refused');
+  assert.equal(d.helper.calls.length - before, 0, 'and none reached the helper');
+  const sameSite = await flood('same-site');
+  assert.ok(sameSite.every((s) => s === 403));
+  const same = await flood('same-origin');
+  assert.ok(same.every((s) => s === 503), 'slots full: refused before any helper call');
+  assert.equal(d.helper.calls.length - before, 0, 'a refused request makes zero helper connections');
+  for (const f of follows) f.close();
+});
+
+test('every /api GET refuses same-site and cross-site; missing, same-origin and none pass; the shell is exempt', async (t) => {
+  const d = await startDashboard(t, 'normal');
+  const gets = ['/api/summary', '/api/events', '/api/vapid-public-key', '/api/push/devices', '/api/settings', '/api/apps/sonarr/logs', '/api/actions/abc'];
+  const before = d.helper.calls.length;
+  for (const p of gets) {
+    for (const site of ['cross-site', 'same-site']) {
+      const r = await fetch(`${d.base}${p}`, { headers: { 'Sec-Fetch-Site': site } });
+      assert.equal(r.status, 403, `${p} ${site}`);
+      await r.body?.cancel();
+    }
+  }
+  assert.equal(d.helper.calls.length, before, 'no helper call for any refused GET');
+  for (const site of [undefined, 'same-origin', 'none']) {
+    const r = await fetch(`${d.base}/api/summary`, { headers: site ? { 'Sec-Fetch-Site': site } : {} });
+    assert.equal(r.status, 200, String(site));
+  }
+  for (const p of ['/', '/apps', '/sw.js', '/healthz']) {
+    const r = await fetch(`${d.base}${p}`, { headers: { 'Sec-Fetch-Site': 'cross-site' } });
+    assert.equal(r.status, 200, `${p} is exempt`);
+  }
+});
+
+test('an open-and-abort loop of 300 log requests keeps helper connections bounded', { timeout: 30_000 }, async (t) => {
+  const d = await startDashboard(t, 'normal', { helper: { logs: { sonarr: [{ ts: null, text: 'x' }] } } });
+  const before = d.helper.calls.length;
+  const t0 = Date.now();
+  for (let i = 0; i < 300; i++) {
+    const sock = net.connect(d.port, '127.0.0.1');
+    sock.on('error', () => {});
+    await new Promise((r) => sock.on('connect', r));
+    sock.write('GET /api/apps/sonarr/logs?tail=5 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n');
+    sock.destroy();
+  }
+  await wait(200);
+  const elapsed = (Date.now() - t0) / 1000;
+  const made = d.helper.calls.slice(before);
+  const logs = made.filter((c) => c.op === 'logs').length;
+  const states = made.filter((c) => c.op === 'docker-state').length;
+  assert.ok(logs <= 10 + 5 * Math.ceil(elapsed), `log streams bounded by the start rate (${logs} in ${elapsed.toFixed(2)} s)`);
+  assert.ok(states <= Math.ceil(elapsed) + 2, `docker-state single-flight + 1 s reuse (${states})`);
+  assert.ok(made.length < 60, `total helper connections bounded (${made.length} for 300 requests)`);
+  assert.equal(d.dash.httpStats().slots.logs, 0, 'every slot released');
+  assert.equal((await getJson(d.base, '/healthz')).status, 200);
+});
+
+test('log starts beyond the burst get 429 before any helper call, and the bucket refills', async (t) => {
+  const d = await startDashboard(t, 'normal', { helper: { logs: { sonarr: [{ ts: null, text: 'x' }] } }, appOptions: { logStartBurst: 3, logStartPerSecond: 2 } });
+  const statuses = [];
+  for (let i = 0; i < 5; i++) {
+    const r = await fetch(`${d.base}/api/apps/sonarr/logs?tail=1`);
+    statuses.push(r.status);
+    await r.text();
+  }
+  assert.deepEqual(statuses, [200, 200, 200, 429, 429]);
+  await wait(600);
+  const r = await fetch(`${d.base}/api/apps/sonarr/logs?tail=1`);
+  assert.equal(r.status, 200, 'refilled');
+  await r.text();
+  assert.equal(d.helper.calls.filter((c) => c.op === 'logs').length, 4, 'refused starts never reached the helper');
+});
+
+test('actions: Busy and the one-update lock are taken before any helper call', async (t) => {
+  const containers = ALL_APPS.map((n) =>
+    ['sonarr', 'radarr'].includes(n) ? container(n, { image: `example/${n}:1.0.0@sha256:${'a'.repeat(64)}`, pinned: `example/${n}:1.1.0@sha256:${'b'.repeat(64)}` }) : container(n),
+  );
+  const d = await startDashboard(t, 'normal', { helper: { containers, delay: { ps: 200 } } });
+  const first = postJson(d.base, '/api/apps/sonarr/update', {}); // its pre-checks are now waiting on ps
+  await wait(30);
+  const before = d.helper.calls.length;
+  const [busy, otherUpdate] = await Promise.all([postJson(d.base, '/api/apps/sonarr/restart', {}), postJson(d.base, '/api/apps/radarr/update', {})]);
+  assert.equal(d.helper.calls.length, before, 'refused without touching the helper');
+  assert.equal(busy.status, 409);
+  assert.equal(busy.json.error, 'Busy');
+  assert.equal(otherUpdate.status, 409);
+  assert.equal(otherUpdate.json.error, 'Another update is running (Sonarr). Try again when it finishes.');
+  assert.equal((await first).status, 202);
+});
+
+test('logger fuzz 2: deep nesting, credential-named fields, Buffers, BigInt and cycles; every line parses and leaks nothing', async () => {
+  const { createLogger, MAX_DEPTH } = await import('../src/log.js');
+  let seed = 0x51ed27;
+  const rnd = (n) => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed % n;
+  };
+  const word = (n) => Array.from({ length: n }, () => 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[rnd(62)]).join('');
+  const NAMES = ['token', 'Token', 'apiKey', 'api_key', 'apikey', 'x-api-key', 'X-Api-Key', 'password', 'passwd', 'authorization', 'Authorization', 'secret', 'client_secret', 'accessToken', 'access_token', 'cookie', 'privateKey', 'private_key', 'credentials'];
+  const lines = [];
+  const log = createLogger({ write: (l) => lines.push(l) });
+  const cases = [];
+  for (let i = 0; i < 1000; i++) {
+    const secret = word(12 + rnd(10));
+    const kind = rnd(6);
+    let fields;
+    if (kind === 0) {
+      // a credential-shaped string nested 1..40 levels deep (past MAX_DEPTH it must become "[truncated]")
+      let v = `x apikey=${secret} y`;
+      for (let k = 0, depth = 1 + rnd(40); k < depth; k++) v = rnd(2) ? { n: v } : [v];
+      fields = { nested: v };
+    } else if (kind === 1) {
+      // a secret under a credential-named key, at a random depth, raw (no "apikey=" shape to catch it)
+      let v = { [NAMES[rnd(NAMES.length)]]: secret };
+      for (let k = 0, depth = rnd(10); k < depth; k++) v = { wrap: v };
+      fields = { ctx: v };
+    } else if (kind === 2) {
+      fields = { body: Buffer.from(`token=${secret}`), view: new Uint8Array(Buffer.from(secret)) };
+    } else if (kind === 3) {
+      fields = { big: BigInt(rnd(1000)) * 10n ** 30n, nested: { big: -5n }, note: `Bearer ${secret}` };
+    } else if (kind === 4) {
+      const a = { name: 'a', apikey: secret };
+      a.self = a;
+      a.list = [a, { back: a }];
+      fields = { cyc: a };
+    } else {
+      fields = { err: new Error(`failed with password=${secret}`), map: new Map([['token', secret]]), set: new Set([`api_key=${secret}`]) };
+    }
+    cases.push(secret);
+    log.error('fuzz2', fields);
+  }
+  assert.equal(lines.length, 1000);
+  assert.ok(MAX_DEPTH >= 16);
+  lines.forEach((line, i) => {
+    assert.doesNotThrow(() => JSON.parse(line), `line ${i} is not JSON: ${line.slice(0, 200)}`);
+    assert.ok(!line.includes(cases[i]), `line ${i} leaked its secret: ${line.slice(0, 300)}`);
+  });
+  // spot checks of the shapes
+  const lines2 = [];
+  const l2 = createLogger({ write: (x) => lines2.push(x) });
+  const cyc = { k: 1 };
+  cyc.me = cyc;
+  let deep = 'leaf';
+  for (let k = 0; k < MAX_DEPTH + 5; k++) deep = { d: deep };
+  l2.info('shapes', { b: Buffer.from('abc'), n: 12345678901234567890n, d: new Date(0), cyc, twice: [cyc.k, cyc.k], deep });
+  const e = JSON.parse(lines2[0]);
+  assert.deepEqual(
+    { b: e.b, n: e.n, d: e.d, cyc: e.cyc },
+    { b: '[binary 3 bytes]', n: '12345678901234567890', d: '1970-01-01T00:00:00.000Z', cyc: { k: 1, me: '[circular]' } },
+  );
+  assert.match(lines2[0], /"\[truncated\]"/, 'past MAX_DEPTH');
+});

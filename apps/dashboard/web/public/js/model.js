@@ -47,6 +47,11 @@ export const STATUS = {
   unknown: { tone: 'idle', label: 'Unknown', icon: 'question' },
 };
 
+// Docker isn't running but the gate isn't holding it (CONTRACTS §11.3, amended): with live-restore the
+// containers may still be serving, so their state is unknown. Never "Stopped", never counted as down.
+export const DOCKER_DOWN_UNKNOWN = "Docker isn't running (apps may still be serving)";
+export const STATUS_DOCKER_DOWN = { tone: 'warn', label: 'Unknown', icon: 'question', long: `Unknown: ${DOCKER_DOWN_UNKNOWN}` };
+
 export const GATE_CHIP = {
   ok: { tone: 'ok', icon: 'check-circle' },
   waiting: { tone: 'info', icon: 'hourglass' },
@@ -121,7 +126,7 @@ export function appStatus(app, { gate = 'ok', docker = 'active', pending = null 
   }
   if (STATUS[app.status]) return app.status;
   if (heldByGate(app, gate, docker)) return 'held';
-  if (docker !== 'active') return 'stopped';
+  if (docker !== 'active') return 'unknown'; // not held by the gate: live-restore may keep it serving
   switch (app.state) {
     case 'running':
       if (app.health === 'unhealthy') return 'unhealthy';
@@ -203,12 +208,17 @@ export function deriveApps(summary, pending = {}, now = Date.now()) {
     const status = appStatus(a, { gate, docker, pending: pending[a.name] });
     const started = toDate(a.startedAt);
     const up = a.state === 'running' && !['held', 'stopped', 'down', 'unknown'].includes(status);
-    // Why a stopped app is stopped: the server's stoppedReason, else inferred (Docker not active → docker-down).
-    const stopKind = status !== 'stopped' ? null : a.stoppedReason ?? (docker !== 'active' ? 'docker-down' : 'intentional');
-    const st = stopKind && stopKind !== 'intentional' ? { ...STATUS.stopped, label: stopKind === 'gate' ? 'Stopped by the gate' : 'Stopped' } : STATUS[status];
+    // Why it isn't running: the server's stoppedReason, else inferred (Docker not active → docker-down).
+    let stopKind = null;
+    if (status === 'stopped' || status === 'unknown') stopKind = a.stoppedReason ?? (docker !== 'active' ? 'docker-down' : status === 'stopped' ? 'intentional' : null);
+    // docker-down is shown as unknown even from a server that still says "stopped" (amended contract)
+    const statusKey = stopKind === 'docker-down' ? 'unknown' : status;
+    let st = STATUS[statusKey];
+    if (stopKind === 'docker-down') st = STATUS_DOCKER_DOWN;
+    else if (stopKind === 'gate' && statusKey === 'stopped') st = { ...STATUS.stopped, label: 'Stopped by the gate' };
     return {
       ...a,
-      statusKey: status,
+      statusKey,
       stopKind,
       st,
       uptimeSeconds: up && started ? Math.max(0, (now - started.getTime()) / 1000) : null,
@@ -221,6 +231,18 @@ export function deriveApps(summary, pending = {}, now = Date.now()) {
 
 const RECOVERY = /\b(back|recovered|resolved|restored|online|healthy again|ok again|passed|cleared)\b/i;
 const INFO_TAGS = new Set(['test', 'reminder']);
+
+// "<app> crashed and restarted" from the alert floor: the restart policy already recovered it. The server
+// marks it state resolved + note "Recovered on its own" (collectors/alerts.js); without the note the same
+// rule as the server's applies: the title ends with the phrase and carries no failure qualifier. Always
+// resolved, never active, and it opens or resolves nothing else.
+const SELF_RECOVERED_END = /\bcrashed and restarted[\s.!]*$/i;
+const FAILURE_QUALIFIER = /\b(?:not|no|never|unable|cannot|fail(?:s|ed|ing|ure)?|errors?|still|but|however|except|partial(?:ly)?|degraded|without|pending)\b|\w+n['\u2019]t\b/i;
+export function isSelfHealed(alert) {
+  if (typeof alert.note === 'string' && /recovered on its own/i.test(alert.note)) return true;
+  const t = String(alert.title || '').trim();
+  return SELF_RECOVERED_END.test(t) && !FAILURE_QUALIFIER.test(t);
+}
 
 export function alertKind(alert) {
   if (!alert.tag || INFO_TAGS.has(alert.tag)) return 'info';
@@ -239,18 +261,20 @@ export function alertStates(alerts, now = Date.now()) {
       body: String(pick(a, 'body') ?? ''),
       tag: pick(a, 'tag') || null,
       serverState: pick(a, 'state'),
+      selfHealed: isSelfHealed({ note: a?.note, title: pick(a, 'title') }),
     }))
     .filter((a) => toDate(a.ts))
     .sort((x, y) => ms(y.ts) - ms(x.ts));
   const recovered = new Set(); // tags with a recovery newer than the alert being looked at
   return list.map((a) => {
-    const kind = alertKind(a);
+    const kind = a.selfHealed ? 'self-healed' : alertKind(a);
     let state;
     if (kind === 'info') state = 'info';
     else if (kind === 'recovery') state = 'resolved';
     else state = recovered.has(a.tag) ? 'resolved' : now - ms(a.ts) > 7 * 86400000 ? 'info' : 'active';
     if (kind === 'recovery') recovered.add(a.tag);
     if (['active', 'resolved', 'info'].includes(a.serverState)) state = a.serverState;
+    if (a.selfHealed) state = a.serverState && a.serverState !== 'active' ? a.serverState : 'resolved'; // never active
     return { ...a, kind, state };
   });
 }
@@ -260,6 +284,9 @@ export const ALERT_CHIP = {
   resolved: { tone: 'ok', label: 'Resolved', icon: 'check-circle' },
   info: { tone: 'info', label: 'Info', icon: 'info' },
 };
+const SELF_HEALED_CHIP = { tone: 'ok', label: 'Resolved · recovered on its own', icon: 'arrows-clockwise' };
+
+export const alertChip = (alert) => (alert.selfHealed && alert.state === 'resolved' ? SELF_HEALED_CHIP : ALERT_CHIP[alert.state]);
 
 // --- drive forecast -------------------------------------------------------------------------
 
@@ -459,14 +486,14 @@ export function renewals(list, now = Date.now()) {
 // --- media -----------------------------------------------------------------------------------
 
 export const MEDIA_LABEL = { jellyfin: 'Jellyfin', sabnzbd: 'SABnzbd', jellyseerr: 'Jellyseerr', prowlarr: 'Prowlarr', sonarr: 'Sonarr', radarr: 'Radarr' };
-const TILE_STATES = new Set(['ok', 'error', 'held', 'down', 'stopped', 'unconfigured', 'pending']);
+const TILE_STATES = new Set(['ok', 'error', 'held', 'down', 'stopped', 'unknown', 'unconfigured', 'pending']);
 
 // A media tile: {state, message, detail, ...data}. Without a server state, the app's status decides.
 export function mediaTile(raw, app) {
   const t = raw && typeof raw === 'object' ? raw : null;
   let state = t?.state;
   if (!TILE_STATES.has(state)) {
-    if (app && ['held', 'stopped', 'down'].includes(app.statusKey)) state = app.statusKey;
+    if (app && ['held', 'stopped', 'down', 'unknown'].includes(app.statusKey)) state = app.statusKey;
     else if (!t) state = 'pending';
     else state = t.error ? 'error' : 'ok';
   }
@@ -529,6 +556,7 @@ export function mediaHealthRows(media) {
       down: "Prowlarr isn't running",
       error: "Prowlarr isn't answering",
       unconfigured: "Can't read Prowlarr's key",
+      unknown: 'Unknown',
       pending: 'Checking…',
     }[px.state];
     rows.push({ label: 'Indexers', status: px.state === 'error' || px.state === 'down' ? 'fail' : 'idle', text: text || 'No data' });
@@ -793,7 +821,7 @@ export function appsSummary(apps, docker = 'active') {
   let sub = 'All containers up';
   if (!n) sub = 'No containers reported';
   else if (held) sub = `${held} held by the gate`;
-  else if (dockerDown || docker !== 'active') sub = "Docker isn't running";
+  else if (dockerDown || docker !== 'active') sub = DOCKER_DOWN_UNKNOWN;
   else if (down) sub = `${down} down`;
   else if (stopped) sub = `${stopped} stopped on purpose`;
   else if (healthy < n) sub = `${n - healthy} not healthy yet`;

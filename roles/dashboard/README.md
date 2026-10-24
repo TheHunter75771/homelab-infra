@@ -31,6 +31,7 @@ controller (no npm on the host, Lead decision 2026-10-24).
 | `/usr/local/sbin/homelab-dockerctl` | the helper (`files/homelab-dockerctl/homelab_dockerctl.py`, Python 3 stdlib) |
 | `homelab-dockerctl.socket` + `homelab-dockerctl@.service` | `/run/homelab-dockerctl.sock` 0660 root:dashboard, `Accept=yes` |
 | `/var/cache/homelab-dockerctl/` | helper cache (disk-split, 24 h) and per-container action locks (root 0700) |
+| `homelab-dockerctl-recover.service` + `.timer` | re-open the helper socket if it ever latched into "failed" (socket `OnFailure=`, plus a check every 15 min) |
 
 ## The account: pushcore becomes dashboard
 The id is fixed at 10101 because the existing push store belongs to it. The role reads the
@@ -119,6 +120,29 @@ unit gets `ReadOnlyPaths=/run` as well.
 
 The cost, about one Python start per request, is irrelevant at the dashboard's polling rate.
 Shared state (the disk-split cache, the action locks) lives in `CacheDirectory=` under `flock`.
+
+**Flood protection and self-heal.** An `Accept=yes` socket that hits its trigger limit latches
+into "failed" and stays unreachable until restarted, which would cost all Docker status and
+control on exactly the night it's needed. Three layers prevent that:
+- **The real peak** is about 23 connections in 2 s: 8 log streams opened together (docker-state +
+  logs each), one update (2), a summary refresh (up to 3), and docker-state about once a second (2).
+- **Poll limit** `PollLimitIntervalSec=2s`, `PollLimitBurst=50` (systemd 255+): over the burst,
+  systemd stops accepting for the rest of the window. That's twice the peak, never latches, and caps
+  a runaway client at 25 helper starts per second.
+- **Trigger limit** `TriggerLimitIntervalSec=2s`, `TriggerLimitBurst=100`: the latching limit, set
+  above the poll limit (so normally out of reach), still a cap on a runaway (50 per second; systemd's
+  default is 200).
+- **Self-heal:** the socket's `OnFailure=` starts `homelab-dockerctl-recover.service`. It runs only
+  if the socket really is failed (`ExecCondition`), waits 30 s, then
+  `systemctl restart homelab-dockerctl.socket`, and never touches Docker or any other unit. It's
+  rate-limited (6 starts per 30 min), so a flood can't make it loop. `homelab-dockerctl-recover.timer`
+  (wall-clock, every 15 min) retries once that budget is spent.
+
+Checked on systemd 259 with transient user units built from the rendered templates:
+- a 2000-connect flood with these numbers kept the socket active (no trigger-limit event);
+- with the poll limit disabled, the trigger limit latched it, systemd logged "Triggering OnFailure=
+  dependencies", and the recovery re-opened it;
+- under a sustained flood, the recovery stopped at its start limit.
 
 **Rules:**
 - **Peer check:** the peer's `SO_PEERCRED` uid must be 10101; everyone else, root included, gets

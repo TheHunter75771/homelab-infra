@@ -1,0 +1,45 @@
+# {{ ansible_managed }}
+# Re-opens homelab-dockerctl.socket after it failed (e.g. its trigger limit latched it). Started by
+# the socket's OnFailure= and by homelab-dockerctl-recover.timer. It restarts only that listening
+# socket: no Docker, no helper instance, no other unit.
+# Paced (it waits {{ dashboard_dockerctl_recover_delay_seconds }} s first) and rate-limited
+# ({{ dashboard_dockerctl_recover_start_limit_burst }} starts per {{ dashboard_dockerctl_recover_start_limit_interval }}),
+# so a flood that keeps tripping the socket can't turn into a restart loop.
+[Unit]
+Description=Homelab dockerctl: re-open the helper socket after a failure
+Documentation=file://{{ dashboard_dockerctl_script }}
+StartLimitIntervalSec={{ dashboard_dockerctl_recover_start_limit_interval }}
+StartLimitBurst={{ dashboard_dockerctl_recover_start_limit_burst }}
+
+[Service]
+Type=oneshot
+# Only when the socket really is failed (exit 1 = not failed: skip quietly).
+ExecCondition=/usr/bin/systemctl is-failed --quiet homelab-dockerctl.socket
+ExecStartPre=/usr/bin/sleep {{ dashboard_dockerctl_recover_delay_seconds }}
+ExecStart=/usr/bin/systemctl restart homelab-dockerctl.socket
+TimeoutStartSec={{ dashboard_dockerctl_recover_delay_seconds | int + 60 }}
+SyslogIdentifier=homelab-dockerctl-recover
+# systemctl only talks to PID 1 over its private Unix socket. Capabilities are left at root's
+# defaults so the manager keeps authorizing the restart.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadOnlyPaths=/run
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service

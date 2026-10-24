@@ -11,7 +11,11 @@
     mode: "0640"
     force: false
 
-- name: Media | Sonarr, Radarr and Prowlarr presets (URL base, forms login required)
+# No AuthenticationMethod on purpose: with Forms preset but no user yet, the app shows a login form nobody
+# can pass. Unset (None) + AuthenticationRequired=Enabled makes the app open its "Authentication Required"
+# setup modal on first visit; the owner picks Forms and creates the login there (first-run-apps.md §3).
+# Until then the app is unauthenticated to anyone who can reach it (tailnet via serve, the media network).
+- name: Media | Sonarr, Radarr and Prowlarr presets (URL base, login required)
   ansible.builtin.template:
     src: presets/arr-config.xml.j2
     dest: "{{ homelab_data_dir }}/{{ item }}/config.xml"

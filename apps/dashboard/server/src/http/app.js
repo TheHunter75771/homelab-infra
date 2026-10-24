@@ -3,13 +3,15 @@ import { ActionError, actionView, APP_ACTIONS } from '../actions.js';
 import { AccessDenied } from '../access.js';
 import { APP_NAME_RE } from '../catalog.js';
 import { DockerInactiveError } from '../helper/client.js';
+import { heldByGate } from '../collectors/apps.js';
+import { readGateStatus } from '../collectors/gate.js';
 import { buildPayload, sendToAll, TEST_MESSAGE } from '../push/sender.js';
 import { StoreCorruptError, StoreFullError, ValidationError, toDevice } from '../push/store.js';
 import { VapidError } from '../push/vapid.js';
 import { parseLogItem } from '../redact.js';
 import { SettingsError } from '../settings.js';
 import { forAccess } from '../summary.js';
-import { checkWriteGuards, HttpError, openSse, parseTarget, readJsonBody, sendJson, SSE_MAX_BUFFER } from './common.js';
+import { checkReadGuards, checkWriteGuards, HttpError, openSse, parseTarget, readJsonBody, sendJson, SSE_MAX_BUFFER } from './common.js';
 
 export const DEFAULT_TEST_COOLDOWN_MS = 10_000;
 export const MAX_EVENT_STREAMS = 32;
@@ -81,6 +83,8 @@ export function createApp({
   secrets,
   refreshSecrets,
   sseMaxBuffer = SSE_MAX_BUFFER,
+  logStartBurst = 10, // log streams that may start at once...
+  logStartPerSecond = 5, // ...and per second after that: each start is one helper socket activation
   testCooldownMs = DEFAULT_TEST_COOLDOWN_MS,
   clock = () => Date.now(),
 }) {
@@ -103,6 +107,37 @@ export function createApp({
     return release;
   }
   const gone = (req, res) => res.destroyed || res.writableEnded || req.socket?.destroyed === true;
+
+  // Token bucket on log-stream starts. The 8-stream cap bounds how many run at once, not how fast they churn: an
+  // open-and-abort loop would otherwise be one helper activation per request.
+  const logBucket = { tokens: logStartBurst, at: clock() };
+  function takeLogStartToken() {
+    const now = clock();
+    logBucket.tokens = Math.min(logStartBurst, logBucket.tokens + ((now - logBucket.at) / 1000) * logStartPerSecond);
+    logBucket.at = now;
+    if (logBucket.tokens < 1) return false;
+    logBucket.tokens -= 1;
+    return true;
+  }
+
+  // 409 with the reason the UI shows unless docker.service is active right now; 503 if the helper is unreachable.
+  async function requireDocker(app) {
+    let state;
+    try {
+      state = await docker.dockerState();
+    } catch {
+      throw new HttpError(503, "Can't reach the Docker helper.");
+    }
+    if (state === 'active') return;
+    let gateStatus = 'unknown';
+    try {
+      gateStatus = readGateStatus(cfg).status;
+    } catch {
+      // unreadable: not known to be holding
+    }
+    const mediaGated = cfg.apps[app]?.mediaGated ?? summary.core()?.apps?.find((a) => a.name === app)?.mediaGated;
+    throw new HttpError(409, heldByGate(gateStatus, mediaGated) ? 'Held by the boot gate until the media drive is back.' : "Docker isn't running.");
+  }
 
   function devicesOrError() {
     try {
@@ -280,11 +315,22 @@ export function createApp({
       const follow = ['1', 'true'].includes(query.get('follow') ?? '');
       const since = query.get('since');
       if (since !== null && Number.isNaN(Date.parse(since))) throw new HttpError(400, 'since must be an ISO time');
-      const core = summary.core();
-      if (core && core.dockerState !== 'active') {
-        throw new HttpError(409, core.gateStatus === 'failed' ? 'Held by the boot gate until the media drive is back.' : "Docker isn't running.");
-      }
+      // Cheap refusals first, helper last: the slot and a rate token are taken before any helper call, so a
+      // refused or flooding request costs the helper nothing.
       const release = reserveSlot('logs', MAX_LOG_STREAMS, res, 'too many log streams');
+      if (!takeLogStartToken()) {
+        release();
+        throw new HttpError(429, 'too many log streams opened; try again in a moment', { 'Retry-After': '1' });
+      }
+      // docker-state (single-flight, reused for about 1 s): the cached summary can be ~10 s old, and a stream must
+      // not open just to fail.
+      try {
+        await requireDocker(name);
+      } catch (err) {
+        release();
+        throw err;
+      }
+      if (gone(req, res)) return release();
       refreshSecrets?.(); // keys from the config files, whether or not the app is up
       const sse = openSse(req, res, { log, label: `logs:${name}`, registry: streams, maxBuffer: sseMaxBuffer });
       const ctrl = new AbortController();
@@ -442,6 +488,8 @@ export function createApp({
     if (m.route.method !== 'GET') {
       checkWriteGuards(req);
       body = await readJsonBody(req);
+    } else if (pathname.startsWith('/api/')) {
+      checkReadGuards(req);
     }
     return handlers[m.route.handler](req, res, { params: m.params, body, query, access: acc });
   }

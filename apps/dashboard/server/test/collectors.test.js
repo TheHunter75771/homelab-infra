@@ -166,8 +166,12 @@ test('app status matrix', () => {
     [{ ps: ps('exited'), dockerState: 'active', gateStatus: 'media-lost', mediaGated: true }, 'held'],
     [{ ps: ps('exited'), dockerState: 'active', gateStatus: 'media-lost', mediaGated: false }, 'down'],
     [{ ps: null, dockerState: 'inactive', gateStatus: 'failed' }, 'held'],
-    [{ ps: null, dockerState: 'inactive', gateStatus: 'ok' }, 'stopped'],
-    [{ ps: null, dockerState: 'failed', gateStatus: 'ok' }, 'stopped'],
+    [{ ps: null, dockerState: 'inactive', gateStatus: 'media-lost', mediaGated: true }, 'held'],
+    [{ ps: null, dockerState: 'inactive', gateStatus: 'media-lost', mediaGated: false }, 'unknown'], // media-lost holds the media stack only
+    [{ ps: null, dockerState: 'inactive', gateStatus: 'waiting' }, 'held'],
+    [{ ps: null, dockerState: 'inactive', gateStatus: 'ok' }, 'unknown'], // live-restore: may still be serving
+    [{ ps: null, dockerState: 'failed', gateStatus: 'ok' }, 'unknown'],
+    [{ ps: null, dockerState: 'inactive', gateStatus: 'unknown' }, 'unknown'],
     [{ ps: null, dockerState: 'active', gateStatus: 'ok' }, 'down'],
     [{ ps: ps('running', 'healthy'), dockerState: 'active', gateStatus: 'ok', action: { kind: 'update' } }, 'updating'],
     [{ ps: ps('exited'), dockerState: 'active', gateStatus: 'ok', action: { kind: 'start' } }, 'starting'],
@@ -236,7 +240,7 @@ test('alerts: lost -> back resolves earlier ones of the same tag; untagged/test/
     ['Media drive lost', 'resolved'],
     ['Backup failed', 'info'],
   ]);
-  assert.deepEqual(Object.keys(out[0]), ['ts', 'title', 'body', 'tag', 'delivered', 'failed', 'state']);
+  assert.deepEqual(Object.keys(out[0]), ['ts', 'title', 'body', 'tag', 'delivered', 'failed', 'state', 'note']);
 });
 
 test('backups: ok / stale / failed / none / unknown', (t) => {
@@ -279,7 +283,7 @@ test('issues: backups, drive threshold, docker failed, unhealthy app, Usenet log
     ['warn', 'Indexer A renewal date has passed.'],
   ]);
   const failed = buildIssues({ ...base, apps: [], backups: { status: 'failed' }, docker: { state: 'failed' } }, { now });
-  assert.deepEqual(failed.slice(0, 2).map((i) => i.text), ['Docker failed to start.', 'The last nightly backup failed.']);
+  assert.deepEqual(failed.slice(0, 2).map((i) => i.text), ["Docker isn't running.", 'The last nightly backup failed.']);
 });
 
 // ---- media --------------------------------------------------------------------------------------------
@@ -509,8 +513,10 @@ test('stoppedReason: gate (held), docker-down, intentional (stopped on purpose o
   const mk = (over) => buildApps({ cfg, psList: null, declared: null, dockerState: 'active', gateStatus: 'ok', stopped: new Set(), actions: new Map(), ...over });
   assert.ok(mk({ dockerState: 'inactive', gateStatus: 'failed' }).every((a) => a.status === 'held' && a.stoppedReason === 'gate'));
   assert.ok(mk({ dockerState: 'unknown', gateStatus: 'failed' }).every((a) => a.stoppedReason === 'gate'), 'helper down on a failed boot: still the gate');
-  assert.ok(mk({ dockerState: 'inactive', gateStatus: 'ok' }).every((a) => a.status === 'stopped' && a.stoppedReason === 'docker-down'));
-  assert.ok(mk({ dockerState: 'failed', gateStatus: 'ok' }).every((a) => a.stoppedReason === 'docker-down'));
+  assert.ok(mk({ dockerState: 'inactive', gateStatus: 'ok' }).every((a) => a.status === 'unknown' && a.stoppedReason === 'docker-down'));
+  assert.ok(mk({ dockerState: 'failed', gateStatus: 'ok' }).every((a) => a.status === 'unknown' && a.stoppedReason === 'docker-down'));
+  assert.ok(mk({ dockerState: 'inactive', gateStatus: 'waiting' }).every((a) => a.status === 'held' && a.stoppedReason === 'gate'));
+  assert.ok(mk({ dockerState: 'unknown', gateStatus: 'ok' }).every((a) => a.status === 'unknown' && a.stoppedReason === null), 'helper unreachable: no claim about Docker');
   const ps = [
     { name: 'sonarr', state: 'exited', health: null },
     { name: 'radarr', state: 'exited', health: null },

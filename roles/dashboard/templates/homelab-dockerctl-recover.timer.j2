@@ -1,0 +1,13 @@
+# {{ ansible_managed }}
+# Retry for homelab-dockerctl-recover.service: if a sustained flood used up the service's start
+# budget, the socket would otherwise stay failed. Wall-clock based (OnCalendar), so a refused start
+# can't make the timer re-fire in a tight loop. The service does nothing unless the socket is failed.
+[Unit]
+Description=Homelab dockerctl: periodic check that the helper socket is open
+
+[Timer]
+OnCalendar={{ dashboard_dockerctl_recover_calendar }}
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

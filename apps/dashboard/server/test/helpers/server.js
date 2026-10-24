@@ -36,6 +36,7 @@ export async function startDashboard(t, scenario = 'normal', opts = {}) {
     webpush: opts.webpush,
     access: opts.access,
     actionOptions: { pollMs: 20, healthTimeoutMs: 2000, rerunPickupMs: 1500, rerunTimeoutMs: 2000, ...(opts.actionOptions ?? {}) },
+    dockerOptions: opts.dockerOptions,
     appOptions: opts.appOptions,
   });
   await new Promise((resolve) => dash.server.listen(0, '127.0.0.1', resolve));
