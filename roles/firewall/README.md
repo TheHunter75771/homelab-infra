@@ -17,7 +17,10 @@ UFW plus a DOCKER-USER guard (docs/CONTRACTS.md §7, module A).
 The tailnet SSH rule is never absent while UFW is enabled: it's added (or kept) before anything is
 deleted, and UFW swaps its user chain atomically. A second run changes nothing. Rules: SSH on
 `tailscale0`; SSH from `gaming_pc_lan_ip` on `lan_iface`; 8096/tcp from `lan_cidr` on `lan_iface`;
-9999/tcp on `tailscale0`. Nothing on `wifi_iface`. (No 7359/udp: Jellyfin's discovery broadcasts can't
+9999/tcp on `tailscale0`; 53/udp+tcp in from `172.16.0.0/12` (Docker's pools) to `docker_dns_ip`
+(resolved's Docker-facing stub); **53/udp+tcp denied out** to everything, so no plaintext DNS leaves
+the host (loopback to the 127.0.0.53 stub is accepted earlier by UFW's `before.rules`, and resolved
+talks to its upstreams over TLS on 853). Nothing on `wifi_iface`. (No 7359/udp: Jellyfin's discovery broadcasts can't
 reach a bridge-network container.) `IPV6=yes` is enforced so the policy
 covers IPv6. The role refuses to run if UFW's own before/after rule files touch DOCKER-USER (the
 ufw-docker recipe), since a UFW reload would then flush the guard below.
@@ -30,7 +33,9 @@ Docker-published ports are DNATed before UFW's INPUT rules see them, so `homelab
   container from the Wi-Fi uplink, but replies to the containers' own outbound traffic still flow, so
   cloudflared and the apps keep working when the Wi-Fi is the failover route);
 - `-s 100.64.0.0/10 ! -i tailscale0 -j DROP` (the backup Wi-Fi hands out tailnet-range addresses);
-- the same pair in ip6tables (`fd7a:115c:a1e0::/48`) when Docker has an IPv6 DOCKER-USER chain.
+- `-p udp --dport 53 -j DROP` and `-p tcp --dport 53 -j DROP`: containers can't query a DNS server
+  directly; they resolve through the host's stub on `docker_dns_ip` (INPUT, not forwarded);
+- the same rules in ip6tables (tailnet range `fd7a:115c:a1e0::/48`) when Docker has an IPv6 DOCKER-USER chain.
 
 Each rule is checked with `-C` before `-I` and carries a `homelab-du-<name>-<fingerprint>` comment tag,
 where the fingerprint is a hash of the rule's exact match. Any change to a rule (a renamed `wifi_iface`,

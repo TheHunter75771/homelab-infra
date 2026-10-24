@@ -1,12 +1,17 @@
 ---
-# A restart (not a reload) is what makes resolved bind or release the stub listener.
+# A restart (not a reload) is what makes resolved bind or release its stub listeners.
 - name: Restart systemd-resolved
   ansible.builtin.systemd_service:
     name: systemd-resolved.service
     state: restarted
 
-# Re-reads .network files and reconfigures only the links they match (here the Wi-Fi uplink);
-# the LAN link isn't touched. Never `netplan apply`.
-- name: Reload systemd-networkd config (dns)
-  ansible.builtin.command: networkctl reload
-  changed_when: true
+# Restart, never `networkctl reload`/`reconfigure` and never `netplan apply`. A reload
+# reconfigures every link whose .network changed, which stops its DHCP client; SendRelease=
+# defaults to yes, so the LAN lease is released and the address (and Ansible's SSH path) drops
+# until it's re-acquired. Since systemd 257, a networkd restart keeps DHCPv4/DHCPv6/NDISC
+# configuration unconditionally ("can be restarted without disturbing ongoing connections",
+# NEWS for 257), then applies the new .network settings.
+- name: Restart systemd-networkd (dns)
+  ansible.builtin.systemd_service:
+    name: systemd-networkd.service
+    state: restarted

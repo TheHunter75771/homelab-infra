@@ -1,4 +1,13 @@
 ---
+- name: Interface and Docker DNS variables are set
+  ansible.builtin.assert:
+    that:
+      - lan_iface | default('') | length > 0
+      - wifi_iface | default('') | length > 0
+      - docker_dns_ip | default('') | length > 0
+    fail_msg: Set lan_iface and wifi_iface (host_vars) and docker_dns_ip (group_vars).
+    quiet: true
+
 - name: Systemd-resolved is installed
   ansible.builtin.apt:
     name: systemd-resolved
@@ -14,8 +23,8 @@
 
 # Drop-ins are read in name order and later files win; "zz-" sorts after any name, so this
 # beats a DNSStubListener= anywhere else (the host's resolved.conf sets it to "no", left from
-# AdGuard) and its reset-then-set DNS= lists replace any earlier ones.
-- name: Resolved runs the stub with the declared upstreams
+# AdGuard) and its reset-then-set lists replace any earlier ones.
+- name: Resolved runs the stubs with strict DNS-over-TLS to the declared upstreams
   ansible.builtin.template:
     src: resolved-homelab.conf.j2
     dest: /etc/systemd/resolved.conf.d/zz-homelab.conf
@@ -31,31 +40,45 @@
   loop: "{{ dns_stale_dropins }}"
   notify: Restart systemd-resolved
 
-- name: Wi-Fi interface is set
-  ansible.builtin.assert:
-    that:
-      - wifi_iface | default('') | length > 0
-    fail_msg: Set wifi_iface in host_vars.
-    quiet: true
-
-# A drop-in for netplan's generated /run/systemd/network/10-netplan-<iface>.network; netplan
-# itself isn't edited (`netplan apply` can bounce the LAN link mid-run).
-- name: Wi-Fi network drop-in directory exists
+# Must be in place before the networkd restart handler runs (handlers run at the flush below).
+- name: Networkd drop-in directory exists
   ansible.builtin.file:
-    path: "/etc/systemd/network/10-netplan-{{ wifi_iface }}.network.d"
+    path: /etc/systemd/networkd.conf.d
     state: directory
     owner: root
     group: root
     mode: "0755"
 
-- name: DNS servers learned on the Wi-Fi uplink are ignored
+- name: Networkd leaves Tailscale's routing policy rules alone
   ansible.builtin.template:
-    src: wifi-no-dns.conf.j2
-    dest: "/etc/systemd/network/10-netplan-{{ wifi_iface }}.network.d/zz-homelab.conf"
+    src: networkd-homelab.conf.j2
+    dest: /etc/systemd/networkd.conf.d/zz-homelab.conf
     owner: root
     group: root
     mode: "0644"
-  notify: Reload systemd-networkd config (dns)
+  notify: Restart systemd-networkd (dns)
+
+# Drop-ins for netplan's generated /run/systemd/network/10-netplan-<iface>.network; netplan
+# itself isn't edited (`netplan apply` can bounce the LAN link mid-run).
+- name: Network drop-in directories exist
+  ansible.builtin.file:
+    path: "/etc/systemd/network/10-netplan-{{ item }}.network.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ dns_ignore_link_dns }}"
+
+# Applied by restarting systemd-networkd, never by `networkctl reload` (see the handler).
+- name: DNS servers learned on the LAN and Wi-Fi links are ignored
+  ansible.builtin.template:
+    src: link-no-dns.conf.j2
+    dest: "/etc/systemd/network/10-netplan-{{ item }}.network.d/zz-homelab.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ dns_ignore_link_dns }}"
+  notify: Restart systemd-networkd (dns)
 
 - name: Resolv.conf points at the resolved stub
   ansible.builtin.file:
@@ -71,7 +94,15 @@
     enabled: true
     state: started
 
-- name: Apply resolved changes before checking them
+# tailscaled restores deleted rules within about a second, so "lookup 52 is present" alone proves
+# nothing; its journal since this moment shows whether networkd deleted them at all.
+- name: Note the time just before networkd and resolved changes are applied
+  ansible.builtin.command: date +%s
+  register: dns_flush_epoch
+  changed_when: false
+  check_mode: false
+
+- name: Apply resolved and networkd changes before checking them
   ansible.builtin.meta: flush_handlers
 
 - name: Stub resolver answers on 127.0.0.53:53
@@ -80,22 +111,76 @@
     port: 53
     timeout: 15
 
+# Only once the Docker bridge address exists (it doesn't before Docker's first start).
+- name: Docker-facing stub answers on the bridge address
+  ansible.builtin.wait_for:
+    host: "{{ docker_dns_ip }}"
+    port: 53
+    timeout: 15
+  when: docker_dns_ip in ansible_facts.all_ipv4_addresses | default([])
+
+# networkd hands the new link settings to resolved asynchronously after its restart.
 - name: Read resolved's DNS servers
   ansible.builtin.command: resolvectl dns
   register: dns_servers
   changed_when: false
   check_mode: false
+  until: >-
+    (dns_servers.stdout_lines | select('match', '^Link ') | reject('match', '^Link [0-9]+ \([^)]*\):\s*$') | list | length == 0)
+    and ((dns_servers.stdout_lines | select('match', '^Global:') | first | default('Global:'))
+         | regex_replace('^Global:\s*', '') | split()) == dns_upstreams
+  retries: 10
+  delay: 3
 
-- name: No lookup depends on Tailscale MagicDNS, and the declared upstreams are in use
+# After the until-loop above: link reconfiguration has finished, so a rule deletion by the
+# restarted networkd would have happened (and been logged by tailscaled) by now.
+- name: Read the routing policy rules
+  ansible.builtin.command: ip rule show
+  register: dns_ip_rules
+  changed_when: false
+  check_mode: false
+
+- name: Read tailscaled's log since the networkd restart
+  ansible.builtin.command: >-
+    journalctl -u tailscaled.service --since @{{ dns_flush_epoch.stdout }} --no-pager -o cat
+  register: dns_tailscaled_log
+  changed_when: false
+  check_mode: false
+
+- name: Networkd left Tailscale's routing policy rules alone
   ansible.builtin.assert:
     that:
-      - "'100.100.100.100' not in dns_servers.stdout"
-      - dns_global == dns_upstreams
+      - "'lookup 52' in dns_ip_rules.stdout"
+      - dns_tailscaled_log.stdout_lines | select('search', 'deleted ip rules') | list | length == 0
     fail_msg: >-
-      resolved's servers: {{ dns_servers.stdout_lines }}. Expected global {{ dns_upstreams }} and no
-      MagicDNS (100.100.100.100; Tailscale accept-dns must be off on the server).
+      Tailscale's ip rules were deleted since the networkd restart
+      ({{ dns_tailscaled_log.stdout_lines | select('search', 'deleted ip rules') | list | length }} log lines;
+      'lookup 52' present: {{ 'lookup 52' in dns_ip_rules.stdout }}). Check
+      /etc/systemd/networkd.conf.d/zz-homelab.conf; `systemctl restart tailscaled` restores the rules.
+    quiet: true
+
+- name: Read resolved's DNS-over-TLS mode
+  ansible.builtin.command: >-
+    busctl get-property org.freedesktop.resolve1 /org/freedesktop/resolve1
+    org.freedesktop.resolve1.Manager DNSOverTLS
+  register: dns_dot
+  changed_when: false
+  check_mode: false
+
+- name: Strict DoT to exactly the declared upstreams; no link-learned servers, no MagicDNS
+  ansible.builtin.assert:
+    that:
+      - dns_dot.stdout == 's "' ~ dns_over_tls ~ '"'
+      - dns_global == dns_upstreams
+      - dns_link_servers | length == 0
+      - "'100.100.100.100' not in dns_servers.stdout"
+    fail_msg: >-
+      DNSOverTLS={{ dns_dot.stdout }} (want {{ dns_over_tls }}); global {{ dns_global }} (want {{ dns_upstreams }});
+      links with servers: {{ dns_link_servers }}.
     quiet: true
   vars:
     dns_global: >-
       {{ (dns_servers.stdout_lines | select('match', '^Global:') | first | default('Global:'))
          | regex_replace('^Global:\s*', '') | split() }}
+    dns_link_servers: >-
+      {{ dns_servers.stdout_lines | select('match', '^Link ') | reject('match', '^Link [0-9]+ \([^)]*\):\s*$') | list }}

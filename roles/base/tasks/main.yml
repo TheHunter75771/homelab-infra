@@ -64,6 +64,26 @@
     mode: "0644"
   notify: Reload systemd units (base)
 
+- name: Chrony is installed
+  ansible.builtin.apt:
+    name: chrony
+    state: present
+
+- name: Chrony service is enabled and running
+  ansible.builtin.systemd_service:
+    name: chrony.service
+    enabled: true
+    state: started
+
+- name: Chrony has time sources that don't need DNS
+  ansible.builtin.template:
+    src: chrony-homelab-fallback.sources.j2
+    dest: /etc/chrony/sources.d/homelab-fallback.sources
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload chrony sources (base)
+
 - name: APT timers that drive unattended-upgrades are enabled
   ansible.builtin.systemd_service:
     name: "{{ item }}"

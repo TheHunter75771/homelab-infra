@@ -19,6 +19,24 @@
       {{ docker_compose_min_version }}; upgrade docker-compose-plugin first.
     quiet: true
 
+# Consistency of the network settings in daemon.json:
+# - the DNS address containers use is docker0's own address (where resolved listens), i.e. the bip;
+# - the address pools sit inside 172.16.0.0/12 and overlap neither docker0, hl-public nor each other.
+- name: Container DNS and address pools are consistent
+  vars:
+    docker_pool_problems: >-
+      {{ docker_address_pools | docker_address_pool_problems(docker_address_pools_container,
+                                                              [docker_dns_bip] + docker_address_pools_avoid) }}
+  ansible.builtin.assert:
+    that:
+      - docker_dns_ip is match('^([0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - docker_dns_bip is match('^' ~ (docker_dns_ip | regex_escape) ~ '/[0-9]{1,2}$')
+      - docker_pool_problems | length == 0
+    fail_msg: >-
+      docker_dns_bip ({{ docker_dns_bip }}) must be docker_dns_ip ({{ docker_dns_ip }}) plus a prefix length,
+      and the address pools must be valid: {{ docker_pool_problems | join('; ') | default('ok', true) }}
+    quiet: true
+
 - name: Docker config directory exists
   ansible.builtin.file:
     path: /etc/docker
@@ -42,7 +60,8 @@
     name: docker.service
     enabled: true
 
-# log-driver and userland-proxy are not reloadable, so a changed daemon.json needs a restart.
-# Do it now, before role stacks creates containers, not at the end of the play.
+# log-driver, userland-proxy, bip and dns are not reloadable, so a changed daemon.json needs a restart.
+# Do it now, before role stacks creates containers, not at the end of the play. The handler chain never
+# starts the boot gate (see handlers/main.yml).
 - name: Apply a changed daemon config before any stack is deployed
   ansible.builtin.meta: flush_handlers

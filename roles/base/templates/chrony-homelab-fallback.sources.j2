@@ -1,0 +1,7 @@
+# {{ ansible_managed }}
+# Fallback time sources that work without DNS. The NTS pools (ubuntu-ntp-pools.sources) are
+# hostnames, and DNS here is strict DNS-over-TLS, which fails if the clock is badly wrong. These
+# let chrony fix the clock first; the NTS sources are marked "prefer" and win once they're reachable.
+{% for server in base_ntp_fallback_servers %}
+server {{ server }} iburst
+{% endfor %}

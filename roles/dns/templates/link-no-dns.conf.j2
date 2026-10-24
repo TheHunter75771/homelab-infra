@@ -1,0 +1,13 @@
+# {{ ansible_managed }}
+# Drop-in for netplan's generated 10-netplan-{{ item }}.network: never take DNS servers from this
+# link's DHCP or router advertisements. Only the declared DoT upstreams are used, and nothing
+# learned here reaches resolved's lists (including /run/systemd/resolve/resolv.conf).
+# Addresses and routes from the link are still used.
+[DHCPv4]
+UseDNS=no
+
+[DHCPv6]
+UseDNS=no
+
+[IPv6AcceptRA]
+UseDNS=no

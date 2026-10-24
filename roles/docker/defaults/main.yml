@@ -3,6 +3,12 @@
 # - live-restore: containers keep running while dockerd restarts (package upgrades).
 # - log-driver local: compact, rotated logs (10 MB x 3 per container), no per-stack logging blocks.
 # - userland-proxy false: published ports go through iptables DNAT only, no docker-proxy processes.
+# - dns / bip (docs/CONTRACTS.md §9d, encrypted-only DNS): containers resolve through the host's
+#   systemd-resolved (DNS-over-TLS), which also listens on docker0's address. On user-defined networks the
+#   embedded resolver (127.0.0.11) forwards to it; nothing queries an upstream in plaintext. bip pins
+#   docker0 to that address (it is the current value, so the bridge does not change).
+# - default-address-pools: every network Docker allocates (compose project networks) gets a /24 inside
+#   172.16.0.0/12, so it stays inside the firewall's DNS allow and never lands in 192.168.0.0/16 (home LANs).
 docker_daemon_config:
   live-restore: true
   log-driver: local
@@ -10,6 +16,22 @@ docker_daemon_config:
     max-size: 10m
     max-file: "3"
   userland-proxy: false
+  bip: "{{ docker_dns_bip }}"
+  dns:
+    - "{{ docker_dns_ip }}"
+  default-address-pools: "{{ docker_address_pools }}"
+
+# 172.20.0.0 - 172.27.255.255 in /24s (2048 networks). Clear of docker0 (172.17.0.0/16, the bip), of
+# hl-public (172.30.10.0/24) and of the compose networks created before the pools were pinned
+# (172.18.0.0/16, 172.19.0.0/16): those keep their subnets; only newly created networks use the pools.
+docker_address_pools:
+  - { base: 172.20.0.0/14, size: 24 }
+  - { base: 172.24.0.0/14, size: 24 }
+# Every pool must sit inside this range (the UFW rule for container DNS allows 172.16.0.0/12).
+docker_address_pools_container: 172.16.0.0/12
+# Networks the pools must not overlap, besides docker0 (docker_dns_bip, always checked).
+docker_address_pools_avoid:
+  - 172.30.10.0/24   # hl-public (role stacks, stacks_public_subnet)
 
 # community.docker.docker_compose_v2 needs the compose plugin at this version or newer.
 docker_compose_min_version: "2.18.0"

@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  author: homelab-infra
+  description: Nightly integrity-checked app-data archives (sqlite .backup + manifest), keep 14, LAST_OK, failure push.
+  license: MIT
+  min_ansible_version: "2.17"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - all
+dependencies: []

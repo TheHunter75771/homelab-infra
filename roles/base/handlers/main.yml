@@ -9,3 +9,8 @@
 - name: Reload systemd units (base)
   ansible.builtin.systemd_service:
     daemon_reload: true
+
+# Re-reads the *.sources files; no chronyd restart needed.
+- name: Reload chrony sources (base)
+  ansible.builtin.command: chronyc reload sources
+  changed_when: true

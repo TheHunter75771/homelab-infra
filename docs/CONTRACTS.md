@@ -120,7 +120,7 @@ This is the single spec for the MVP build. Builders own exactly the paths listed
 ## 9. Lead-owned files
 `ansible.cfg`, `requirements.yml`, `inventory/**`, `playbooks/bootstrap.yml`, `playbooks/site.yml`, `docs/CONTRACTS.md`, `README.md`, `CLAUDE.md`, `.github/workflows/ci.yml`, `.gitignore`, lint configs.
 
-`playbooks/site.yml` order (hosts `media_servers`, become): base → users → ssh_hardening → tailscale → dns → watchdog → storage → docker → bootgate → firewall → notifier → stacks → tailscale_serve → backups.
+`playbooks/site.yml` order (hosts `media_servers`, become): base → users → ssh_hardening → tailscale → dns → watchdog → storage → firewall → docker → bootgate → notifier → stacks → tailscale_serve → backups (firewall moved before docker, review L1).
 
 ## 9b. Ownership of shared paths (amended)
 - `{{ homelab_push_dir }}`: owner and mode set **only** by `stacks` (`pushcore` 10101). The notifier, backups and heartbeat read it and never chown or chmod it.
@@ -138,6 +138,23 @@ This is the single spec for the MVP build. Builders own exactly the paths listed
 - The push-core `/api/test` is human-triggered and exempt from rehearsal.
 - Logs never contain push endpoints (notifier, heartbeat, push-core).
 - Collections and control-node tools are pinned (`requirements.yml`, `requirements-tools.txt`).
+
+## 9d. Encrypted-only DNS (decided 2026-10-24)
+- **dns (A):**
+  - **Strict** DNS-over-TLS: `DNSOverTLS=yes`, with cert names `DNS=1.1.1.1#cloudflare-dns.com 9.9.9.9#dns.quad9.net` and `FallbackDNS=1.0.0.1#cloudflare-dns.com 149.112.112.112#dns.quad9.net`.
+  - The LAN link ignores DHCP/RA DNS (`UseDNS=no`, as on the Wi-Fi link). Apply it without bouncing the LAN.
+  - `DNSStubListenerExtra={{ docker_dns_ip }}`.
+- **docker (C):** `daemon.json` gets `"dns": ["{{ docker_dns_ip }}"]` and `"bip": "{{ docker_dns_bip }}"`. Containers' embedded DNS forwards to the host's resolved.
+- **firewall (A):**
+  - UFW allows 53/udp+tcp **in** from 172.16.0.0/12 to `{{ docker_dns_ip }}`.
+  - UFW **denies 53/udp+tcp out** to everything (loopback is unaffected).
+  - DOCKER-USER drops forwarded `--dport 53` (udp+tcp), v4 and v6.
+  - Result: no plaintext DNS leaves the host.
+- **Verify (Integrator):**
+  - `resolvectl` shows +DNSOverTLS, with only the declared upstreams.
+  - A container lookup works.
+  - A direct plaintext query to 1.1.1.1:53 fails from both the host and a container.
+  - Established upstream connections are on :853 only.
 
 ## 10. Module ownership
 | Module | Builder owns |

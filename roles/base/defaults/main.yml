@@ -14,3 +14,9 @@ base_journald_system_max_use: 500M
 
 # Seconds systemd-networkd-wait-online waits for lan_iface to be routable at boot.
 base_wait_online_timeout: 60
+
+# IP-literal plain-NTP sources (Cloudflare anycast time). They need no DNS, so they break the
+# loop "clock badly wrong -> TLS fails -> no DNS (strict DoT) -> NTS hostnames unresolvable".
+base_ntp_fallback_servers:
+  - 162.159.200.123
+  - 162.159.200.1

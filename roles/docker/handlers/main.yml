@@ -1,5 +1,69 @@
 ---
-- name: Restart docker
+# Notified when daemon.json changes; flushed at the end of role docker (before any stack is deployed).
+#
+# Boot gate safety: role bootgate's drop-in makes docker.service Requires= bootgate.service. Restarting a
+# running docker is fine (the gate is already active, RemainAfterExit), but anything that STARTS docker
+# would also start the gate, i.e. re-run `bootgate check --boot`, which may power-cycle the box. So docker
+# is restarted only when it is running and the gate is active, or the gate is not installed yet
+# (first deploy: role docker runs before role bootgate). A stopped docker reads the new daemon.json
+# when the gate starts it. bootgate.service itself is never restarted here.
+#
+# Live restore keeps containers running across the daemon restart, but each one keeps the DNS servers it
+# started with. Running containers are restarted once so they use the new `dns` setting.
+
+- name: Read the docker unit state
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=ActiveState, docker.service]
+  register: docker_unit_state
+  changed_when: false
+  listen: Restart docker
+
+- name: Read the boot gate unit state
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - --property=LoadState
+      - --property=ActiveState
+      - bootgate.service
+  register: docker_bootgate_unit_state
+  changed_when: false
+  listen: Restart docker
+
+- name: Restart docker (running docker, boot gate active or not installed)
   ansible.builtin.systemd_service:
     name: docker.service
     state: restarted
+  register: docker_daemon_restart
+  when:
+    - "'ActiveState=active' in docker_unit_state.stdout_lines"
+    - >-
+      'ActiveState=active' in docker_bootgate_unit_state.stdout_lines
+      or 'LoadState=not-found' in docker_bootgate_unit_state.stdout_lines
+  listen: Restart docker
+
+- name: Report why docker was not restarted
+  ansible.builtin.debug:
+    msg: >-
+      daemon.json changed, but docker was not restarted: docker is {{ docker_unit_state.stdout | trim }} and
+      bootgate.service is {{ docker_bootgate_unit_state.stdout_lines | join(' ') }}. Restarting it now could
+      start the boot gate. Docker reads the new config the next time the gate starts it.
+  when: docker_daemon_restart is skipped
+  listen: Restart docker
+
+- name: List running containers (they keep their old DNS servers across a live restore)
+  ansible.builtin.command:
+    argv: [docker, ps, --quiet]
+  register: docker_running_containers
+  changed_when: false
+  when: docker_daemon_restart is not skipped
+  listen: Restart docker
+
+- name: Restart running containers once so they use the daemon's DNS settings
+  ansible.builtin.command:
+    argv: "{{ ['docker', 'restart'] + docker_running_containers.stdout_lines }}"
+  changed_when: true
+  when:
+    - docker_daemon_restart is not skipped
+    - docker_running_containers.stdout_lines | default([]) | length > 0
+  listen: Restart docker

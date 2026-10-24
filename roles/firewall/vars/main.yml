@@ -1,6 +1,8 @@
 ---
 # Interface tailscaled creates (fixed name).
 firewall_tailnet_iface: tailscale0
+# Docker's address pools (container sources allowed to query the Docker-facing stub).
+firewall_docker_cidr: 172.16.0.0/12
 
 # The declared UFW rule set (docs/CONTRACTS.md §7), written exactly the way `ufw show added`
 # prints a rule (without the leading "ufw "). That makes "declared" and "present" directly
@@ -11,6 +13,12 @@ firewall_rules:
   - "allow in on {{ lan_iface }} from {{ gaming_pc_lan_ip }} to any port 22 proto tcp comment 'homelab: ssh from workstation'"
   - "allow in on {{ lan_iface }} from {{ lan_cidr }} to any port 8096 proto tcp comment 'homelab: jellyfin lan'"
   - "allow in on {{ firewall_tailnet_iface }} to any port 9999 proto tcp comment 'homelab: wol-relay over tailnet'"
+  # Encrypted-only DNS (§9d): containers reach resolved's stub on the Docker bridge address; no
+  # plaintext DNS leaves the host (loopback is accepted earlier, by UFW's before.rules).
+  - "allow from {{ firewall_docker_cidr }} to {{ docker_dns_ip }} port 53 proto udp comment 'homelab: container dns to resolved'"
+  - "allow from {{ firewall_docker_cidr }} to {{ docker_dns_ip }} port 53 proto tcp comment 'homelab: container dns to resolved'"
+  - "deny out 53/udp comment 'homelab: no plaintext dns out'"
+  - "deny out 53/tcp comment 'homelab: no plaintext dns out'"
 
 # Any rule matching this (with or without a comment) is never deleted, whatever else happens.
 firewall_lockout_guard_regex: "^allow in on {{ firewall_tailnet_iface | regex_escape }} to any port 22 proto tcp( comment .*)?$"

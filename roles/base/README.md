@@ -21,5 +21,26 @@ Host baseline (docs/CONTRACTS.md §7, module A).
   `netplan apply` can bounce the LAN link mid-run. The handler only reloads unit files; the new
   command applies from the next boot.
 
+- Time: chrony stays installed and running, and `/etc/chrony/sources.d/homelab-fallback.sources` adds
+  IP-literal plain-NTP servers (`base_ntp_fallback_servers`: Cloudflare's 162.159.200.123 and
+  162.159.200.1). The handler runs `chronyc reload sources`; chronyd isn't restarted.
+
+## Clock recovery (why the fallback exists)
+DNS here is strict DNS-over-TLS (role `dns`), and TLS needs a roughly correct clock. Ubuntu's NTS
+sources (`ubuntu-ntp-pools.sources`) are hostnames. So if the clock is badly wrong (dead RTC battery,
+BIOS reset), TLS fails, then DNS fails, then the NTS hostnames can't be resolved and the clock never
+gets fixed. The IP-literal sources need no DNS: chrony steps the clock from them during its first
+updates (`makestep 1 3`), then DoT and NTS work again. The NTS pools are marked `prefer`, so once
+they're reachable chrony prefers them over the plain sources. UDP 123 isn't blocked.
+
+If the clock drifts badly *after* boot (chrony only slews then), or it's stuck:
+```bash
+chronyc sources -v            # the 162.159.200.x sources should show as reachable (^+ or ^*)
+sudo chronyc makestep         # step to the current estimate now
+resolvectl query example.com  # DNS (DoT) works again once the clock is right
+```
+If no source is reachable at all, set the clock by hand (`sudo date -s '2026-10-24 12:00'`), then
+`sudo chronyc makestep`.
+
 Variables: `timezone` (group_vars), `lan_iface` (host_vars), `base_packages`,
-`base_journald_system_max_use`, `base_wait_online_timeout` (defaults).
+`base_journald_system_max_use`, `base_wait_online_timeout`, `base_ntp_fallback_servers` (defaults).

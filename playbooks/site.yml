@@ -11,9 +11,11 @@
     - role: dns
     - role: watchdog
     - role: storage
+    # firewall before docker: the docker role restarts containers with DNS pointed at the host
+    # stub (§9d), which needs the UFW allow in place first (review L1).
+    - role: firewall
     - role: docker
     - role: bootgate
-    - role: firewall
     - role: notifier
     - role: stacks
     - role: tailscale_serve

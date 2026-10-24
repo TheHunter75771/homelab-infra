@@ -6,7 +6,9 @@
 #     nothing can reach a container from it, while replies to the containers' own outbound
 #     traffic still flow when the Wi-Fi is the active (failover) route;
 #   - tailnet-range sources are dropped unless they arrive on {{ firewall_tailnet_iface }}
-#     (the backup Wi-Fi hands out addresses inside {{ firewall_tailnet_v4 }}).
+#     (the backup Wi-Fi hands out addresses inside {{ firewall_tailnet_v4 }});
+#   - forwarded DNS (53/udp+tcp) is dropped: containers resolve through the host's stub on
+#     {{ docker_dns_ip }} (DNS-over-TLS upstream), never straight to a plaintext server.
 # Idempotent: each rule is checked (-C) before it's inserted (-I). Every rule carries a tag made
 # of its name and a fingerprint of its exact match, so any change to a rule gives it a new tag.
 # After the declared rules are in place, tagged rules that are no longer declared are deleted.
@@ -14,9 +16,13 @@
 {% set wifi_match = '-i ' ~ (wifi_iface | quote) ~ ' -m conntrack --ctstate NEW,INVALID' %}
 {% set tailnet4_match = '-s ' ~ firewall_tailnet_v4 ~ ' ! -i ' ~ (firewall_tailnet_iface | quote) %}
 {% set tailnet6_match = '-s ' ~ firewall_tailnet_v6 ~ ' ! -i ' ~ (firewall_tailnet_iface | quote) %}
+{% set dnsudp_match = '-p udp --dport 53' %}
+{% set dnstcp_match = '-p tcp --dport 53' %}
 {% set wifi_tag = 'wifi-' ~ (wifi_match | hash('sha1'))[:10] %}
 {% set tailnet4_tag = 'tailnet4-' ~ (tailnet4_match | hash('sha1'))[:10] %}
 {% set tailnet6_tag = 'tailnet6-' ~ (tailnet6_match | hash('sha1'))[:10] %}
+{% set dnsudp_tag = 'dns-udp-' ~ (dnsudp_match | hash('sha1'))[:10] %}
+{% set dnstcp_tag = 'dns-tcp-' ~ (dnstcp_match | hash('sha1'))[:10] %}
 set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -68,11 +74,15 @@ if ! iptables -w -S DOCKER-USER >/dev/null 2>&1; then
 fi
 ensure iptables {{ wifi_tag }} {{ wifi_match }}
 ensure iptables {{ tailnet4_tag }} {{ tailnet4_match }}
-prune iptables {{ wifi_tag }} {{ tailnet4_tag }}
+ensure iptables {{ dnsudp_tag }} {{ dnsudp_match }}
+ensure iptables {{ dnstcp_tag }} {{ dnstcp_match }}
+prune iptables {{ wifi_tag }} {{ tailnet4_tag }} {{ dnsudp_tag }} {{ dnstcp_tag }}
 
 # Docker creates the IPv6 chain when ip6tables support is on (the default since Docker 27).
 if ip6tables -w -S DOCKER-USER >/dev/null 2>&1; then
 	ensure ip6tables {{ wifi_tag }} {{ wifi_match }}
 	ensure ip6tables {{ tailnet6_tag }} {{ tailnet6_match }}
-	prune ip6tables {{ wifi_tag }} {{ tailnet6_tag }}
+	ensure ip6tables {{ dnsudp_tag }} {{ dnsudp_match }}
+	ensure ip6tables {{ dnstcp_tag }} {{ dnstcp_match }}
+	prune ip6tables {{ wifi_tag }} {{ tailnet6_tag }} {{ dnsudp_tag }} {{ dnstcp_tag }}
 fi

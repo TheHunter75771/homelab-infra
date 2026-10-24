@@ -1,9 +1,11 @@
 # {{ ansible_managed }}
-# The only resolved drop-in the homelab uses. Named zz- so it's read last: the empty DNS= and
-# FallbackDNS= lines reset anything set earlier (resolved.conf or another drop-in) before the
-# declared lists are applied.
+# The only resolved drop-in the homelab uses. Named zz- so it's read last: the empty assignments
+# reset anything set earlier (resolved.conf or another drop-in) before the declared lists apply.
 [Resolve]
 DNSStubListener=yes
+# Second stub on the Docker bridge address; containers' DNS (daemon.json "dns") points here.
+DNSStubListenerExtra=
+DNSStubListenerExtra={{ docker_dns_ip }}
 DNS=
 DNS={{ dns_upstreams | join(' ') }}
 FallbackDNS=

@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Web Push subscription service and PWA for homelab alerts",
+  "license": "MIT",
   "type": "module",
   "main": "src/server.js",
   "engines": {

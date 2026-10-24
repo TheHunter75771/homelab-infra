@@ -1,16 +1,21 @@
 ---
-# Upstream resolvers for systemd-resolved (global, used for every link). These replace the
-# hand-made /etc/systemd/resolved.conf.d/custom-dns.conf, which the role removes.
+# Encrypted-only DNS (docs/CONTRACTS.md §9d). Upstreams as "address#tls-name": the name is
+# checked against the server's certificate and sent as SNI.
 dns_upstreams:
-  - 1.1.1.1
-  - 9.9.9.9
-# Used only when every upstream above (and every per-link server) is unreachable.
+  - "1.1.1.1#cloudflare-dns.com"
+  - "9.9.9.9#dns.quad9.net"
+# Used only when every upstream above is unreachable. Same TLS rules.
 dns_fallback:
-  - 1.0.0.1
-  - 149.112.112.112
-# Opportunistic: TLS to the upstream when it works, plain DNS otherwise (never breaks lookups).
-dns_over_tls: opportunistic
+  - "1.0.0.1#cloudflare-dns.com"
+  - "149.112.112.112#dns.quad9.net"
+# Strict: every query goes over TLS to a server whose certificate matches its name; there is no
+# plaintext fallback (and the firewall blocks 53/udp+tcp out anyway).
+dns_over_tls: "yes"
 dns_dnssec: allow-downgrade
+# Interfaces whose DHCP/RA-learned DNS servers are ignored (only the declared upstreams are used).
+dns_ignore_link_dns:
+  - "{{ lan_iface }}"
+  - "{{ wifi_iface }}"
 # Hand-made resolved drop-ins this role replaces.
 dns_stale_dropins:
   - /etc/systemd/resolved.conf.d/custom-dns.conf

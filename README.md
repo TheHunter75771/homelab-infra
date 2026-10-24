@@ -31,3 +31,6 @@ cp inventory/hosts.example.yml inventory/hosts.yml   # then fill inventory/host_
 ```
 Identifiers (hostnames, addresses, domains) live only in the git-ignored `inventory/host_vars/`.
 Secrets live only in the ansible-vault file.
+
+## License
+MIT. See [LICENSE](LICENSE).

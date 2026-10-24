@@ -16,3 +16,6 @@ mediasvc_gid: 1001
 media_group: media
 media_gid: 1002
 timezone: America/New_York
+# Default docker0 gateway; resolved also listens here so containers get encrypted DNS (CONTRACTS §9d).
+docker_dns_ip: 172.17.0.1
+docker_dns_bip: 172.17.0.1/16

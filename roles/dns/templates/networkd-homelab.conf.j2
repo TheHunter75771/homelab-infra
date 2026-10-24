@@ -1,0 +1,7 @@
+# {{ ansible_managed }}
+# Tailscale installs its own routing policy rules (priorities 5210-5270, "lookup 52"). When
+# systemd-networkd starts (including the restart this role does, and package upgrades) it deletes
+# every rule it didn't configure unless told not to; losing them breaks the tailnet path, and
+# Ansible's SSH over it. Tailscale's routes live on tailscale0, which networkd doesn't manage.
+[Network]
+ManageForeignRoutingPolicyRules=no
