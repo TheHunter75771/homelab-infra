@@ -32,5 +32,13 @@ cp inventory/hosts.example.yml inventory/hosts.yml   # then fill inventory/host_
 Identifiers (hostnames, addresses, domains) live only in the git-ignored `inventory/host_vars/`.
 Secrets live only in the ansible-vault file.
 
+## Runbooks
+- [Media drive lost or failed](docs/runbooks/media-drive-failure.md)
+- [Understanding the boot gate](docs/runbooks/failed-boot-gate.md)
+- [Rebuild from scratch](docs/runbooks/restore-from-scratch.md)
+- [Rotate a secret](docs/runbooks/rotate-a-secret.md)
+- [Cloudflare route](docs/runbooks/cloudflare.md) · [First-run app setup](docs/runbooks/first-run-apps.md)
+- Dashboard v2: [design brief](docs/design/dashboard-v2-brief.md)
+
 ## License
 MIT. See [LICENSE](LICENSE).
