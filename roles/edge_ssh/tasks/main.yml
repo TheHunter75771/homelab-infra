@@ -1,0 +1,6 @@
+---
+- name: Harden sshd
+  ansible.builtin.import_tasks: sshd.yml
+
+- name: Add fail2ban
+  ansible.builtin.import_tasks: fail2ban.yml

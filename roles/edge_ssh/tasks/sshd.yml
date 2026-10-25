@@ -1,0 +1,115 @@
+---
+# --- Preflight (read-only): our drop-in must be the first word on every keyword it sets ---------
+- name: Read the main sshd_config
+  ansible.builtin.slurp:
+    src: /etc/ssh/sshd_config
+  register: edge_ssh_main_config
+
+- name: List the sshd drop-ins
+  ansible.builtin.find:
+    paths: /etc/ssh/sshd_config.d
+    patterns: "*.conf"
+  register: edge_ssh_dropins
+
+- name: The drop-in directory is included before any line that sets one of our keywords
+  vars:
+    edge_ssh_main_lines: "{{ (edge_ssh_main_config.content | b64decode).splitlines() }}"
+    edge_ssh_include_lines: >-
+      {{ edge_ssh_main_lines | select('match', '\s*Include\s+/etc/ssh/sshd_config\.d/\*\.conf\s*$') | list }}
+    edge_ssh_keyword_lines: >-
+      {{ edge_ssh_main_lines
+         | select('match', '\s*(' ~ (edge_ssh_settings.keys() | join('|')) ~ ')\s', ignorecase=true) | list }}
+    edge_ssh_earlier_dropins: >-
+      {{ edge_ssh_dropins.files | map(attribute='path') | map('basename')
+         | select('lt', edge_ssh_dropin | basename) | list }}
+  ansible.builtin.assert:
+    that:
+      - edge_ssh_include_lines | length > 0
+      - >-
+        edge_ssh_keyword_lines | length == 0 or
+        edge_ssh_main_lines.index(edge_ssh_include_lines[0]) < edge_ssh_main_lines.index(edge_ssh_keyword_lines[0])
+      - edge_ssh_earlier_dropins | length == 0
+    fail_msg: >-
+      sshd keeps the first value it reads, so {{ edge_ssh_dropin }} only wins if
+      /etc/ssh/sshd_config includes sshd_config.d/*.conf before setting any of our keywords and no
+      drop-in sorts before it (found before it: {{ edge_ssh_earlier_dropins }}). Nothing was changed.
+    quiet: true
+
+- name: Look for an earlier version of our drop-in
+  ansible.builtin.stat:
+    path: "{{ edge_ssh_dropin }}"
+  register: edge_ssh_previous_stat
+
+- name: Keep the earlier drop-in in memory for a rollback
+  ansible.builtin.slurp:
+    src: "{{ edge_ssh_dropin }}"
+  register: edge_ssh_previous
+  when: edge_ssh_previous_stat.stat.exists
+
+# --- Install, validate and assert; any failure puts the previous state back, unreloaded --------
+- name: Install the sshd drop-in, then prove the whole configuration
+  block:
+    - name: The sshd drop-in is installed (checked alone with sshd -t -f first)
+      ansible.builtin.template:
+        src: 10-homelab-edge.conf.j2
+        dest: "{{ edge_ssh_dropin }}"
+        owner: root
+        group: root
+        mode: "0644"
+        validate: /usr/sbin/sshd -t -f %s
+      notify: Reload sshd
+
+    - name: The full sshd configuration is valid
+      ansible.builtin.command: /usr/sbin/sshd -t
+      changed_when: false
+
+    - name: Read the effective sshd settings
+      ansible.builtin.command: /usr/sbin/sshd -T
+      changed_when: false
+      register: edge_ssh_effective
+
+    - name: Every hardened setting is the effective one
+      vars:
+        edge_ssh_effective_map: "{{ dict(edge_ssh_effective.stdout_lines | select('search', ' ') | map('split', ' ', 1)) }}"
+        edge_ssh_actual: "{{ edge_ssh_effective_map[item.key | lower] | default('(unset)') }}"
+        edge_ssh_accepted: "{{ edge_ssh_effective_aliases[item.value | string] | default([item.value | string]) }}"
+      ansible.builtin.assert:
+        that:
+          - edge_ssh_actual | lower in (edge_ssh_accepted | map('lower') | list)
+        fail_msg: "sshd -T: {{ item.key | lower }} is {{ edge_ssh_actual }}, expected {{ item.value }}"
+        quiet: true
+      loop: "{{ edge_ssh_settings | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+  rescue:
+    - name: Put the earlier drop-in back
+      ansible.builtin.copy:
+        content: "{{ edge_ssh_previous.content | b64decode }}"
+        dest: "{{ edge_ssh_dropin }}"
+        owner: root
+        group: root
+        mode: "0644"
+      when: edge_ssh_previous_stat.stat.exists
+
+    - name: Remove the new drop-in (there was none before)
+      ansible.builtin.file:
+        path: "{{ edge_ssh_dropin }}"
+        state: absent
+      when: not edge_ssh_previous_stat.stat.exists
+
+    - name: Stop; sshd was not reloaded
+      ansible.builtin.fail:
+        msg: >-
+          The sshd hardening did not validate and was rolled back; sshd was not reloaded.
+          Cause: {{ ansible_failed_result.msg | default(ansible_failed_result.stderr | default('see above')) }}
+
+# --- Apply, then prove a brand-new login still works under the new config -------------------
+- name: Reload sshd now if the drop-in changed
+  ansible.builtin.meta: flush_handlers
+
+- name: Drop the persistent SSH connection so the next task logs in afresh
+  ansible.builtin.meta: reset_connection
+
+- name: A fresh login works with the hardened sshd
+  ansible.builtin.ping:

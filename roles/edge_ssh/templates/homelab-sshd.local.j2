@@ -1,0 +1,15 @@
+# {{ ansible_managed }}
+# sshd jail for the edge VPS (roles/edge_ssh, see its README). Read after jail.conf and the
+# packaged jail.d/*.conf, so these values win. Bans go into fail2ban's own nftables table
+# (inet f2b-table) and nothing else; the tailnet is never banned.
+[sshd]
+enabled = true
+backend = systemd
+# A plain action name: jail.conf appends [port=..., protocol=..., chain=...] itself.
+banaction = nftables
+maxretry = {{ edge_ssh_f2b_maxretry }}
+findtime = {{ edge_ssh_f2b_findtime }}
+bantime = {{ edge_ssh_f2b_bantime }}
+bantime.increment = true
+bantime.maxtime = {{ edge_ssh_f2b_bantime_maxtime }}
+ignoreip = {{ edge_ssh_f2b_ignoreip | join(' ') }}

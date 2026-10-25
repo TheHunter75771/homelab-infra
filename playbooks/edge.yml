@@ -1,14 +1,21 @@
 ---
-# Off-site heartbeat (docs/CONTRACTS.md §8). The edge VPS runs other services (finance app,
-# school dashboard, an nftables game relay): this play only touches /opt/homelab-heartbeat,
-# /var/lib/homelab-heartbeat and the homelab-heartbeat.* units, and never runs nft or touches
-# the firewall. It reads (never writes) the push store on the media server, so run it after
+# Edge VPS: the off-site heartbeat (docs/CONTRACTS.md §8) and SSH hardening (role edge_ssh).
+# The VPS runs other services (finance app, school dashboard, an nftables game relay). This play
+# only touches:
+#   heartbeat  /opt/homelab-heartbeat, /var/lib/homelab-heartbeat, the homelab-heartbeat.* units
+#   edge_ssh   /etc/ssh/sshd_config.d/10-homelab-edge.conf (reload of ssh.service), the fail2ban
+#              package, /etc/fail2ban/jail.d/homelab-sshd.local, /etc/fail2ban/fail2ban.d/homelab.local
+# It never runs `nft -f`, never flushes or edits existing firewall rules or tables; fail2ban's
+# bans live in its own nftables table (inet f2b-table). It must run over the tailnet, which
+# fail2ban never bans, with a second root session open as a lockout fallback (roles/edge_ssh/README.md).
+# The heartbeat reads (never writes) the push store on the media server, so run this after
 # site.yml, and again whenever a device subscribes or unsubscribes.
 # Re-run edge.yml after changing `rehearsal`: the flag is baked into the VPS config
 # (/opt/homelab-heartbeat/config.json) at deploy time.
-- name: Heartbeat watcher on the edge VPS
+- name: Heartbeat watcher and SSH hardening on the edge VPS
   hosts: edge
   become: false # the edge host is reached as root
   gather_facts: false
   roles:
     - role: heartbeat
+    - role: edge_ssh

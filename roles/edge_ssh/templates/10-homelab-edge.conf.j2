@@ -1,0 +1,8 @@
+# {{ ansible_managed }}
+# Edge VPS SSH hardening (roles/edge_ssh, see its README). sshd keeps the FIRST value it reads
+# for a keyword, and /etc/ssh/sshd_config includes sshd_config.d/*.conf in name order before
+# its own settings, so this 10- file wins over 50-cloud-init.conf and the main file.
+# AllowTcpForwarding is deliberately left as it is.
+{% for key, value in edge_ssh_settings.items() %}
+{{ key }} {{ value }}
+{% endfor %}

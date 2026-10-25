@@ -1,0 +1,35 @@
+---
+# Role edge_ssh (applied by playbooks/edge.yml): harden sshd and add fail2ban on the edge VPS.
+# The VPS runs other services. This role only touches the sshd drop-in, the fail2ban package
+# and its two config files (vars/main.yml), and ssh.service / fail2ban.service. See README.md.
+
+# Written in this order to the drop-in; sshd keeps the first value it reads for a keyword.
+edge_ssh_settings:
+  PermitRootLogin: prohibit-password # Ansible logs in as root, by key only
+  PasswordAuthentication: "no"
+  KbdInteractiveAuthentication: "no"
+  PubkeyAuthentication: "yes"
+  X11Forwarding: "no"
+  AllowAgentForwarding: "no"
+  MaxAuthTries: 3
+  LoginGraceTime: 30
+  ClientAliveInterval: 300
+  ClientAliveCountMax: 2
+  LogLevel: VERBOSE
+
+# fail2ban sshd jail
+edge_ssh_f2b_maxretry: 5
+edge_ssh_f2b_findtime: 10m
+edge_ssh_f2b_bantime: 1h
+edge_ssh_f2b_bantime_maxtime: 1w
+# fail2ban forgets ban history older than this; it must outlast bantime.maxtime or the
+# repeat-offender increase can never reach it (fail2ban's default is 1d).
+edge_ssh_f2b_dbpurgeage: 8d
+# Never banned: loopback and the whole tailnet (our only admin path). Written in canonical
+# network form (127.0.0.0/8 = 127.0.0.1/8), as fail2ban prints them back, so the deploy-time
+# assert can compare them exactly.
+edge_ssh_f2b_ignoreip:
+  - 127.0.0.0/8
+  - "::1"
+  - 100.64.0.0/10
+  - fd7a:115c:a1e0::/48

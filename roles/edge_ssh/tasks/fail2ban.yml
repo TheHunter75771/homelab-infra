@@ -1,0 +1,86 @@
+---
+# The jail goes in BEFORE the package: the package starts fail2ban on install, and it must
+# start with our jail (nftables action in its own table), never with packaged defaults that
+# could add iptables rules.
+- name: Fail2ban config directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /etc/fail2ban
+    - "{{ edge_ssh_jail | dirname }}"
+    - "{{ edge_ssh_f2b_conf | dirname }}"
+
+- name: The sshd jail is configured
+  ansible.builtin.template:
+    src: homelab-sshd.local.j2
+    dest: "{{ edge_ssh_jail }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload fail2ban
+
+- name: Ban history is kept long enough for the longest ban
+  ansible.builtin.template:
+    src: homelab-fail2ban.local.j2
+    dest: "{{ edge_ssh_f2b_conf }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload fail2ban
+
+# No recommends: only fail2ban itself, plus python3-systemd for backend = systemd (already on
+# the VPS; listed so the dependency is explicit).
+- name: Fail2ban is installed
+  ansible.builtin.apt:
+    name:
+      - fail2ban
+      - python3-systemd
+    state: present
+    install_recommends: false
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: The fail2ban configuration parses
+  ansible.builtin.command: fail2ban-client --test
+  changed_when: false
+
+- name: Fail2ban is enabled and running
+  ansible.builtin.systemd_service:
+    name: fail2ban.service
+    enabled: true
+    state: started
+
+- name: Reload fail2ban now if its config changed
+  ansible.builtin.meta: flush_handlers
+
+# --- Prove it: the jail answers, bans through nftables, and never bans the tailnet ------------
+- name: The sshd jail answers
+  ansible.builtin.command: fail2ban-client status sshd
+  changed_when: false
+  register: edge_ssh_jail_status
+  retries: 10
+  delay: 2
+  until: edge_ssh_jail_status.rc == 0
+
+- name: Read the jail's ban action and ignore list
+  ansible.builtin.command: fail2ban-client get sshd {{ item }}
+  changed_when: false
+  register: edge_ssh_jail_get
+  loop:
+    - actions
+    - ignoreip
+
+- name: The jail bans with the nftables action and ignores loopback and the tailnet
+  ansible.builtin.assert:
+    that:
+      - "'Currently banned' in edge_ssh_jail_status.stdout"
+      - edge_ssh_jail_get.results[0].stdout_lines | map('trim') | select('equalto', 'nftables') | list | length == 1
+      - edge_ssh_f2b_ignoreip | reject('in', edge_ssh_jail_get.results[1].stdout) | list | length == 0
+    fail_msg: >-
+      fail2ban's sshd jail is not as configured. actions: {{ edge_ssh_jail_get.results[0].stdout_lines }}
+      ignoreip: {{ edge_ssh_jail_get.results[1].stdout_lines }}
+    quiet: true

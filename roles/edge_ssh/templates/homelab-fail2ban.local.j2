@@ -1,0 +1,5 @@
+# {{ ansible_managed }}
+# Keep ban history long enough for bantime.increment to reach bantime.maxtime
+# ({{ edge_ssh_f2b_bantime_maxtime }}); fail2ban's default purge age is 1 day.
+[DEFAULT]
+dbpurgeage = {{ edge_ssh_f2b_dbpurgeage }}

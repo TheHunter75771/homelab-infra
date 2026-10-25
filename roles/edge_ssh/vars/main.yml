@@ -1,0 +1,10 @@
+---
+# Fixed paths: the only files this role writes.
+edge_ssh_dropin: /etc/ssh/sshd_config.d/10-homelab-edge.conf
+edge_ssh_jail: /etc/fail2ban/jail.d/homelab-sshd.local
+edge_ssh_f2b_conf: /etc/fail2ban/fail2ban.d/homelab.local
+# Values `sshd -T` may print instead of the configured one (OpenSSH 9.6 prints the old alias).
+edge_ssh_effective_aliases:
+  prohibit-password:
+    - prohibit-password
+    - without-password

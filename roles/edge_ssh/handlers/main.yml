@@ -1,0 +1,13 @@
+---
+# ssh.service on Ubuntu 24.04 is started by ssh.socket (Accept=no) and stays up as the
+# listener, so a reload (ExecReload: sshd -t, then SIGHUP) applies the drop-in. Open sessions
+# are untouched. Port/ListenAddress changes would need the socket instead; this role sets none.
+- name: Reload sshd
+  ansible.builtin.systemd_service:
+    name: ssh.service
+    state: reloaded
+
+- name: Reload fail2ban
+  ansible.builtin.systemd_service:
+    name: fail2ban.service
+    state: reloaded
