@@ -39,12 +39,12 @@ json_file=""
 while [ $# -gt 0 ]; do
   case $1 in
   --keep)
-    [ $# -ge 2 ] && [ -n "$2" ] || die "--keep needs a path"
+    if [ $# -lt 2 ] || [ -z "$2" ]; then die "--keep needs a path"; fi
     keep=$2
     shift 2
     ;;
   --json)
-    [ $# -ge 2 ] && [ -n "$2" ] || die "--json needs a file"
+    if [ $# -lt 2 ] || [ -z "$2" ]; then die "--json needs a file"; fi
     json_file=$2
     shift 2
     ;;
