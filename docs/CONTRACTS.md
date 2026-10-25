@@ -98,7 +98,7 @@ This is the single spec for the MVP build. Builders own exactly the paths listed
   - HTTPS 8443: `/` → `http://127.0.0.1:5055` (jellyseerr).
   - HTTPS 8444: `/watch` → `http://127.0.0.1:8096/watch`, `/sonarr` → `…:8989/sonarr`, `/radarr` → `…:7878/radarr`, `/prowlarr` → `…:9696/prowlarr`, `/sabnzbd` → `…:8080/sabnzbd`.
   - **Never funnel.**
-- Public Jellyfin: the Cloudflare tunnel's public hostname `{{ public_watch_host }}` path `/watch*` → `http://jellyfin:8096`. That's configured in Cloudflare by Noah (documented in `docs/runbooks/cloudflare.md`, written by module C), not by Ansible.
+- Public Jellyfin (**amended 2026-10-24, ADR 0016**): the Cloudflare tunnel's public hostname `{{ public_watch_host }}` (now the `watch.` subdomain), **whole hostname** → `http://jellyfin:8096`. Jellyfin keeps its `/watch` base URL and redirects `/` to it. The apex is a static homepage on Cloudflare Pages, not on the tunnel. That's configured in Cloudflare by Noah (documented in `docs/runbooks/cloudflare.md`, written by module C), not by Ansible.
 
 ## 7. Host security (module A: roles `base`, `users`, `ssh_hardening`, `firewall`, `tailscale`, `dns`, `watchdog`)
 - `base`: timezone, packages (`sqlite3 rsync jq smartmontools unattended-upgrades needrestart curl`), persistent journald (SystemMaxUse=500M), unattended-upgrades **security only, Automatic-Reboot "false"**.

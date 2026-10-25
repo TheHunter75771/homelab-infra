@@ -177,8 +177,8 @@ every episode of every show you add. Start narrow and widen on purpose:
    **`/sonarr`** → Test → quality profile, root folder **`/data/tv`**, **Season Folders** ✓ → Add.
    Finish setup.
 5. **Settings → General**: **Application URL** `https://<ts>:8443`. Optional: **Settings →
-   Jellyfin → External URL** `https://<public_watch_host>/watch`, so "Play on Jellyfin" links work
-   off the tailnet.
+   Jellyfin → External URL** `https://<public_watch_host>/watch` (the `watch.` subdomain plus
+   Jellyfin's base URL, ADR 0016), so "Play on Jellyfin" links work off the tailnet.
 6. **Settings → Users → Default Permissions**: *Request* only, **no Auto-Approve** (see section 6).
 
 ## 8. Smoke test
@@ -196,8 +196,9 @@ every episode of every show you add. Start narrow and widen on purpose:
      completed.
 4. Jellyfin shows the episode within a minute (the Connect entry from Sonarr step 4 triggers the
    scan; without it: *Dashboard → Libraries → Scan*). Play it from a phone off the tailnet via
-   `https://<public_watch_host>/watch` and check *Dashboard → Activity* for "(HW)" transcoding when
-   forcing a lower quality.
+   `https://<public_watch_host>/watch` (in a browser the bare `https://<public_watch_host>` redirects
+   there; the Jellyfin app needs the `/watch` suffix) and check *Dashboard → Activity* for "(HW)"
+   transcoding when forcing a lower quality.
 5. Sonarr/Radarr **System → Status** shows no health warnings (download client, root folder, indexers).
 
 ## 9. Phone alerts (dashboard): `https://<ts>/`

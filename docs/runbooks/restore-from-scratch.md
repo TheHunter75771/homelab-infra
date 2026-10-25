@@ -41,15 +41,22 @@ There's no restore playbook yet, so do it by hand:
    mkdir ~/restore && cd ~/restore && sudo tar -xpf ../appdata-*.tar && sudo sha256sum -c MANIFEST.sha256
    ```
    **Stop if any line isn't OK.** (sudo keeps the owners stored in the archive; extracted without sudo, the databases would end up owned by the admin and the apps couldn't read them.)
-2. Stop what you're restoring: `sudo docker compose -f /srv/homelab/stacks/media/compose.yaml stop`, and `sudo systemctl stop homelab-dashboard` if you're restoring push data.
+2. Stop what you're restoring: `sudo docker compose -f /srv/homelab/stacks/media/compose.yaml stop`, and `sudo systemctl stop homelab-dashboard` if you're restoring push devices or dashboard data.
 3. App files, keeping the owners stored in the archive (no blanket chown):
    ```bash
    sudo tar -xpzf files.tar.gz -C /srv/homelab/data
    ```
 4. SQLite databases: for each `sqlite/<path>`, `sudo cp -p` it over the matching file under `/srv/homelab/data/<path>`, and `sudo rm -f` any `<db>-wal`/`<db>-shm` next to it.
-5. Push devices (optional; otherwise phones subscribe again): `sudo tar -xpzf push.tar.gz -C /srv/homelab/push`, then `sudo chown -R dashboard:dashboard /srv/homelab/push && sudo chown root:dashboard /srv/homelab/push/vapid.json` (archives from before Dashboard v2 carry the old `pushcore` uid, which is the same uid 10101, so this is a no-op for them), then `sudo systemctl start homelab-dashboard`.
-6. **Don't restore `bootgate.tar.gz`.** Its state is stale and the gate rebuilds it.
-7. **Use the same app versions the backup came from** (`inventory/group_vars/all/versions.yml` at that commit), start the stacks (`sudo docker compose -f ... up -d`), check them, then upgrade.
+5. Push devices (optional; otherwise phones subscribe again): `sudo tar -xpzf push.tar.gz -C /srv/homelab/push`, then `sudo chown -R dashboard:dashboard /srv/homelab/push && sudo chown root:dashboard /srv/homelab/push/vapid.json` (archives from before Dashboard v2 carry the old `pushcore` uid, which is the same uid 10101, so this is a no-op for them).
+6. Dashboard data and alert history (optional; only archives that contain `dashboard.tar.gz`/`notify.tar.gz`, since older ones don't). With `homelab-dashboard` still stopped:
+   ```bash
+   sudo tar -xpzf dashboard.tar.gz -C /var/lib/homelab-dashboard
+   sudo tar -xpzf notify.tar.gz -C /var/lib/homelab-notify
+   sudo stat -c '%a %U %n' /var/lib/homelab-dashboard /var/lib/homelab-dashboard/settings.json
+   ```
+   Expect `750 dashboard` and `600 dashboard`. The archive stores numeric owners and modes, and `tar -p` under sudo restores them, so don't chown. `dashboard.tar.gz` brings back the settings (Jellyfin/Jellyseerr API keys, renewal dates, thresholds), the drive samples and the uptime rollups. `notify.tar.gz` holds only `history.jsonl`, never the notifier's dedupe state. Then `sudo systemctl start homelab-dashboard`.
+7. **Don't restore `bootgate.tar.gz`.** Its state is stale and the gate rebuilds it.
+8. **Use the same app versions the backup came from** (`inventory/group_vars/all/versions.yml` at that commit), start the stacks (`sudo docker compose -f ... up -d`) and, if you stopped it and skipped step 6, `sudo systemctl start homelab-dashboard`. Check them, then upgrade.
 
 ## 5. Off-box pieces
 Re-run `playbooks/gaming-pc.yml` and `playbooks/edge.yml`. Check the Cloudflare tunnel route (`cloudflare.md`).

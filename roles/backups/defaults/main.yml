@@ -16,4 +16,6 @@ backups_exclude_dirs:
   - log
   - logs
 backups_bootgate_dir: /var/lib/bootgate
+backups_dashboard_dir: /var/lib/homelab-dashboard # read only; owned by role dashboard
+backups_notify_state_dir: /var/lib/homelab-notify # only history.jsonl is backed up
 backups_notify_bin: /usr/local/bin/homelab-notify

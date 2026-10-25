@@ -10,3 +10,5 @@ Public streaming goes Cloudflare Tunnel → Jellyfin directly (`/watch`). Everyt
 
 ## Consequences
 One less service. No IP-based trust rule to spoof. Automatic HTTPS for the PWA. App URL bases must be kept in sync with serve mounts, because serve strips the mount prefix.
+
+**Amended by ADR 0016 (2026-10-24):** public Jellyfin has its own `watch.` subdomain (the whole hostname goes to the tunnel, `/watch` base URL kept). The apex is a static homepage that doesn't go through the tunnel.

@@ -42,6 +42,11 @@ mkdir -p "$SRV" "$DATA/app" "$T/home/.ssh"
 echo key >"$T/home/.ssh/pull_key"
 python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("create table t(i)"); c.execute("insert into t values (1)"); c.commit()' "$DATA/app/app.db"
 echo conf >"$DATA/app/config.xml"
+mkdir -p "$T/dash/uptime" "$T/notify" # dashboard state + alert history, outside DATA (CONTRACTS §11)
+echo '{"jellyfinApiKey":"k"}' >"$T/dash/settings.json"
+chmod 0600 "$T/dash/settings.json"
+printf '{"ts":1,"free":10}\n' >"$T/dash/samples.jsonl"
+printf '{"ts":"a","title":"t"}\n' >"$T/notify/history.jsonl"
 
 # Fake ssh: log the options, drop them and the host, then behave like sshd's forced command.
 cat >"$T/fakessh" <<EOF
@@ -63,6 +68,7 @@ chmod +x "$T/fakessh"
 make_backup() { # one real nightly run into $SRV
   sleep 1.1 # archive names have one-second resolution
   env BACKUP_ROOT="$SRV" DATA_DIR="$DATA" PUSH_DIR="$T/nopush" BOOTGATE_DIR="$T/nogate" \
+    DASHBOARD_DIR="$T/dash" NOTIFY_STATE_DIR="$T/notify" \
     KEEP="${KEEP:-14}" BACKUP_GROUP="$(id -gn)" NOTIFY_BIN=/nonexistent SQLITE3="$SQ" STATUS_DIR="$T/status" \
     bash "$BACKUP" >/dev/null
 }
@@ -99,6 +105,13 @@ check "first pull: .last_pull is ISO-8601 UTC" grep -qxE '[0-9]{4}-[0-9]{2}-[0-9
 n=$(newest_srv)
 check "promoted copy is a hard link to staging (no second copy on disk)" [ "$DEST/appdata/$n" -ef "$DEST/.incoming/appdata/$n" ]
 check "both archives were verified" [ "$(grep -c 'verified' "$T/out.log")" = 2 ]
+members=$(tar -xOf "$DEST/appdata/$n" MANIFEST.sha256 | wc -l)
+check "archive carries the dashboard and notify members" \
+  sh -c 'tar -tf "$1" | grep -qx dashboard.tar.gz && tar -tf "$1" | grep -qx notify.tar.gz' _ "$DEST/appdata/$n"
+check "verified count is the manifest's (4: app.db, files, dashboard, notify)" \
+  sh -c '[ "$2" = 4 ] && grep -q "$1: verified $2 members" "$3"' _ "$n" "$members" "$T/out.log"
+check "pulled dashboard member keeps settings.json 0600" \
+  sh -c 'tar -xOf "$1" dashboard.tar.gz | tar -tvzf - | grep -qE "^-rw------- .* \./settings\.json$"' _ "$DEST/appdata/$n"
 check "ssh offered only the pull key, non-interactively" \
   grep -qE -- "-i $T/home/.ssh/pull_key -o BatchMode=yes -o IdentitiesOnly=yes" "$T/ssh.log"
 check "no temp dir left behind" [ -z "$(find "$DEST" -maxdepth 1 -name '.tmp.*')" ]
@@ -147,6 +160,27 @@ printf 'XXXXXXXX' | dd of="$SRV/appdata/$n" bs=1 seek=$((off + 512 + 20)) conv=n
 if run_pull; then bad "bit flip: should fail"; else ok "bit flip: exits non-zero"; fi
 check "bit flip: reason is a hash mismatch" grep -q 'bad-hash' "$T/out.log"
 check "bit flip: dest untouched" unchanged
+
+# --- 6b. The manifest, not a fixed member count, decides: a dropped or swapped member is caught ---
+rm -f "$SRV/appdata/$n"
+make_backup
+n=$(newest_srv)
+rm -rf "$T/re" && mkdir -p "$T/re" && tar -xf "$SRV/appdata/$n" -C "$T/re"
+rm "$T/re/dashboard.tar.gz"
+(cd "$T/re" && tar -cf "$SRV/appdata/$n" sqlite files.tar.gz notify.tar.gz MANIFEST.sha256)
+if run_pull; then bad "dropped dashboard member: should fail"; else ok "dropped dashboard member: exits non-zero"; fi
+check "dropped dashboard member: named as missing" grep -q "missing=\['dashboard.tar.gz'\]" "$T/out.log"
+check "dropped dashboard member: dest untouched" unchanged
+rm -f "$SRV/appdata/$n"
+make_backup
+n=$(newest_srv)
+rm -rf "$T/re" && mkdir -p "$T/re/other" && tar -xf "$SRV/appdata/$n" -C "$T/re"
+echo '{"jellyfinApiKey":"swapped"}' >"$T/re/other/settings.json"
+tar -czf "$T/re/dashboard.tar.gz" -C "$T/re/other" .
+(cd "$T/re" && tar -cf "$SRV/appdata/$n" sqlite files.tar.gz dashboard.tar.gz notify.tar.gz MANIFEST.sha256)
+if run_pull; then bad "swapped dashboard member: should fail"; else ok "swapped dashboard member: exits non-zero"; fi
+check "swapped dashboard member: named as a bad hash" grep -q "bad-hash=\['dashboard.tar.gz'\]" "$T/out.log"
+check "swapped dashboard member: dest untouched" unchanged
 
 # --- 7. An already-pulled archive that goes bad on the server never replaces the good copy ----------
 rm -f "$SRV/appdata/$n"

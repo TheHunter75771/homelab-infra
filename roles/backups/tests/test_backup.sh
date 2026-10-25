@@ -12,8 +12,10 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 SCRIPT="$HERE/../files/homelab-backup.sh"
 T=$(mktemp -d)
 WAL_PID=""
+APP_PID=""
 cleanup() {
   if [ -n "$WAL_PID" ]; then kill "$WAL_PID" 2>/dev/null || true; fi
+  if [ -n "$APP_PID" ]; then kill "$APP_PID" 2>/dev/null || true; fi
   chmod -R u+rwX "$T" 2>/dev/null || true
   rm -rf "$T"
 }
@@ -39,8 +41,8 @@ S="$T/status" # STATUS_DIR; outside srv so it survives setup() (tests remove it 
 
 setup() {
   chmod -R u+rwX "$T/srv" 2>/dev/null || true
-  rm -rf "$T/srv" "$T/x"
-  mkdir -p "$B" "$D" "$T/srv/push" "$T/srv/bootgate" "$T/bin"
+  rm -rf "$T/srv" "$T/x" "$T/restore"
+  mkdir -p "$B" "$D" "$T/srv/push" "$T/srv/bootgate" "$T/bin" "$T/srv/dashboard/uptime" "$T/srv/notify"
   mkdir -p "$D/sonarr/logs" "$D/sonarr/MediaCover/1" "$D/sonarr/Backups" "$D/jellyfin/cache/img" \
     "$D/jellyfin/data/metadata/x" "$D/jellyfin/data/transcodes" "$D/jellyfin/log" "$D/jellyfin/data/data" \
     "$D/jellyseerr/db" "$D/adguard/work/data" "$D/radarr"
@@ -70,6 +72,18 @@ PY
   echo '{"publicKey":"p","privateKey":"k","subject":"mailto:admin@localhost"}' >"$T/srv/push/vapid.json"
   echo '[]' >"$T/srv/push/subscriptions.json"
   echo ok >"$T/srv/bootgate/status"
+  chmod 0750 "$T/srv/dashboard"
+  echo '{"jellyfinApiKey":"k"}' >"$T/srv/dashboard/settings.json"
+  chmod 0600 "$T/srv/dashboard/settings.json"
+  printf '{"ts":1,"free":10}\n{"ts":2,"free":9}\n{"ts":3,"fr' >"$T/srv/dashboard/samples.jsonl" # an append in flight
+  echo '{"days":{}}' >"$T/srv/dashboard/uptime/2026-10.json"
+  echo half >"$T/srv/dashboard/.settings.json.123.abcdef.tmp"
+  echo half >"$T/srv/dashboard/uptime/.2026-10.json.123.abcdef.tmp"
+  printf '{"ts":"a","title":"t1"}\n{"ts":"b","title":"t2"}\n' >"$T/srv/notify/history.jsonl"
+  chmod 0644 "$T/srv/notify/history.jsonl"
+  echo '{}' >"$T/srv/notify/dedupe.json"
+  chmod 0600 "$T/srv/notify/dedupe.json"
+  : >"$T/srv/notify/.lock"
   printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"%s/notify.log"\n' "$T" >"$T/notify"
   chmod +x "$T/notify"
   : >"$T/notify.log"
@@ -78,6 +92,7 @@ PY
 run_backup() { # extra VAR=value pairs may be passed
   local rc=0
   env BACKUP_ROOT="$B" DATA_DIR="$D" PUSH_DIR="$T/srv/push" BOOTGATE_DIR="$T/srv/bootgate" \
+    DASHBOARD_DIR="$T/srv/dashboard" NOTIFY_STATE_DIR="$T/srv/notify" \
     KEEP=14 BACKUP_GROUP="$GROUP" NOTIFY_BIN="$T/notify" SQLITE3="$SQ" STATUS_DIR="$S" "$@" \
     bash "$SCRIPT" >"$T/out.log" 2>&1 || rc=$?
   return "$rc"
@@ -128,13 +143,14 @@ check "no failure push on success" [ ! -s "$T/notify.log" ]
 tar -tf "$A" >"$T/members"
 check "MANIFEST.sha256 is the last member" [ "$(tail -n 1 "$T/members")" = MANIFEST.sha256 ]
 for m in sqlite/sonarr/sonarr.db sqlite/sonarr/logs.db sqlite/jellyfin/data/data/jellyfin.db \
-  sqlite/jellyseerr/db/db.sqlite3 "sqlite/radarr/my db.db" files.tar.gz push.tar.gz bootgate.tar.gz; do
+  sqlite/jellyseerr/db/db.sqlite3 "sqlite/radarr/my db.db" files.tar.gz push.tar.gz bootgate.tar.gz \
+  dashboard.tar.gz notify.tar.gz; do
   check "archive has $m" grep -qxF "$m" "$T/members"
 done
 check "non-SQLite *.db is not in sqlite/" sh -c '! grep -q "^sqlite/adguard/.*stats.db" "$1"' _ "$T/members"
 mkdir -p "$T/x" && tar -xf "$A" -C "$T/x"
 check "every member matches MANIFEST.sha256" sh -c 'cd "$1" && sha256sum --quiet --strict -c MANIFEST.sha256' _ "$T/x"
-check "manifest covers all 8 files" [ "$(wc -l <"$T/x/MANIFEST.sha256")" = 8 ]
+check "manifest covers all 10 files" [ "$(wc -l <"$T/x/MANIFEST.sha256")" = 10 ]
 check "sqlite copy of the live db includes the WAL rows (600)" [ "$(count_rows "$T/x/sqlite/sonarr/sonarr.db")" = 600 ]
 check "sqlite copy passes integrity_check" [ "$("$SQ" "$T/x/sqlite/jellyfin/data/data/jellyfin.db" 'PRAGMA integrity_check;')" = ok ]
 check "db name with a space survives" [ "$(count_rows "$T/x/sqlite/radarr/my db.db")" = 5 ]
@@ -286,6 +302,75 @@ if [ "$(id -u)" != 0 ]; then
   check "status unwritable: failure pushed" grep -q 'could not write the status file' "$T/notify.log"
   chmod 0755 "$S"
 fi
+
+# --- 9. Dashboard state and alert history (outside DATA_DIR) -------------------------------------
+setup
+check "dashboard: backup exits 0" run_backup
+mkdir -p "$T/x" && tar -xf "$B/appdata/$(newest)" -C "$T/x"
+tar --numeric-owner -tvzf "$T/x/dashboard.tar.gz" >"$T/dash.v"
+tar -tzf "$T/x/dashboard.tar.gz" | sort | tr '\n' ' ' >"$T/dash.l"
+check "dashboard.tar.gz holds the dir, settings, samples and uptime, nothing else" \
+  [ "$(cat "$T/dash.l")" = "./ ./samples.jsonl ./settings.json ./uptime/ ./uptime/2026-10.json " ]
+check "settings.json kept 0600 with its numeric owner" \
+  grep -qE "^-rw------- $(id -u)/$(id -g) .* \./settings\.json$" "$T/dash.v"
+check "dashboard dir kept 0750" grep -qE '^drwxr-x--- .* \./$' "$T/dash.v"
+mkdir -p "$T/x/dash" && tar -xzf "$T/x/dashboard.tar.gz" -C "$T/x/dash" ./samples.jsonl
+check "a half-written last sample line is dropped from the copy" \
+  [ "$(cat "$T/x/dash/samples.jsonl")" = "$(printf '{"ts":1,"free":10}\n{"ts":2,"free":9}')" ]
+check "the copy still ends in a newline" [ "$(tail -c 1 "$T/x/dash/samples.jsonl" | od -An -tx1 | tr -d ' ')" = 0a ]
+check "the live samples.jsonl itself is untouched" grep -q '"fr$' "$T/srv/dashboard/samples.jsonl"
+check "the dropped line is noted in the journal" grep -q 'dropped a half-written last line of samples.jsonl' "$T/out.log"
+check "notify.tar.gz holds only history.jsonl (no dedupe state, no lock, no dir entry)" \
+  [ "$(tar -tzf "$T/x/notify.tar.gz")" = ./history.jsonl ]
+check "history.jsonl copied whole" sh -c 'tar -xOzf "$1" ./history.jsonl | cmp -s - "$2"' _ "$T/x/notify.tar.gz" "$T/srv/notify/history.jsonl"
+check "history.jsonl mode kept (0644)" sh -c 'tar -tvzf "$1" | grep -q "^-rw-r--r-- "' _ "$T/x/notify.tar.gz"
+mkdir -p "$T/restore/dash" "$T/restore/notify"
+chmod 0755 "$T/restore/dash" "$T/restore/notify"
+tar -xpzf "$T/x/dashboard.tar.gz" -C "$T/restore/dash"
+tar -xpzf "$T/x/notify.tar.gz" -C "$T/restore/notify"
+check "restore: dashboard dir back to 0750, settings.json 0600" \
+  [ "$(stat -c %a "$T/restore/dash") $(stat -c %a "$T/restore/dash/settings.json")" = "750 600" ]
+check "restore: notify dir mode left alone, history.jsonl 0644" \
+  [ "$(stat -c %a "$T/restore/notify") $(stat -c %a "$T/restore/notify/history.jsonl")" = "755 644" ]
+
+# Appends while the backup reads: every archived line is still whole JSON.
+setup
+printf '{"ts":0,"free":0}\n' >"$T/srv/dashboard/samples.jsonl"
+(
+  i=1
+  while :; do
+    printf '{"ts":%d,"free":%d,"pad":"%s"}\n' "$i" "$i" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" >>"$T/srv/dashboard/samples.jsonl"
+    printf '{"ts":%d,"title":"t"}\n' "$i" >>"$T/srv/notify/history.jsonl"
+    i=$((i + 1))
+  done
+) &
+APP_PID=$!
+sleep 0.3
+check "live appends: backup exits 0" run_backup
+kill "$APP_PID" 2>/dev/null || true
+wait "$APP_PID" 2>/dev/null || true
+APP_PID=""
+mkdir -p "$T/x/live" && tar -xf "$B/appdata/$(newest)" -C "$T/x"
+tar -xzf "$T/x/dashboard.tar.gz" -C "$T/x/live" ./samples.jsonl
+tar -xzf "$T/x/notify.tar.gz" -C "$T/x/live" ./history.jsonl
+for f in samples.jsonl history.jsonl; do
+  check "live appends: archived $f has lines" [ "$(wc -l <"$T/x/live/$f")" -gt 1 ]
+  check "live appends: every archived $f line is whole JSON" \
+    python3 -c 'import json, sys; [json.loads(line) for line in open(sys.argv[1])]' "$T/x/live/$f"
+done
+
+# Fresh box: no dashboard or notifier state yet.
+setup
+rm -rf "$T/srv/dashboard" "$T/srv/notify"
+check "fresh box: backup exits 0 without dashboard/notify dirs" run_backup
+check "fresh box: no dashboard/notify members" \
+  sh -c '! tar -tf "$1" | grep -qE "^(dashboard|notify)\.tar\.gz$"' _ "$B/appdata/$(newest)"
+check "fresh box: both skips logged" sh -c 'grep -q "dashboard.tar.gz skipped" "$1" && grep -q "notify.tar.gz skipped" "$1"' _ "$T/out.log"
+setup
+rm -f "$T/srv/notify/history.jsonl"
+check "notifier dir without history: backup exits 0" run_backup
+check "notifier dir without history: no notify member" sh -c '! tar -tf "$1" | grep -qx notify.tar.gz' _ "$B/appdata/$(newest)"
+check "notifier dir without history: logged" grep -q 'history.jsonl does not exist; left out of notify.tar.gz' "$T/out.log"
 
 echo
 echo "backup tests: $PASS passed, $FAILS failed"

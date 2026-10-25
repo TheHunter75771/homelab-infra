@@ -17,3 +17,4 @@ Short records of why things are the way they are. Format: context, decision, con
 - [ADR 0013: The dashboard runs on the host, outside Docker](0013-dashboard-runs-on-the-host-outside-docker.md)
 - [ADR 0014: Dashboard v2.0 is tailnet-only](0014-dashboard-v2-is-tailnet-only.md)
 - [ADR 0015: The dashboard has its own origin](0015-the-dashboard-has-its-own-origin.md)
+- [ADR 0016: Public Jellyfin moves to a subdomain; the apex is a static homepage](0016-public-jellyfin-on-a-subdomain.md)

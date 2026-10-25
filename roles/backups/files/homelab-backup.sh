@@ -11,6 +11,11 @@
 #                     transcodes, logs) and minus the live databases and their -wal/-shm.
 #   push.tar.gz       $PUSH_DIR (VAPID keys + subscriptions), if present
 #   bootgate.tar.gz   $BOOTGATE_DIR (boot gate state + history), if present
+#   dashboard.tar.gz  $DASHBOARD_DIR (settings.json with API keys, samples.jsonl, uptime/), if present
+#   notify.tar.gz     history.jsonl from $NOTIFY_STATE_DIR (the alert history; not the
+#                     notifier's short-lived dedupe state), if present
+#                     These four keep owners and modes (numeric) and are read once into a
+#                     private snapshot, with any half-written last line of a *.jsonl dropped.
 #   MANIFEST.sha256   sha256 of every member above. Always the LAST member, so a copy that
 #                     was cut short is detectable (homelab-pull checks it).
 # Keeps the newest $KEEP archives, writes $BACKUP_ROOT/LAST_OK (ISO 8601, UTC) on success,
@@ -28,6 +33,8 @@
 #   tar -xpzf /tmp/r/files.tar.gz -C "$DATA_DIR"
 #   copy each /tmp/r/sqlite/<path> to $DATA_DIR/<path> (cp -p), then delete <path>-wal/-shm
 #   tar -xpzf /tmp/r/push.tar.gz -C "$PUSH_DIR"
+#   with homelab-dashboard stopped: tar -xpzf /tmp/r/dashboard.tar.gz -C "$DASHBOARD_DIR"
+#   tar -xpzf /tmp/r/notify.tar.gz -C "$NOTIFY_STATE_DIR"
 #
 # Every setting can be overridden from the environment (the systemd unit sets them; the
 # role's tests point them at a temp dir).
@@ -39,6 +46,8 @@ BACKUP_ROOT=${BACKUP_ROOT:-/srv/homelab/backups}
 DATA_DIR=${DATA_DIR:-/srv/homelab/data}
 PUSH_DIR=${PUSH_DIR:-/srv/homelab/push}
 BOOTGATE_DIR=${BOOTGATE_DIR:-/var/lib/bootgate}
+DASHBOARD_DIR=${DASHBOARD_DIR:-/var/lib/homelab-dashboard}
+NOTIFY_STATE_DIR=${NOTIFY_STATE_DIR:-/var/lib/homelab-notify}
 KEEP=${KEEP:-14}
 BACKUP_GROUP=${BACKUP_GROUP:-backuppull}
 NOTIFY_BIN=${NOTIFY_BIN:-/usr/local/bin/homelab-notify}
@@ -179,13 +188,49 @@ backup_db() {
   mv -- "$tmp" "$dst"
 }
 
-archive_dir() { # NAME LABEL DIR
-  local name=$1 label=$2 dir=$3
+# archive_dir NAME LABEL DIR [FILE...]: $OUT/NAME.tar.gz of DIR (or only FILE... in it), with
+# numeric owners and modes. Each file is read exactly once, into a private snapshot under
+# $WORK (0700); no lock is taken, so the apps keep writing meanwhile. In the snapshot every
+# *.jsonl is cut back to its last complete line, so an append in flight can't leave half a
+# line. Writers' temp files (.NAME.*.tmp, atomic-rename leftovers) are skipped. A missing DIR
+# or FILE is a warning, not a failure (fresh box).
+archive_dir() {
+  local name=$1 label=$2 dir=$3 snap="$WORK/snap/$1" f partial keep
+  local -a members=()
+  shift 3
   if [ ! -d "$dir" ]; then
     log "warning: $dir does not exist; $name.tar.gz skipped"
     return 0
   fi
-  run_tar "$label" --numeric-owner -czf "$OUT/$name.tar.gz" -C "$dir" .
+  if [ "$#" -eq 0 ]; then
+    members=(.)
+  else
+    for f in "$@"; do
+      if [ -e "$dir/$f" ]; then
+        members+=("./$f")
+      else
+        log "warning: $dir/$f does not exist; left out of $name.tar.gz"
+      fi
+    done
+    if [ "${#members[@]}" -eq 0 ]; then
+      log "warning: nothing to back up in $dir; $name.tar.gz skipped"
+      return 0
+    fi
+  fi
+  mkdir -p -- "$snap"
+  run_tar "$label" --numeric-owner --no-wildcards-match-slash --exclude='.*.tmp' \
+    -cf "$WORK/snap/$name.tar" -C "$dir" -- "${members[@]}"
+  tar --numeric-owner -xpf "$WORK/snap/$name.tar" -C "$snap"
+  rm -f -- "$WORK/snap/$name.tar"
+  while IFS= read -r -d '' f; do
+    if [ -s "$f" ] && [ "$(tail -c 1 -- "$f" | od -An -tx1 | tr -d ' \n')" != 0a ]; then
+      partial=$(tail -n 1 -- "$f" | wc -c)
+      keep=$(($(stat -c %s -- "$f") - partial))
+      truncate -s "$keep" -- "$f"
+      log "note: $label: dropped a half-written last line of ${f##*/}"
+    fi
+  done < <(find "$snap" -type f -name '*.jsonl' -print0)
+  tar --numeric-owner -czf "$OUT/$name.tar.gz" -C "$snap" -- "${members[@]}"
 }
 
 rotate() {
@@ -268,15 +313,17 @@ main() {
   n_files=$(tr -cd '\0' <"$WORK/files.list" | wc -c)
   run_tar "data files" --numeric-owner -czf "$OUT/files.tar.gz" -C "$DATA_DIR" --null --no-recursion -T "$WORK/files.list"
 
-  # 4. Push store and boot gate state.
+  # 4. State kept outside $DATA_DIR: push store, boot gate, dashboard, alert history.
   archive_dir push "push store" "$PUSH_DIR"
   archive_dir bootgate "boot gate state" "$BOOTGATE_DIR"
+  archive_dir dashboard "dashboard state" "$DASHBOARD_DIR"
+  archive_dir notify "alert history" "$NOTIFY_STATE_DIR" history.jsonl
 
   # 5. Manifest (hashes of every member), then the outer tar with the manifest last.
   (cd "$OUT" && find . -type f -printf '%P\0' | sort -z | xargs -0 -r sha256sum --) >"$WORK/MANIFEST.sha256"
   mv -- "$WORK/MANIFEST.sha256" "$OUT/MANIFEST.sha256"
   members=(sqlite)
-  for p in files.tar.gz push.tar.gz bootgate.tar.gz; do
+  for p in files.tar.gz push.tar.gz bootgate.tar.gz dashboard.tar.gz notify.tar.gz; do
     if [ -f "$OUT/$p" ]; then members+=("$p"); fi
   done
   members+=(MANIFEST.sha256)
