@@ -3,3 +3,25 @@
 - name: Re-execute systemd
   ansible.builtin.systemd_service:
     daemon_reexec: true
+
+# Only our file: a full `sysctl --system` would re-apply every sysctl.d file and could undo runtime
+# settings other services made.
+- name: Apply panic sysctls (watchdog)
+  ansible.builtin.command:
+    argv:
+      - sysctl
+      - --load={{ watchdog_sysctl_file }}
+  changed_when: true
+
+- name: Regenerate GRUB config (watchdog)
+  ansible.builtin.command: update-grub
+  changed_when: true
+
+# The standard Ubuntu flag (shown at login and read by update-notifier); /run is cleared at reboot.
+- name: Flag a reboot to free the crashkernel memory (watchdog)
+  ansible.builtin.copy:
+    dest: /run/reboot-required
+    content: "*** System restart required ***\n"
+    owner: root
+    group: root
+    mode: "0644"

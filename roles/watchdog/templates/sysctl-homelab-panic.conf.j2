@@ -1,0 +1,14 @@
+# {{ ansible_managed }}
+# Crash recovery. The Intel TCO watchdog on this box never resets it (live test 2026-10-24), and
+# kdump is disabled, so the kernel reboots itself instead:
+# reboot {{ watchdog_panic_reboot_sec }} s after any panic (default 0 = hang until the power button)
+kernel.panic = {{ watchdog_panic_reboot_sec }}
+# an oops becomes a panic, so it reboots too (already 1 at runtime; persisted so it never depends on
+# the kernel build default)
+kernel.panic_on_oops = 1
+# a hard-locked CPU, caught by the NMI watchdog, becomes a panic
+kernel.hardlockup_panic = 1
+#
+# Deliberately NOT set: kernel.softlockup_panic and kernel.hung_task_panic. A stalling USB media
+# drive can trigger soft lockups and hung tasks; panicking on them would turn a flaky drive into a
+# reboot loop that bypasses the boot gate's one-power-cycle rule.

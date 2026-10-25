@@ -97,16 +97,26 @@ Paths inside the containers: the media drive is `/data` (`/data/tv`, `/data/movi
    > (same for `radarr` / `prowlarr` with their own `config.xml`).
 2. **Settings → Media Management** (click *Show Advanced*):
    - **Root Folders → Add Root Folder** → `/data/tv`.
-   - **Use Hardlinks instead of Copy** = on (default). Downloads and the library share the drive, so
-     imports are instant hardlinks.
+   - **Use Hardlinks instead of Copy** = on (default, harmless). It only matters for torrents that keep
+     seeding; with SABnzbd, Sonarr **moves** the finished file, an instant rename on the same drive.
    - **Unmonitor Deleted Episodes** = **on** (deleting a file won't trigger a re-download).
    - Rename Episodes: on if you want tidy names (optional).
 3. **Settings → Download Clients → + → SABnzbd**: Host **`sabnzbd`**, Port **`8080`**, URL Base
    **`/sabnzbd`**, API Key (from SABnzbd), Username/Password (from SABnzbd), Category **`tv`**,
    SSL off → **Test** → Save. No remote path mapping is needed: both containers see the same `/data`.
-4. **Settings → Profiles**: keep one quality profile you actually want (e.g. *HD-1080p*) and set its
+4. **Settings → Connect → + → Emby / Jellyfin**, so new imports show up in Jellyfin without a manual
+   library scan. First create a Jellyfin API key: Jellyfin **Dashboard → API Keys → +**, app name
+   e.g. `sonarr-radarr` (one key for both apps). Then, in Sonarr's dialog (click **Show Advanced**:
+   *URL Base* is an advanced field):
+   - **Host** `jellyfin`, **Port** `8096`, **Use SSL** off, **URL Base** `/watch`
+   - **API Key**: the Jellyfin key
+   - **Send Notifications** off (its help text: "Not supported on Jellyfin"), **Update Library** ✓
+   - **Notification Triggers**: On File Import, On File Upgrade, On Rename, On Episode File Delete,
+     On Series Delete (the events that refresh the library)
+   → **Test** → Save.
+5. **Settings → Profiles**: keep one quality profile you actually want (e.g. *HD-1080p*) and set its
    **Upgrade Until**. Delete or ignore the 4K ones unless the drive is sized for them.
-5. **Settings → General → Security**: copy the **API Key** (for Prowlarr and Jellyseerr).
+6. **Settings → General → Security**: copy the **API Key** (for Prowlarr and Jellyseerr).
 
 ## 4. Radarr: `https://<ts>:8444/radarr`
 
@@ -115,6 +125,9 @@ Same as Sonarr, with these differences:
   username and password → Save, then sign in.
 - Root folder **`/data/movies`**; **Unmonitor Deleted Movies** = on.
 - Download client SABnzbd with Category **`movies`** (Host `sabnzbd`, Port `8080`, URL Base `/sabnzbd`).
+- **Settings → Connect → + → Emby / Jellyfin** exactly as in Sonarr step 4 (same Jellyfin API key,
+  Show Advanced for URL Base `/watch`, Update Library ✓). Triggers: On File Import, On File Upgrade,
+  On Rename, On Movie Delete, On Movie File Delete.
 - Copy the API key from **Settings → General**.
 
 ## 5. Prowlarr: `https://<ts>:8444/prowlarr`
@@ -173,11 +186,18 @@ every episode of every show you add. Start narrow and widen on purpose:
 1. Sonarr: add one small, recent show with *Pilot Episode*, then **Search** it.
 2. SABnzbd shows it downloading into `/incomplete-downloads`, then completing into
    `/data/downloads/complete/tv`.
-3. Sonarr imports it to `/data/tv/...`. On the server, the link count shows the hardlink:
-   `stat -c '%h %n' /media/tv/<Show>/*/*` → `2`.
-4. Jellyfin shows the episode after a library scan (*Dashboard → Libraries → Scan*). Play it from a
-   phone off the tailnet via `https://<public_watch_host>/watch` and check *Dashboard → Activity*
-   for "(HW)" transcoding when forcing a lower quality.
+3. Sonarr **moves** it into the library (Usenet: no hardlink, so the link count is 1; on the same
+   drive the move is an instant rename). Check all three:
+   - the file is in `/data/tv/<Show>/Season N/` (on the server: `ls /media/tv/<Show>/Season*/`);
+   - `/data/downloads/complete/tv/` has nothing left for that job (Sonarr removed it from SABnzbd's
+     history and deleted its folder);
+   - Sonarr **History** has an import entry (`downloadFolderImported`; the download icon, tooltip
+     "Episode downloaded successfully and picked up from download client") seconds after SABnzbd
+     completed.
+4. Jellyfin shows the episode within a minute (the Connect entry from Sonarr step 4 triggers the
+   scan; without it: *Dashboard → Libraries → Scan*). Play it from a phone off the tailnet via
+   `https://<public_watch_host>/watch` and check *Dashboard → Activity* for "(HW)" transcoding when
+   forcing a lower quality.
 5. Sonarr/Radarr **System → Status** shows no health warnings (download client, root folder, indexers).
 
 ## 9. Phone alerts (dashboard): `https://<ts>/`

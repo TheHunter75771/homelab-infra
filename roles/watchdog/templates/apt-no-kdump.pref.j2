@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+# kdump is disabled on this box (role watchdog). ubuntu-server-minimal recommends kdump-tools;
+# this pin stops apt from installing it again (and with it a crashkernel= memory reservation).
+{% for package in watchdog_kdump_packages %}
+Package: {{ package }}
+Pin: version *
+Pin-Priority: -1
+{% if not loop.last %}
+
+{% endif %}
+{% endfor %}

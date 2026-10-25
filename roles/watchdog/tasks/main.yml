@@ -73,7 +73,43 @@
   when: not watchdog_available
   notify: Re-execute systemd
 
-- name: Apply the systemd manager setting before checking it
+# Crash recovery, independent of the hardware watchdog (it lives here because it replaces the
+# hardware reset this role was meant to provide; base keeps only generic settings).
+- name: The kernel reboots itself after a panic or a hard lockup
+  ansible.builtin.template:
+    src: sysctl-homelab-panic.conf.j2
+    dest: "{{ watchdog_sysctl_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Apply panic sysctls (watchdog)
+
+- name: Kdump is removed (its postrm also regenerates GRUB)
+  ansible.builtin.apt:
+    name: "{{ watchdog_kdump_packages }}"
+    state: absent
+    purge: true
+  notify:
+    - Regenerate GRUB config (watchdog)
+    - Flag a reboot to free the crashkernel memory (watchdog)
+
+- name: The crashkernel= reservation is gone from GRUB's defaults
+  ansible.builtin.file:
+    path: "{{ watchdog_kdump_grub_cfg }}"
+    state: absent
+  notify:
+    - Regenerate GRUB config (watchdog)
+    - Flag a reboot to free the crashkernel memory (watchdog)
+
+- name: APT never installs kdump again
+  ansible.builtin.template:
+    src: apt-no-kdump.pref.j2
+    dest: /etc/apt/preferences.d/homelab-no-kdump.pref
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Apply the systemd, sysctl and GRUB changes before checking them
   ansible.builtin.meta: flush_handlers
 
 - name: Read PID 1's runtime watchdog setting
@@ -104,3 +140,59 @@
       {{ (watchdog_state.content | default('') | b64decode | trim) or 'unknown' }}, after the drop-in was applied.
     quiet: true
   when: watchdog_available
+
+- name: Read the live panic settings
+  ansible.builtin.slurp:
+    src: "/proc/sys/kernel/{{ item }}"
+  loop:
+    - panic
+    - panic_on_oops
+    - hardlockup_panic
+  register: watchdog_panic_live
+
+- name: Panic, oops and hard-lockup settings are live
+  ansible.builtin.assert:
+    that:
+      - watchdog_live['panic'] == watchdog_panic_reboot_sec | string
+      - watchdog_live['panic_on_oops'] == '1'
+      - watchdog_live['hardlockup_panic'] == '1'
+    fail_msg: "Live kernel settings: {{ watchdog_live }}"
+    quiet: true
+  vars:
+    watchdog_live: >-
+      {{ dict(watchdog_panic_live.results | map(attribute='item')
+         | zip(watchdog_panic_live.results | map(attribute='content') | map('b64decode') | map('trim'))) }}
+
+- name: Look for the generated GRUB config
+  ansible.builtin.stat:
+    path: /boot/grub/grub.cfg
+  register: watchdog_grub_cfg
+
+- name: Read the generated GRUB config
+  ansible.builtin.slurp:
+    src: /boot/grub/grub.cfg
+  register: watchdog_grub
+  when: watchdog_grub_cfg.stat.exists
+
+- name: The next boot reserves no crashkernel memory
+  ansible.builtin.assert:
+    that:
+      - "'crashkernel=' not in (watchdog_grub.content | b64decode)"
+    fail_msg: /boot/grub/grub.cfg still passes crashkernel=; check /etc/default/grub and grub.d, then run update-grub.
+    quiet: true
+  when: watchdog_grub_cfg.stat.exists
+
+- name: Read how much memory the running kernel holds for a crash kernel
+  ansible.builtin.slurp:
+    src: /sys/kernel/kexec_crash_size
+  register: watchdog_crash_size
+  failed_when: false
+
+# Not a change: shown on every run until the box has rebooted without crashkernel=.
+- name: Say that a reboot is needed to free the crashkernel memory
+  ansible.builtin.debug:
+    msg: >-
+      REBOOT NEEDED (not done by Ansible): the running kernel still reserves
+      {{ ((watchdog_crash_size.content | b64decode | trim | int) / 1048576) | int }} MiB for kdump's crash kernel.
+      kdump is removed and the next boot won't reserve it.
+  when: (watchdog_crash_size.content | default('MA==') | b64decode | trim | int) > 0

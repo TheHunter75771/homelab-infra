@@ -6,3 +6,15 @@ watchdog_device: /dev/watchdog0
 watchdog_runtime_sec: 30s
 # Upper bound on a hung shutdown/reboot.
 watchdog_reboot_sec: 10min
+
+# Crash recovery (docs/CONTRACTS.md §7, amended 2026-10-24). On this hardware the TCO timer never
+# resets the box, so recovery rests on the kernel rebooting itself after a panic.
+watchdog_sysctl_file: /etc/sysctl.d/60-homelab-panic.conf
+watchdog_panic_reboot_sec: 10
+
+# kdump is disabled (Noah, 2026-10-24): purged, its crashkernel= reservation removed, and pinned
+# so a metapackage's Recommends or an upgrade can't bring it back. kexec-tools may stay.
+watchdog_kdump_packages:
+  - kdump-tools
+  - linux-crashdump
+watchdog_kdump_grub_cfg: /etc/default/grub.d/kdump-tools.cfg
