@@ -2,9 +2,14 @@
 
 After the first successful `playbooks/site.yml`, every app is running with **empty** settings.
 Nothing was restored. Role `stacks` wrote a few presets before the first start (URL bases, "login
-required" for the *arr apps, SABnzbd folders and host check, the Jellyfin base URL and known proxy).
-This runbook covers the rest, in order, about 30–45 minutes. The *arr logins (sections 3–5) come
-first: until you create them, those apps are open to anyone who can reach them.
+required" for the *arr apps, SABnzbd folders and host check, the Jellyfin base URL, known proxy and
+LAN networks). This runbook covers the rest, in order, about 30–45 minutes. The *arr logins
+(sections 3–5) come first: until you create them, those apps are open to anyone who can reach them.
+The public tunnel is **off** on a clean start: `site.yml` holds it back while Jellyfin's startup
+wizard is unfinished (anyone who reaches an unfinished wizard can create the admin) and says so in its
+output. Section 1 step 8 is a second `site.yml` run, which starts the tunnel. Until then the dashboard
+shows "cloudflared is down" (a banner only, no push). That's expected: don't start the edge stack by
+hand.
 
 **Where:** a device on the tailnet. All admin URLs use the server's tailnet name over HTTPS
 (`tailscale serve`). Below, `<ts>` is the value of `tailnet_fqdn` from `inventory/host_vars/`
@@ -33,22 +38,46 @@ Paths inside the containers: the media drive is `/data` (`/data/tv`, `/data/movi
 
 ## 1. Jellyfin: `https://<ts>:8444/watch`
 
-1. Startup wizard → language → **create the admin user** with a strong password. Jellyfin is on the
-   internet through the tunnel.
+1. Startup wizard → language → **create the admin user** with a strong password. Jellyfin is not
+   public yet: the tunnel stays off until the wizard is done and `site.yml` runs again (step 8). From
+   then on it is on the internet through the tunnel.
 2. **Add Media Library** twice:
    - Content type **Shows**, folder **`/data/tv`**.
    - Content type **Movies**, folder **`/data/movies`**.
    Set metadata language/country, leave the rest at defaults.
-3. **Remote access**: **Allow remote connections** = **on** (tunnel and tailnet clients are not
-   "LAN" to Jellyfin). **Automatic port mapping** = **off**.
+3. **Remote access**: **Allow remote connections** = **on**. This is the server-wide switch, and it
+   stays on: public clients come through the tunnel and are remote to Jellyfin. Tailnet and home-LAN
+   clients count as LAN through the preset LAN networks (step 6). The host's own calls to Jellyfin
+   (the tunnel's wizard check in `site.yml`, the dashboard) arrive from the excluded `hl-public`
+   gateway and count as remote too, so with the switch off Jellyfin answers them with 503. To take
+   the public site offline, take the edge stack down instead:
+   `sudo docker compose -f /srv/homelab/stacks/edge/compose.yaml down` (the next `site.yml` run
+   starts it again).
 4. Finish the wizard, then sign in.
 5. **Dashboard → Playback → Transcoding**:
    - Hardware acceleration **Intel QuickSync (QSV)**, QSV device **`/dev/dri/renderD128`**.
    - Hardware decoding: tick **H264, HEVC, HEVC 10bit, VP9** (the iGPU has no AV1 decode, so leave it off).
    - **Enable hardware encoding** on. Leave *low-power encoding* off. Save.
-6. **Dashboard → Networking**: check **Base URL** = `/watch` and **Known proxies** = `172.30.10.0/24`
-   (both preset; don't change them).
-7. TVs on the home network add the server as **`http://<lan_ip>:8096/watch`** (`lan_ip` from host_vars).
+6. **Dashboard → Networking**: check **Base URL** = `/watch`, **Known proxies** = `172.30.10.0/24` and
+   **LAN networks** =
+   `10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, fc00::/7, fe80::/10, !172.30.10.0/24`
+   (all preset; don't change them). The last entry is an exclusion: the tunnel's own network never
+   counts as LAN, even for a request that reaches Jellyfin without the visitor's address.
+   - **An entry missing?** The presets are written only into a new `network.xml`, so a Jellyfin
+     config that predates them doesn't have them. Enter the full list above and **Save** before
+     step 7: step 7 applies at once (every request is checked again), and without `100.64.0.0/10` it
+     cuts the admin off over Tailscale straight away.
+   - **Never remove** `100.64.0.0/10` (the tailnet: the admin would be locked out over Tailscale) or
+     `!172.30.10.0/24` (a tunnel request without the visitor's address would count as LAN).
+   - **Locked out over Tailscale?** Sign in from the home LAN at `http://<lan_ip>:8096/watch` and fix
+     **LAN networks** there.
+7. **Dashboard → Users →** the admin user → untick **Allow remote connections to this server** →
+   **Save**. The admin then works from the home LAN and the tailnet only; Jellyfin refuses its logins
+   through the public `watch.` subdomain. Accounts for friends and family keep the box ticked.
+8. **Start the tunnel**: run `playbooks/site.yml` again from the workstation. The wizard is done now,
+   so this run starts `cloudflared` (the earlier runs said the tunnel was held back). Check it from a
+   device off the tailnet ([cloudflare.md](cloudflare.md) section 4).
+9. TVs on the home network add the server as **`http://<lan_ip>:8096/watch`** (`lan_ip` from host_vars).
    Auto-discovery is not available (the container is not on host networking).
 
 ## 2. SABnzbd: `https://<ts>:8444/sabnzbd`
@@ -197,8 +226,9 @@ every episode of every show you add. Start narrow and widen on purpose:
 4. Jellyfin shows the episode within a minute (the Connect entry from Sonarr step 4 triggers the
    scan; without it: *Dashboard → Libraries → Scan*). Play it from a phone off the tailnet via
    `https://<public_watch_host>/watch` (in a browser the bare `https://<public_watch_host>` redirects
-   there; the Jellyfin app needs the `/watch` suffix) and check *Dashboard → Activity* for "(HW)"
-   transcoding when forcing a lower quality.
+   there; the Jellyfin app needs the `/watch` suffix), signed in as a **non-admin** user (add one
+   under **Dashboard → Users** if there is none yet): the admin is refused there (section 1 step 7).
+   Then check *Dashboard → Activity* for "(HW)" transcoding when forcing a lower quality.
 5. Sonarr/Radarr **System → Status** shows no health warnings (download client, root folder, indexers).
 
 ## 9. Phone alerts (dashboard): `https://<ts>/`

@@ -1,6 +1,51 @@
 ---
 # The tunnel runs only outside rehearsal. In rehearsal there is no tunnel token and the stack is
 # torn down (with its .env) if an earlier run left one behind.
+#
+# Wizard gate: until Jellyfin's startup wizard is finished, anyone who can reach Jellyfin can run it
+# and create the admin. On a clean start media.yml has just started an empty Jellyfin, so the tunnel
+# waits: the token and compose file are written, but the stack stays down (taken down if it runs)
+# until the wizard is done over the tailnet (first-run-apps.md §1) and site.yml runs again. The rest
+# of the play (utils) still deploys. A box whose wizard is done sees no change. If Jellyfin can't be
+# asked, the play stops before anything here is touched.
+
+- name: Edge | Jellyfin's startup wizard state
+  when: not rehearsal | bool
+  block:
+    # media.yml waited for Jellyfin to be healthy; the retries cover a slow first start.
+    - name: Edge | ask Jellyfin whether its startup wizard is done (read-only)
+      ansible.builtin.uri:
+        url: "{{ stacks_jellyfin_public_info_url }}"
+        return_content: true
+        timeout: 10
+      register: stacks_jellyfin_info
+      until: stacks_jellyfin_info.status | default(0) == 200
+      retries: 6
+      delay: 5
+      check_mode: false
+
+    - name: Edge | Jellyfin's answer has the wizard state
+      ansible.builtin.assert:
+        that:
+          - stacks_jellyfin_info.json is defined
+          - stacks_jellyfin_info.json is mapping
+          - stacks_jellyfin_info.json.StartupWizardCompleted is defined
+          - stacks_jellyfin_info.json.StartupWizardCompleted is boolean
+        fail_msg: the answer is not JSON with a true/false StartupWizardCompleted
+        quiet: true
+
+    - name: Edge | the tunnel is held back while the wizard is open
+      ansible.builtin.set_fact:
+        stacks_edge_held: "{{ not stacks_jellyfin_info.json.StartupWizardCompleted }}"
+  rescue:
+    - name: Edge | stop - Jellyfin's wizard state is unknown (the tunnel is left as it is)
+      ansible.builtin.fail:
+        msg: >-
+          Could not read Jellyfin's StartupWizardCompleted from {{ stacks_jellyfin_public_info_url }}
+          ({{ ansible_failed_result.msg | default('no detail') }}). The edge stack was not touched.
+          A connection error or a 503 can mean Jellyfin is still starting; a 503 can also mean its
+          server-wide "Allow remote connections" is off (the host's calls count as remote,
+          first-run-apps.md §1 step 3). Check `sudo docker logs jellyfin`, then re-run site.yml.
 
 - name: Edge | tunnel token (.env, root only)
   ansible.builtin.copy:
@@ -31,7 +76,40 @@
     remove_orphans: true
     wait: true
     wait_timeout: "{{ stacks_compose_wait_timeout }}"
-  when: not rehearsal | bool
+  when:
+    - not rehearsal | bool
+    - not stacks_edge_held
+
+- name: Edge | wizard open - look for the edge compose file
+  ansible.builtin.stat:
+    path: "{{ homelab_stacks_dir }}/edge/compose.yaml"
+    get_checksum: false
+  register: stacks_edge_held_compose_stat
+  when:
+    - not rehearsal | bool
+    - stacks_edge_held
+
+# Down, not stopped: a stopped container would come back with `docker start` or the dashboard's Start.
+- name: Edge | wizard open - the tunnel stays down
+  community.docker.docker_compose_v2:
+    project_src: "{{ homelab_stacks_dir }}/edge"
+    state: absent
+    remove_orphans: true
+  when:
+    - not rehearsal | bool
+    - stacks_edge_held
+    - stacks_edge_held_compose_stat.stat.exists
+
+- name: Edge | wizard open - what to do next
+  ansible.builtin.debug:
+    msg:
+      - The public tunnel is NOT running. Jellyfin's startup wizard is not finished, and until it is,
+        anyone who reaches Jellyfin can create its admin.
+      - Finish the wizard over the tailnet (docs/runbooks/first-run-apps.md, section 1), then re-run
+        site.yml. That run starts the tunnel.
+  when:
+    - not rehearsal | bool
+    - stacks_edge_held
 
 - name: Edge | rehearsal - look for a leftover edge stack
   ansible.builtin.stat:

@@ -2,7 +2,7 @@
 # Clean start: no app data is restored. Presets are written only when absent (force: false), before the
 # first start; each app then fills in its own defaults and owns the file from there on.
 
-- name: Media | Jellyfin network preset (URL base /watch; the tunnel network is a known proxy)
+- name: Media | Jellyfin network preset (URL base /watch; LAN incl. the tailnet; the tunnel network is a known proxy, never LAN)
   ansible.builtin.template:
     src: presets/jellyfin-network.xml.j2
     dest: "{{ homelab_data_dir }}/jellyfin/network.xml"

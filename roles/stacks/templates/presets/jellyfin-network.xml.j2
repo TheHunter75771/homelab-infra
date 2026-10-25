@@ -1,6 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <NetworkConfiguration xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <BaseUrl>/watch</BaseUrl>
+  <LocalNetworkSubnets>
+{% for subnet in stacks_jellyfin_lan_subnets %}
+    <string>{{ subnet }}</string>
+{% endfor %}
+    <string>!{{ stacks_public_subnet }}</string>
+  </LocalNetworkSubnets>
   <KnownProxies>
     <string>{{ stacks_public_subnet }}</string>
   </KnownProxies>

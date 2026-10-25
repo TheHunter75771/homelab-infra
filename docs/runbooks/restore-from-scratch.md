@@ -63,13 +63,14 @@ There's no restore playbook yet, so do it by hand:
    - Sonarr/Radarr: series and movies, root folders, download client, Connect.
    - Prowlarr: the indexer and its app links.
    - SABnzbd: the server and categories.
-   - Jellyfin: wizard done, libraries present.
+   - Jellyfin: wizard done, libraries present. **Dashboard → Networking → LAN networks** includes `100.64.0.0/10` and `!172.30.10.0/24`, and the admin's *Allow remote connections* is off. A backup from before 2026-10-25 has neither; fix them per `first-run-apps.md` §1 steps 6–7, in that order.
    - Jellyseerr: `initialized`, with its Radarr/Sonarr servers.
 
    **Rehearsed 2026-10-25:** extract and verify take under a second, each app is up within about 5 s, and the whole thing is about 5 minutes hands-on. In an *offline* restore, Jellyseerr's `/api/v1/status` (its healthcheck) takes about 7 s per call because it checks GitHub releases, so the container can show unhealthy until the network is back. That's harmless.
+9. **Start the tunnel:** re-run `playbooks/site.yml`. Role `stacks` holds the tunnel back while Jellyfin's startup wizard is unfinished, so the §3 runs on the empty box left it off. The restored Jellyfin's wizard is done, so this run starts `cloudflared`. Expect `changed` only on the edge stack; a run after that is `changed=0`.
 
 ## 5. Off-box pieces
-Re-run `playbooks/gaming-pc.yml` and `playbooks/edge.yml`. Check the Cloudflare tunnel route (`cloudflare.md`).
+Re-run `playbooks/gaming-pc.yml` and `playbooks/edge.yml`. Check the Cloudflare side with `terraform/cloudflare/plan-guard.sh`: the plan should show no changes (the tunnel route, DNS and zone settings still match the code; see that module's README). Cloudflare isn't on the box, so a box restore doesn't touch it.
 
 ## 6. Prove it
 - Push test: `sudo homelab-notify --title test --body test` (all devices), or `sudo homelab-notify --test --title test --body test` (devices labelled `test` only).

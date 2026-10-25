@@ -7,6 +7,28 @@ stacks_public_network: hl-public
 stacks_public_subnet: 172.30.10.0/24
 stacks_public_bridge: br-hl-public
 
+# Jellyfin's LAN networks (network.xml LocalNetworkSubnets). With the list empty, Jellyfin counts loopback
+# and RFC1918 as LAN (the IPv6 ranges only with EnableIPv6, off by default and not preset), never the tailnet.
+# This list is RFC1918, the tailnet and IPv6 ULA/link-local. Tailnet clients arrive through `tailscale serve`
+# from the hl-public gateway, a known proxy, so Jellyfin takes their 100.x address from X-Forwarded-For and
+# would call them remote without 100.64.0.0/10 (Tailscale's IPv6 range is inside fc00::/7). Tunnel clients
+# stay remote: Cloudflare appends the real address last, and Jellyfin trusts only that rightmost entry.
+# The preset adds `!<stacks_public_subnet>` as the last entry, an exclusion (exclusions win): a tunnel
+# request whose X-Forwarded-For is missing or unparsable keeps cloudflared's own address, which is inside
+# 172.16.0.0/12 and would otherwise count as LAN. It is derived from stacks_public_subnet in the template,
+# so it is not repeated here. Lets the admin account run with remote access off (first-run-apps.md §1).
+stacks_jellyfin_lan_subnets:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  - 100.64.0.0/10
+  - fc00::/7
+  - fe80::/10
+
+# The edge stack waits for Jellyfin's startup wizard (tasks/edge.yml): role stacks reads
+# StartupWizardCompleted here, on the host (anonymous and read-only), before it starts the tunnel.
+stacks_jellyfin_public_info_url: http://127.0.0.1:8096/watch/System/Info/Public
+
 # The boot gate's proof that /media is the real drive (created by role storage).
 stacks_media_sentinel: "{{ media_mount }}/.homelab-media-sentinel"
 # Library folders on the drive. Created 1001:1002 2775 only after the mount is verified.

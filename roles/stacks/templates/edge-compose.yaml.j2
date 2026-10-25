@@ -1,7 +1,8 @@
 # {{ ansible_managed }}
 # Edge stack (docs/CONTRACTS.md §6): the Cloudflare tunnel, for public streaming only.
 # Its one public hostname (the whole watch. subdomain, ADR 0016) points at http://jellyfin:8096 over
-# {{ stacks_public_network }}; that route is set in the Cloudflare dashboard (docs/runbooks/cloudflare.md).
+# {{ stacks_public_network }}. That route is the tunnel's remotely managed ingress, defined as OpenTofu
+# code in terraform/cloudflare/tunnel.tf (history and the from-scratch path: docs/runbooks/cloudflare.md).
 # Not deployed in rehearsal.
 name: edge
 

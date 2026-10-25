@@ -150,5 +150,7 @@ jobs:
         run: |
           ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ANSIBLE_FILTER_PLUGINS=$PWD/roles/base/filter_plugins \
             ansible-playbook -i localhost, -c local roles/base/tests/test_sysctl_files.yml
+      - name: jellyfin network preset
+        run: python3 -m unittest discover -s roles/stacks/tests -v
       - name: tailscale serve config
         run: ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/tailscale_serve/tests/test_serve_config.yml
