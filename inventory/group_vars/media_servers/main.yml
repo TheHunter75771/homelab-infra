@@ -6,7 +6,8 @@ ansible_become_exe: /usr/bin/sudo.ws
 rehearsal: false
 # Boot gate (see docs/CONTRACTS.md §3)
 bootgate_wait_seconds: 720
-bootgate_powercycle_method: reboot   # switch to rtcwake after the BIOS check (P1/P7)
+bootgate_powercycle_method: rtcwake  # verified 2026-10-24: S5 cuts USB power (drive spun down) and the RTC alarm wakes the box
+bootgate_rtcwake_seconds: 600        # alarm starts before shutdown; a gate power-cycle can shut down slowly (stuck I/O)
 bootgate_retry_minutes: 5
 # Secrets mapped from vault.yml
 cloudflared_tunnel_token: "{{ vault_cloudflared_tunnel_token }}"
