@@ -71,3 +71,38 @@ export async function waitFor(fn, { timeout = 4000, interval = 10, what = 'condi
     await new Promise((r) => setTimeout(r, interval));
   }
 }
+
+// CSP guard for shipped HTML (the server's CSP forbids inline code). Returns a list of problems, empty when
+// the markup only loads external scripts. Deliberately tag-by-tag rather than matching <script>…</script>
+// pairs, which misses `</script >`, `</script foo>` and scripts that are never closed:
+// - every opening `<script` tag (up to its `>`, or the end of the text) must carry a src attribute;
+// - an external script must have no inline content before its closing tag (`</script` + anything + `>`),
+//   and must be closed at all (an unfinished opening tag counts as never closed);
+// - no inline event-handler attributes (`on…=`) in any tag, no `javascript:` URLs, no <style> or style=.
+export function inlineCodeProblems(html) {
+  const problems = [];
+  const text = String(html);
+  const opening = /<script\b/gi;
+  for (let m = opening.exec(text); m; m = opening.exec(text)) {
+    const end = text.indexOf('>', m.index);
+    const tag = end === -1 ? text.slice(m.index) : text.slice(m.index, end + 1);
+    if (!/\ssrc\s*=/i.test(tag)) {
+      problems.push(`inline script: ${tag.slice(0, 60)}`);
+      continue;
+    }
+    const after = end === -1 ? text.length : end + 1; // an unfinished opening tag is never closed either
+    const closing = /<\/script\b[^>]*>/gi;
+    closing.lastIndex = after;
+    const close = closing.exec(text);
+    if (!close) problems.push(`script never closed: ${tag.slice(0, 60)}`);
+    else if (text.slice(after, close.index).trim()) problems.push(`external script with inline content: ${tag.slice(0, 60)}`);
+  }
+  const tags = /<[a-z][^>]*(?:>|$)/gi;
+  for (let m = tags.exec(text); m; m = tags.exec(text)) {
+    if (/\son[a-z0-9_-]+\s*=/i.test(m[0])) problems.push(`inline event handler: ${m[0].slice(0, 60)}`);
+    if (/\sstyle\s*=/i.test(m[0])) problems.push(`style attribute: ${m[0].slice(0, 60)}`);
+  }
+  if (/<style\b/i.test(text)) problems.push('<style> element');
+  if (/javascript\s*:/i.test(text)) problems.push('javascript: URL');
+  return problems;
+}

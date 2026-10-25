@@ -8,8 +8,11 @@ permissions:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
@@ -29,10 +32,12 @@ jobs:
         run: ansible-lint
   secrets:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: gitleaks (full history)
         run: >
           docker run --rm -v "$PWD:/repo" -w /repo
@@ -40,11 +45,14 @@ jobs:
           git /repo --redact --no-banner
   dashboard-server:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: apps/dashboard/server
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
@@ -55,11 +63,14 @@ jobs:
       - run: npm test
   dashboard-web:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: apps/dashboard/web
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
@@ -70,8 +81,11 @@ jobs:
       - run: npm test
   role-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"

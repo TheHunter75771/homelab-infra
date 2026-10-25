@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildVendorFiles } from '../scripts/vendor.mjs';
 import { stamp, shellFiles } from '../scripts/stamp-sw.mjs';
+import { inlineCodeProblems } from './helpers.mjs';
 import { ICONS } from '../public/js/icons.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -66,15 +67,44 @@ test('no CDN or any other origin at runtime', () => {
   assert.deepEqual(hits, []);
 });
 
+test('the CSP guard catches every way to sneak inline code into HTML', () => {
+  const bad = {
+    'inline script, closing tag with a space': '<script>alert(1)</script >',
+    'inline script, closing tag with junk': '<script>alert(1)</script foo="x">',
+    'inline script never closed': '<p>x</p><script>alert(1)',
+    'empty inline script': '<script></script>',
+    'src only as part of another attribute': '<script data-src="/a.js"></script>',
+    'external script tag never finished': '<script src="/a.js"',
+    'external tag never finished, after a closed one': '<script src="/a.js"></script><script src="/b.js"',
+    'external tag never finished, after a stray closing tag': '</script><script src="/a.js"',
+    'opening tag never finished': '<script type="module"',
+    'upper-case inline script': '<SCRIPT>alert(1)</SCRIPT>',
+    'inline module script': '<script type="module">import "./x.js"</script>',
+    'second script inline': '<script src="/a.js"></script><script >alert(1)</script>',
+    'external script with inline content': '<script src="/a.js">alert(1)</script >',
+    'external script never closed': '<script src="/a.js">',
+    'onload handler': '<body onload="go()">',
+    'handler with spaces and odd case': '<img src="/x.png" OnError = "go()">',
+    'handler in an unfinished tag': '<div onclick="go()"',
+    'javascript: URL': '<a href="javascript:alert(1)">x</a>',
+    'javascript: URL with spaces and case': '<a href="JavaScript :alert(1)">x</a>',
+    'style element': '<style>p{}</style>',
+    'style attribute': '<p style="color:red">x</p>',
+  };
+  for (const [name, html] of Object.entries(bad)) assert.notDeepEqual(inlineCodeProblems(html), [], `must be caught: ${name}`);
+  const good = [
+    '<script type="module" src="/js/main.js"></script>',
+    '<script src=/js/a.js></script >',
+    '<SCRIPT SRC="/js/a.js"></SCRIPT>',
+    '<link rel="modulepreload" href="/js/boot.js"><meta name="description" content="online status">',
+  ];
+  for (const html of good) assert.deepEqual(inlineCodeProblems(html), [], html);
+});
+
 test('CSP-safe: no inline scripts, styles or handlers in the HTML; no style strings in templates', () => {
-  const html = fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8');
-  assert.doesNotMatch(html, /<style/i);
-  assert.doesNotMatch(html, /\sstyle=/i);
-  assert.doesNotMatch(html, /\son[a-z]+=/i);
-  for (const m of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
-    assert.match(m[1], /\ssrc=/, 'every script is external');
-    assert.equal(m[2].trim(), '');
-  }
+  const pages = files().filter((p) => p.endsWith('.html'));
+  assert.ok(pages.length >= 1);
+  for (const p of pages) assert.deepEqual(inlineCodeProblems(fs.readFileSync(p, 'utf8')), [], rel(p));
   for (const f of files(path.join(PUBLIC, 'js'))) {
     const text = fs.readFileSync(f, 'utf8');
     assert.doesNotMatch(text, /style="/, `${rel(f)}: use style=\${{...}} (CSSOM), never a style attribute string`);
