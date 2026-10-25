@@ -336,7 +336,21 @@ are no silent pushes.
 ```bash
 npm ci && npm test        # node:test only: a fake helper on a real Unix socket, fixture host trees, fake media APIs
 npm run coverage
+npm run test:time-travel  # the whole suite as of +40 and +220 days (or pass ISO dates: -- 2027-06-01T12:00:00Z)
 ```
+
+Fixture timestamps are written as literals around a fixed `NOW` (2026-10-24T14:08Z), then shifted by
+`shifter(now)` in `test/helpers/host.js`. At `NOW` the output is byte-identical to the literals. In-process tests
+anchor at `NOW` and pass `clock` to `createDashboard`. A real server process reads the real clock. So its
+fixtures must be built at the real time, `buildHost(t, s, { now: Date.now() })` and `helperFor(s, now)`, and
+it must be started through `spawnServer` (`test/helpers/spawn.js`). That helper refuses fixtures more than
+60 s away from `Date.now()`. `test/timebomb.test.js` fails if:
+- a test spawns the server any other way;
+- a `createDashboard` call has no `clock`;
+- the shifter stops preserving fixture ages.
+
+`test:time-travel` preloads `test/tools/time-shift.mjs`, a constant Date offset, into every process through
+`NODE_OPTIONS`. That includes the spawned servers.
 
 The suite covers:
 - every endpoint and guard;

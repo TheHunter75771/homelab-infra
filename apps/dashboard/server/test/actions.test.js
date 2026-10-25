@@ -81,7 +81,7 @@ test('an app started outside the dashboard loses its "stopped on purpose" mark',
   const d = await startDashboard(t, 'normal', { start: false });
   fs.writeFileSync(`${d.host.stateDir}/stopped.json`, '["sonarr"]');
   const { createDashboard } = await import('../src/dashboard.js');
-  const dash = createDashboard(d.dash.cfg, { log: d.log, statfs: d.statfs, fetch: d.fetch, run: d.run });
+  const dash = createDashboard(d.dash.cfg, { log: d.log, clock: d.clock, statfs: d.statfs, fetch: d.fetch, run: d.run });
   await dash.start({ background: false }); // sonarr is running in ps
   assert.deepEqual(JSON.parse(fs.readFileSync(`${d.host.stateDir}/stopped.json`, 'utf8')), []);
   dash.stop();

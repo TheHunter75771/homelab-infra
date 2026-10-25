@@ -6,15 +6,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawnServer } from './helpers/spawn.js';
 import { once } from 'node:events';
-import { fileURLToPath } from 'node:url';
 import { HttpError, parseTarget, SSE_MAX_BUFFER } from '../src/http/common.js';
 import { startFakeHelper, container, ALL_APPS } from './helpers/fake-helper.js';
 import { buildHost, helperFor, writeWeb } from './helpers/host.js';
 import { captureLogger, getJson, postJson, sse, startDashboard } from './helpers/server.js';
 
-const SERVER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../src/server.js');
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Raw HTTP/1.1 exchange: the exact request line, the status line back.
@@ -58,8 +56,9 @@ test('parseTarget: origin-form only; everything else is a 400 HttpError', () => 
 });
 
 test('the real server: //, /\\, /%, absolute-form and * are 400s and the process stays up', async (t) => {
-  const helper = await startFakeHelper(t, helperFor('normal'));
-  const host = buildHost(t, 'normal', { helperSocket: helper.socketPath });
+  const now = Date.now();
+  const helper = await startFakeHelper(t, helperFor('normal', now));
+  const host = buildHost(t, 'normal', { helperSocket: helper.socketPath, now });
   writeWeb(host.cfg.webDir);
   const conf = path.join(host.root, 'config.json');
   fs.writeFileSync(conf, JSON.stringify({
@@ -67,8 +66,7 @@ test('the real server: //, /\\, /%, absolute-form and * are 400s and the process
     gate_dir: host.cfg.gateDir, proc_dir: host.cfg.procDir, data_dir: host.cfg.dataDir, timezone: 'UTC',
     backup_status_file: host.cfg.backupStatusFile, notify_history_file: host.cfg.notifyHistoryFile,
   }));
-  const child = spawn(process.execPath, [SERVER], { env: { PATH: process.env.PATH, DASHBOARD_CONFIG: conf, PORT: '0', HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'pipe'] });
-  t.after(() => child.exitCode === null && child.kill('SIGKILL'));
+  const child = spawnServer(t, { host, env: { DASHBOARD_CONFIG: conf, PORT: '0', HOST: '127.0.0.1' } });
   let out = '';
   child.stdout.on('data', (d) => (out += d));
   let port;
@@ -96,10 +94,12 @@ test('a handler that throws after answering costs that request only; the server 
       captured.log.info(msg, f);
     },
   };
-  const helper = await startFakeHelper(t, helperFor('normal'));
-  const host = buildHost(t, 'normal', { helperSocket: helper.socketPath });
+  const now = Date.now();
+  const helper = await startFakeHelper(t, helperFor('normal', now));
+  const host = buildHost(t, 'normal', { helperSocket: helper.socketPath, now });
   const { createDashboard } = await import('../src/dashboard.js');
-  const dash = createDashboard(host.cfg, { log, run: null, statfs: async () => ({ bsize: 1, blocks: 1, bfree: 1, bavail: 1 }) });
+  // real clock, so real-time fixtures (and the clock passed explicitly, as test/timebomb.test.js requires)
+  const dash = createDashboard(host.cfg, { log, clock: () => Date.now(), run: null, statfs: async () => ({ bsize: 1, blocks: 1, bfree: 1, bavail: 1 }) });
   await new Promise((r) => dash.server.listen(0, '127.0.0.1', r));
   t.after(() => new Promise((r) => dash.server.close(r)));
   const base = `http://127.0.0.1:${dash.server.address().port}`;
@@ -112,13 +112,13 @@ test('a handler that throws after answering costs that request only; the server 
 });
 
 test('process-level unhandledRejection is logged and the process keeps running', async (t) => {
-  const helper = await startFakeHelper(t, helperFor('normal'));
-  const host = buildHost(t, 'normal', { helperSocket: helper.socketPath });
+  const now = Date.now();
+  const helper = await startFakeHelper(t, helperFor('normal', now));
+  const host = buildHost(t, 'normal', { helperSocket: helper.socketPath, now });
   const conf = path.join(host.root, 'config.json');
   fs.writeFileSync(conf, JSON.stringify({ state_dir: host.cfg.stateDir, push_dir: host.cfg.pushDir, helper_socket: helper.socketPath, proc_dir: host.cfg.procDir, timezone: 'UTC' }));
   const inject = 'data:text/javascript,setTimeout(()=>{Promise.reject(new Error("stray boom"))},150)';
-  const child = spawn(process.execPath, ['--import', inject, SERVER], { env: { PATH: process.env.PATH, DASHBOARD_CONFIG: conf, PORT: '0', HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'pipe'] });
-  t.after(() => child.exitCode === null && child.kill('SIGKILL'));
+  const child = spawnServer(t, { host, args: ['--import', inject], env: { DASHBOARD_CONFIG: conf, PORT: '0', HOST: '127.0.0.1' } });
   let out = '';
   child.stdout.on('data', (d) => (out += d));
   for (let i = 0; i < 100 && !out.includes('stray boom'); i++) await wait(20);
@@ -283,15 +283,12 @@ test('logger: every line is redacted, credential shapes always, configured keys 
 
 async function crashingServer(t, code) {
   const { KEYS } = await import('./helpers/host.js');
-  const helper = await startFakeHelper(t, helperFor('normal'));
-  const host = buildHost(t, 'normal', { helperSocket: helper.socketPath });
+  const now = Date.now();
+  const helper = await startFakeHelper(t, helperFor('normal', now));
+  const host = buildHost(t, 'normal', { helperSocket: helper.socketPath, now });
   const conf = path.join(host.root, 'config.json');
   fs.writeFileSync(conf, JSON.stringify({ state_dir: host.cfg.stateDir, push_dir: host.cfg.pushDir, helper_socket: helper.socketPath, proc_dir: host.cfg.procDir, data_dir: host.cfg.dataDir, timezone: 'UTC' }));
-  const child = spawn(process.execPath, ['--import', `data:text/javascript,${encodeURIComponent(code)}`, SERVER], {
-    env: { PATH: process.env.PATH, DASHBOARD_CONFIG: conf, PORT: '0', HOST: '127.0.0.1' },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  t.after(() => child.exitCode === null && child.kill('SIGKILL'));
+  const child = spawnServer(t, { host, args: ['--import', `data:text/javascript,${encodeURIComponent(code)}`], env: { DASHBOARD_CONFIG: conf, PORT: '0', HOST: '127.0.0.1' } });
   const io = { out: '', err: '' };
   child.stdout.on('data', (d) => (io.out += d));
   child.stderr.on('data', (d) => (io.err += d));

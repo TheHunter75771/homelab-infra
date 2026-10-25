@@ -1,19 +1,16 @@
 // The real entry point as systemd runs it: config file in DASHBOARD_CONFIG, JSON logs on stdout, SIGTERM.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawnServer } from './helpers/spawn.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { once } from 'node:events';
-import { fileURLToPath } from 'node:url';
 import { startFakeHelper } from './helpers/fake-helper.js';
 import { buildHost, helperFor, KEYS, writeWeb } from './helpers/host.js';
 
-const MAIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../src/server.js');
 
-function spawnMain(t, env) {
-  const child = spawn(process.execPath, [MAIN], { env: { PATH: process.env.PATH, TZ: 'UTC', ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
-  t.after(() => child.exitCode === null && child.kill('SIGKILL'));
+function spawnMain(t, host, env) {
+  const child = spawnServer(t, { host, env: { TZ: 'UTC', ...env } });
   const lines = [];
   let stderr = '';
   let buf = '';
@@ -79,10 +76,12 @@ function renderConfig(host, helperSocket) {
 }
 
 test('server: starts from the config role dashboard renders, serves API + web, JSON logs without secrets, exits 0 on SIGTERM', async (t) => {
-  const helper = await startFakeHelper(t, helperFor('normal'));
-  const host = buildHost(t, 'normal', { helperSocket: helper.socketPath });
+  // a real process on the real clock: fixtures relative to the real time (see helpers/spawn.js)
+  const now = Date.now();
+  const helper = await startFakeHelper(t, helperFor('normal', now));
+  const host = buildHost(t, 'normal', { helperSocket: helper.socketPath, now });
   writeWeb(host.cfg.webDir);
-  const p = spawnMain(t, { DASHBOARD_CONFIG: renderConfig(host, helper.socketPath), NODE_ENV: 'production', PORT: '0' });
+  const p = spawnMain(t, host, { DASHBOARD_CONFIG: renderConfig(host, helper.socketPath), NODE_ENV: 'production', PORT: '0' });
   const port = await p.listening;
   const base = `http://127.0.0.1:${port}`;
   assert.equal((await fetch(`${base}/healthz`)).status, 200);
@@ -120,24 +119,25 @@ test('server: starts from the config role dashboard renders, serves API + web, J
 });
 
 test('server: bad env or JSON config -> exit 78 with the reason; a named but missing JSON file -> a warning', async (t) => {
-  const dir = buildHost(t, 'clean').root;
+  const host = buildHost(t, 'clean', { now: Date.now() });
+  const dir = host.root;
   const bad = path.join(dir, 'bad.json');
   fs.writeFileSync(bad, '{nope');
-  const child = spawn(process.execPath, [MAIN], { env: { PATH: process.env.PATH, DASHBOARD_CONFIG: bad }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawnServer(t, { host: null, env: { DASHBOARD_CONFIG: bad } });
   let err = '';
   child.stderr.on('data', (d) => (err += d));
   const [code] = await once(child, 'exit');
   assert.equal(code, 78);
   assert.match(JSON.parse(err.trim()).error, /cannot load/);
   for (const env of [{ DASHBOARD_REMOTE_ENABLED: 'maybe' }, { PORT: '99999' }, { DASHBOARD_BOOTGATE_RETRY_MINUTES: '0' }]) {
-    const c = spawn(process.execPath, [MAIN], { env: { PATH: process.env.PATH, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const c = spawnServer(t, { host: null, env });
     let e = '';
     c.stderr.on('data', (x) => (e += x));
     assert.equal((await once(c, 'exit'))[0], 78, JSON.stringify(env));
     assert.equal(JSON.parse(e.trim()).msg, 'config error');
   }
 
-  const missing = spawnMain(t, {
+  const missing = spawnMain(t, host, {
     DASHBOARD_CONFIG: path.join(dir, 'missing.json'),
     PORT: '0',
     HOST: '127.0.0.1',

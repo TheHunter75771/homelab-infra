@@ -12,7 +12,8 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test --test-reporter=spec 'test/*.test.js'",
-    "coverage": "node --test --experimental-test-coverage --test-coverage-include='src/**' 'test/*.test.js'"
+    "coverage": "node --test --experimental-test-coverage --test-coverage-include='src/**' 'test/*.test.js'",
+    "test:time-travel": "node test/tools/time-travel.mjs"
   },
   "dependencies": {
     "web-push": "3.6.7"

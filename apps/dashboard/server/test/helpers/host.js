@@ -9,7 +9,23 @@ import webpush from 'web-push';
 import { buildConfig } from '../../src/config.js';
 import { container, ALL_APPS } from './fake-helper.js';
 
+// In-process tests run on an injected clock anchored at NOW. Anything that runs on the REAL clock (a spawned
+// server process, a dashboard built without `clock`) must get fixtures built relative to the actual time:
+// buildHost(t, s, { now: Date.now() }) / helperFor(s, Date.now()). shifter(now) keeps every fixture timestamp at
+// the same offset from `now` that it has from NOW, so with now = NOW nothing changes.
 export const NOW = Date.parse('2026-10-24T14:08:00Z');
+const DAY_MS = 86_400_000;
+
+export function shifter(now = NOW) {
+  const delta = now - NOW;
+  const days = Math.round(delta / DAY_MS);
+  return {
+    // an ISO instant, shifted
+    at: (lit) => new Date(Date.parse(lit) + delta).toISOString().replace('.000Z', lit.endsWith('.000Z') ? '.000Z' : 'Z'),
+    // a YYYY-MM-DD calendar date, shifted by whole days
+    day: (lit) => new Date(Date.parse(`${lit}T12:00:00Z`) + days * DAY_MS).toISOString().slice(0, 10),
+  };
+}
 export const TZ = 'UTC';
 export const KEYS = {
   sonarr: 'a'.repeat(31) + '1',
@@ -40,40 +56,40 @@ export function fakeSubscription(host = 'fcm.googleapis.com') {
 
 const ev = (ts, boot, event, detail, wait = 0) => JSON.stringify({ ts, boot_id: BOOT(boot), event, detail, wait_seconds: wait });
 
-const GATE_HISTORY = {
+const gateHistory = ({ at }) => ({
   normal: [
-    ev('2026-10-12T06:00:48Z', '5a12', 'repair', 'fsck fixed 2 errors on sdb1'),
-    ev('2026-10-12T06:01:10Z', '5a12', 'pass', 'fsck clean, mounted'),
-    ev('2026-10-20T03:16:02Z', '77b0', 'fail', 'sdb not present after 30 s', 30),
-    ev('2026-10-20T03:16:38Z', '77b0', 'powercycle', 'USB port 2 power-cycled', 30),
-    ev('2026-10-20T03:21:40Z', '77b0', 'retry-pass', 'Mounted on retry 2 after power-cycle', 300),
-    ev('2026-10-21T06:01:22Z', '4e1c', 'pass', 'fsck clean, mounted'),
+    ev(at('2026-10-12T06:00:48Z'), '5a12', 'repair', 'fsck fixed 2 errors on sdb1'),
+    ev(at('2026-10-12T06:01:10Z'), '5a12', 'pass', 'fsck clean, mounted'),
+    ev(at('2026-10-20T03:16:02Z'), '77b0', 'fail', 'sdb not present after 30 s', 30),
+    ev(at('2026-10-20T03:16:38Z'), '77b0', 'powercycle', 'USB port 2 power-cycled', 30),
+    ev(at('2026-10-20T03:21:40Z'), '77b0', 'retry-pass', 'Mounted on retry 2 after power-cycle', 300),
+    ev(at('2026-10-21T06:01:22Z'), '4e1c', 'pass', 'fsck clean, mounted'),
   ],
   'bad-night': [
-    ev('2026-10-20T03:16:02Z', '77b0', 'fail', 'sdb not present after 30 s', 30),
-    ev('2026-10-20T03:21:40Z', '77b0', 'retry-pass', 'Mounted on retry 2', 300),
-    ev('2026-10-21T06:01:00Z', 'a91f', 'pass', 'fsck clean, mounted'),
-    ev('2026-10-24T02:31:00Z', 'a91f', 'media-lost', '/media dropped: I/O errors on sdb'),
-    ev('2026-10-24T02:36:41Z', 'b2c3', 'fail', 'sdb not present after 90 s', 90),
-    ev('2026-10-24T02:38:16Z', 'b2c3', 'powercycle', 'USB port 2 power-cycled', 30),
-    ev('2026-10-24T02:41:03Z', '4e1c', 'fail', 'Gave up; docker stays down', 30),
+    ev(at('2026-10-20T03:16:02Z'), '77b0', 'fail', 'sdb not present after 30 s', 30),
+    ev(at('2026-10-20T03:21:40Z'), '77b0', 'retry-pass', 'Mounted on retry 2', 300),
+    ev(at('2026-10-21T06:01:00Z'), 'a91f', 'pass', 'fsck clean, mounted'),
+    ev(at('2026-10-24T02:31:00Z'), 'a91f', 'media-lost', '/media dropped: I/O errors on sdb'),
+    ev(at('2026-10-24T02:36:41Z'), 'b2c3', 'fail', 'sdb not present after 90 s', 90),
+    ev(at('2026-10-24T02:38:16Z'), 'b2c3', 'powercycle', 'USB port 2 power-cycled', 30),
+    ev(at('2026-10-24T02:41:03Z'), '4e1c', 'fail', 'Gave up; docker stays down', 30),
   ],
-  clean: [ev('2026-10-24T13:00:22Z', '4e1c', 'pass', 'fsck clean, mounted')],
-};
+  clean: [ev(at('2026-10-24T13:00:22Z'), '4e1c', 'pass', 'fsck clean, mounted')],
+});
 
-const NOTIFY = {
+const notifyHistory = ({ at }) => ({
   normal: [
-    { ts: '2026-10-19T20:04:00Z', title: 'Test push', body: 'Sent from the dashboard.', tag: 'test', delivered: 3, failed: 0 },
-    { ts: '2026-10-20T03:12:00Z', title: 'Media drive lost', body: 'media apps stopped', tag: 'bootgate', delivered: 3, failed: 0 },
-    { ts: '2026-10-20T03:21:00Z', title: 'Media drive back', body: 'Verified again; docker running.', tag: 'bootgate', delivered: 3, failed: 0 },
+    { ts: at('2026-10-19T20:04:00Z'), title: 'Test push', body: 'Sent from the dashboard.', tag: 'test', delivered: 3, failed: 0 },
+    { ts: at('2026-10-20T03:12:00Z'), title: 'Media drive lost', body: 'media apps stopped', tag: 'bootgate', delivered: 3, failed: 0 },
+    { ts: at('2026-10-20T03:21:00Z'), title: 'Media drive back', body: 'Verified again; docker running.', tag: 'bootgate', delivered: 3, failed: 0 },
   ],
   'bad-night': [
-    { ts: '2026-10-20T03:12:00Z', title: 'Media drive lost', body: 'media apps stopped', tag: 'bootgate', delivered: 3, failed: 0 },
-    { ts: '2026-10-20T03:21:00Z', title: 'Media drive back', body: 'Verified again.', tag: 'bootgate', delivered: 3, failed: 0 },
-    { ts: '2026-10-24T02:31:00Z', title: 'Media drive lost', body: 'media apps stopped', tag: 'bootgate', delivered: 3, failed: 0 },
-    { ts: '2026-10-24T02:41:00Z', title: 'Media drive failed', body: 'Gave up after a power-cycle.', tag: 'bootgate', delivered: 3, failed: 0 },
+    { ts: at('2026-10-20T03:12:00Z'), title: 'Media drive lost', body: 'media apps stopped', tag: 'bootgate', delivered: 3, failed: 0 },
+    { ts: at('2026-10-20T03:21:00Z'), title: 'Media drive back', body: 'Verified again.', tag: 'bootgate', delivered: 3, failed: 0 },
+    { ts: at('2026-10-24T02:31:00Z'), title: 'Media drive lost', body: 'media apps stopped', tag: 'bootgate', delivered: 3, failed: 0 },
+    { ts: at('2026-10-24T02:41:00Z'), title: 'Media drive failed', body: 'Gave up after a power-cycle.', tag: 'bootgate', delivered: 3, failed: 0 },
   ],
-};
+});
 
 function write(root, rel, content, mode) {
   const p = path.join(root, rel);
@@ -127,7 +143,8 @@ export function makeRun({ nextRetryAt = NOW + 222_000, retryStates = ['inactive'
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
 // Fake media APIs. `hang`: apps whose API never answers; `httpError`: app -> status.
-export function makeFetch({ scenario = 'normal', hang = [], httpError = {}, indexerFailing = false } = {}) {
+export function makeFetch({ scenario = 'normal', hang = [], httpError = {}, indexerFailing = false, now = NOW } = {}) {
+  const { at } = shifter(now);
   const calls = [];
   const fetchImpl = async (url, init = {}) => {
     const u = new URL(url);
@@ -183,8 +200,8 @@ export function makeFetch({ scenario = 'normal', hang = [], httpError = {}, inde
             results: clean
               ? []
               : [
-                  { id: 1, type: 'movie', media: { tmdbId: 693134, mediaType: 'movie' }, requestedBy: { displayName: 'Guest 1' }, createdAt: '2026-10-24T12:08:00Z' },
-                  { id: 2, type: 'tv', media: { tmdbId: 126308, mediaType: 'tv' }, seasons: [{ seasonNumber: 1 }], requestedBy: { displayName: 'Guest 2' }, createdAt: '2026-10-23T12:00:00Z' },
+                  { id: 1, type: 'movie', media: { tmdbId: 693134, mediaType: 'movie' }, requestedBy: { displayName: 'Guest 1' }, createdAt: at('2026-10-24T12:08:00Z') },
+                  { id: 2, type: 'tv', media: { tmdbId: 126308, mediaType: 'tv' }, seasons: [{ seasonNumber: 1 }], requestedBy: { displayName: 'Guest 2' }, createdAt: at('2026-10-23T12:00:00Z') },
                 ],
           });
         }
@@ -200,7 +217,7 @@ export function makeFetch({ scenario = 'normal', hang = [], httpError = {}, inde
           ]);
         }
         if (u.pathname.endsWith('/indexerstatus')) {
-          return json(indexerFailing ? [{ indexerId: 3, initialFailure: '2026-10-24T11:02:00Z', mostRecentFailure: '2026-10-24T14:00:00Z', disabledTill: '2026-10-24T15:00:00Z' }] : []);
+          return json(indexerFailing ? [{ indexerId: 3, initialFailure: at('2026-10-24T11:02:00Z'), mostRecentFailure: at('2026-10-24T14:00:00Z'), disabledTill: at('2026-10-24T15:00:00Z') }] : []);
         }
         if (u.pathname.endsWith('/indexerstats')) return json({ indexers: [{ indexerId: 2, numberOfQueries: 912 }] });
         return json({}, 404);
@@ -216,37 +233,43 @@ export function makeFetch({ scenario = 'normal', hang = [], httpError = {}, inde
 }
 
 export function helperFor(scenario, now = NOW) {
+  const { at } = shifter(now);
   const iso = (ms) => new Date(ms).toISOString();
   // The helper's `boots` format: journalctl --list-boots, 32-hex ids, ISO first/last entries.
   const b = (index, id, first, last) => ({ index, boot_id: `${id}${'0'.repeat(28)}`, first_entry: first, last_entry: last });
   const boots = {
     normal: [
-      b(-2, '5a12', '2026-10-12T06:00:00Z', '2026-10-20T03:12:00Z'),
-      b(-1, '77b0', '2026-10-20T03:16:00Z', '2026-10-21T05:59:00Z'),
-      b(0, '4e1c', '2026-10-21T06:00:00Z', iso(now)),
+      b(-2, '5a12', at('2026-10-12T06:00:00Z'), at('2026-10-20T03:12:00Z')),
+      b(-1, '77b0', at('2026-10-20T03:16:00Z'), at('2026-10-21T05:59:00Z')),
+      b(0, '4e1c', at('2026-10-21T06:00:00Z'), iso(now)),
     ],
     'bad-night': [
-      b(-2, 'a91f', '2026-10-21T06:00:00Z', '2026-10-24T02:33:00Z'),
-      b(-1, 'b2c3', '2026-10-24T02:35:00Z', '2026-10-24T02:38:20Z'),
-      b(0, '4e1c', '2026-10-24T02:40:00Z', iso(now)),
+      b(-2, 'a91f', at('2026-10-21T06:00:00Z'), at('2026-10-24T02:33:00Z')),
+      b(-1, 'b2c3', at('2026-10-24T02:35:00Z'), at('2026-10-24T02:38:20Z')),
+      b(0, '4e1c', at('2026-10-24T02:40:00Z'), iso(now)),
     ],
-    clean: [b(0, '4e1c', '2026-10-24T13:00:00Z', iso(now))],
+    clean: [b(0, '4e1c', at('2026-10-24T13:00:00Z'), iso(now))],
   };
   const s = scenario === 'one-app-down' || scenario === 'docker-inactive' ? 'normal' : scenario;
-  const base = { boots: boots[s] ?? boots.normal };
+  const base = {
+    boots: boots[s] ?? boots.normal,
+    lastPull: at('2026-10-23T21:40:00Z'),
+    containers: ALL_APPS.map((n) => container(n, { started_at: at('2026-10-21T10:02:00Z') })),
+  };
   if (scenario === 'bad-night') {
-    return { ...base, dockerState: 'inactive', split: { sizes: { tv: 812e9, movies: 486e9, downloads: 62e9 }, computed_at: '2026-10-24T03:00:00Z', cached: true, stale: true, reason: 'gate status failed' } };
+    return { ...base, dockerState: 'inactive', split: { sizes: { tv: 812e9, movies: 486e9, downloads: 62e9 }, computed_at: at('2026-10-24T03:00:00Z'), cached: true, stale: true, reason: 'gate status failed' } };
   }
   if (scenario === 'docker-inactive') return { ...base, dockerState: 'inactive' };
   if (scenario === 'one-app-down') {
-    return { ...base, containers: ALL_APPS.map((n) => (n === 'radarr' ? container(n, { state: 'exited', health: null, restart_count: 3 }) : container(n))) };
+    return { ...base, containers: base.containers.map((c) => (c.name === 'radarr' ? { ...c, state: 'exited', health: null, restart_count: 3 } : c)) };
   }
-  if (scenario === 'clean') return { ...base, lastPull: null, split: { sizes: { tv: 0, movies: 0, downloads: 16e9 }, computed_at: '2026-10-24T13:30:00Z', cached: false, stale: false } };
+  if (scenario === 'clean') return { ...base, lastPull: null, split: { sizes: { tv: 0, movies: 0, downloads: 16e9 }, computed_at: at('2026-10-24T13:30:00Z'), cached: false, stale: false } };
   return base;
 }
 
 // Builds the host tree for a scenario and the matching dashboard config.
-export function buildHost(t, scenario = 'normal', { helperSocket = '/nonexistent.sock', webDir, devices = 3, extraConfig = {} } = {}) {
+export function buildHost(t, scenario = 'normal', { helperSocket = '/nonexistent.sock', webDir, devices = 3, extraConfig = {}, now = NOW } = {}) {
+  const { at, day } = shifter(now);
   const root = tempDir(t);
   const s = scenario === 'one-app-down' || scenario === 'docker-inactive' ? 'normal' : scenario;
   const bad = s === 'bad-night';
@@ -261,7 +284,7 @@ export function buildHost(t, scenario = 'normal', { helperSocket = '/nonexistent
   // gate
   write(root, 'var/lib/bootgate/status', `${bad ? 'failed' : 'ok'}\n`);
   write(root, 'var/lib/bootgate/attempts', `${bad ? 1 : 0}\n`);
-  write(root, 'var/lib/bootgate/history.jsonl', `${GATE_HISTORY[s].join('\n')}\n`);
+  write(root, 'var/lib/bootgate/history.jsonl', `${gateHistory({ at })[s].join('\n')}\n`);
   fs.mkdirSync(path.join(root, 'run/bootgate'), { recursive: true });
   if (bad) {
     write(root, 'run/reboot-required', '*** System restart required ***\n');
@@ -272,11 +295,12 @@ export function buildHost(t, scenario = 'normal', { helperSocket = '/nonexistent
     write(
       root,
       'var/lib/homelab-backup/status.json',
-      JSON.stringify({ last_ok: bad ? '2026-10-23T03:10:00Z' : '2026-10-24T03:12:00Z', archive: '/srv/homelab/backups/appdata/appdata-20261024T031200Z.tar', size_bytes: 18.4e9, ok: true }),
+      JSON.stringify({ last_ok: bad ? at('2026-10-23T03:10:00Z') : at('2026-10-24T03:12:00Z'), archive: '/srv/homelab/backups/appdata/appdata-20261024T031200Z.tar', size_bytes: 18.4e9, ok: true }),
     );
   }
   // notifier history
-  if (NOTIFY[s]) write(root, 'var/lib/homelab-notify/history.jsonl', `${NOTIFY[s].map((x) => JSON.stringify(x)).join('\n')}\n`);
+  const notify = notifyHistory({ at })[s];
+  if (notify) write(root, 'var/lib/homelab-notify/history.jsonl', `${notify.map((x) => JSON.stringify(x)).join('\n')}\n`);
   // push store
   const pushDir = path.join(root, 'srv/homelab/push');
   fs.mkdirSync(pushDir, { recursive: true });
@@ -306,8 +330,8 @@ export function buildHost(t, scenario = 'normal', { helperSocket = '/nonexistent
     JSON.stringify({
       thresholds: { diskWarnPct: 90, backupMaxAgeH: 36 },
       subscriptions: [
-        { key: 'indexer-a', name: 'Indexer A', date: '2026-11-16' },
-        { key: 'usenet', name: 'Usenet provider', date: '2026-10-29' },
+        { key: 'indexer-a', name: 'Indexer A', date: day('2026-11-16') },
+        { key: 'usenet', name: 'Usenet provider', date: day('2026-10-29') },
       ],
       integrations: { jellyfinApiKey: KEYS.jellyfin, jellyseerrApiKey: KEYS.jellyseerr },
     }),
@@ -316,13 +340,13 @@ export function buildHost(t, scenario = 'normal', { helperSocket = '/nonexistent
   if (!clean) {
     const lines = [];
     for (let d = 40; d >= 1; d--) {
-      const date = new Date(NOW - d * 86_400_000).toISOString().slice(0, 10);
+      const date = new Date(now - d * 86_400_000).toISOString().slice(0, 10);
       lines.push(JSON.stringify({ date, ts: `${date}T03:00:00Z`, used: 1.36e12 - 6e9 * d, total: 4e12 }));
     }
     write(root, 'var/lib/homelab-dashboard/samples.jsonl', `${lines.join('\n')}\n`);
   }
   if (bad) {
-    write(root, 'var/lib/homelab-dashboard/drive-last.json', JSON.stringify({ total: 4e12, used: 1.355e12, free: 2.645e12, usedPct: 33.9, at: '2026-10-24T02:30:00.000Z' }));
+    write(root, 'var/lib/homelab-dashboard/drive-last.json', JSON.stringify({ total: 4e12, used: 1.355e12, free: 2.645e12, usedPct: 33.9, at: at('2026-10-24T02:30:00.000Z') }));
   }
   const { config } = buildConfig(
     {
@@ -348,7 +372,7 @@ export function buildHost(t, scenario = 'normal', { helperSocket = '/nonexistent
     },
     {},
   );
-  return { root, cfg: config, vapid, subs, stateDir, pushDir, write: (rel, content, mode) => write(root, rel, content, mode), path: (rel) => path.join(root, rel) };
+  return { root, now, cfg: config, vapid, subs, stateDir, pushDir, write: (rel, content, mode) => write(root, rel, content, mode), path: (rel) => path.join(root, rel) };
 }
 
 export function writeWeb(dir) {

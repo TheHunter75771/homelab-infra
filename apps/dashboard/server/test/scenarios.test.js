@@ -220,7 +220,7 @@ test('media-lost: the 6 media apps are held, cloudflared and wol-relay keep runn
 test('helper unreachable: status unknown with a reason, a warn issue, the rest of the summary still works', async (t) => {
   const d = await startDashboard(t, 'normal', { start: false });
   const { createDashboard } = await import('../src/dashboard.js');
-  const dash = createDashboard({ ...d.dash.cfg, helperSocket: '/nonexistent/helper.sock' }, { log: d.log, statfs: d.statfs, fetch: d.fetch, run: d.run });
+  const dash = createDashboard({ ...d.dash.cfg, helperSocket: '/nonexistent/helper.sock' }, { log: d.log, clock: d.clock, statfs: d.statfs, fetch: d.fetch, run: d.run });
   await dash.start({ background: false });
   const s = dash.summary.current().summary;
   assert.equal(s.helper.reachable, false);
@@ -257,7 +257,7 @@ test('the declared app list is kept on disk, so a held boot right after a reboot
   d.helper.state.dockerState = 'inactive';
   d.host.write('var/lib/bootgate/status', 'failed\n');
   const { createDashboard } = await import('../src/dashboard.js');
-  const dash = createDashboard(d.dash.cfg, { log: d.log, statfs: d.statfs, fetch: d.fetch, run: d.run });
+  const dash = createDashboard(d.dash.cfg, { log: d.log, clock: d.clock, statfs: d.statfs, fetch: d.fetch, run: d.run });
   await dash.start({ background: false });
   const apps = dash.summary.current().summary.apps;
   assert.deepEqual(apps.map((a) => [a.name, a.status]), [['jellyfin', 'held'], ['sonarr', 'held'], ['wol-relay', 'held']]);
