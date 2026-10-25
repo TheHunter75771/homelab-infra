@@ -42,6 +42,9 @@ base_apport_units:
 # "99-zz-" sorts after every vendor file (sysctl.d applies files in name order; the last setting
 # wins), including Debian's 99-sysctl.conf. The precedence check below proves it on every run.
 base_sysctl_file: /etc/sysctl.d/99-zz-homelab-hardening.conf
+# Owner of that file (tests/test_sysctl_files.yml runs unprivileged and passes its own user).
+base_sysctl_file_owner: root
+base_sysctl_file_group: root
 # Earlier names of our own file, removed after the new one is in place.
 base_sysctl_stale_files:
   - /etc/sysctl.d/60-homelab-hardening.conf

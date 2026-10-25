@@ -1,0 +1,133 @@
+---
+# Test for the hardening sysctl file's rename (tasks/sysctl_files.yml) and its boot-precedence
+# check (tasks/sysctl_boot_check.yml), with the role's real tasks, in a temp dir. No root and no
+# real sysctl changes: the "Apply" handler is a stub here, and the merged configs are synthetic
+# (tests/fixtures/vendor-cat-config.txt plus the file the role just rendered).
+#   ANSIBLE_FILTER_PLUGINS=roles/base/filter_plugins \
+#     .venv/bin/ansible-playbook -i localhost, -c local roles/base/tests/test_sysctl_files.yml </dev/null 2>&1 | cat
+- name: The hardening sysctl file is renamed cleanly and its boot-precedence check catches overrides
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+  vars:
+    sysctl_test_real_path: /etc/sysctl.d/99-zz-homelab-hardening.conf
+    sysctl_test_old_real_path: /etc/sysctl.d/60-homelab-hardening.conf
+    sysctl_test_later_vendor: "\n# /usr/lib/sysctl.d/99-zzz-vendor.conf\n"
+    # Real newlines (YAML double quotes) around the --cat-config file headers.
+    sysctl_test_header: "\n# /etc/sysctl.d/99-zz-homelab-hardening.conf\n"
+    sysctl_test_old_header: "\n# /etc/sysctl.d/60-homelab-hardening.conf\n"
+  tasks:
+    - name: Make a scratch directory
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: .sysctl-files
+      register: sysctl_test_tmp
+
+    - name: Rename, idempotence and the precedence check
+      # Scratch paths and the current user for the role's file tasks (block vars beat vars_files).
+      vars:
+        base_sysctl_file: "{{ sysctl_test_tmp.path }}/99-zz-homelab-hardening.conf"
+        base_sysctl_stale_files: ["{{ sysctl_test_tmp.path }}/60-homelab-hardening.conf"]
+        base_sysctl_file_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        base_sysctl_file_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
+      block:
+        - name: Start like a box deployed before the rename (only the old file exists)
+          ansible.builtin.copy:
+            dest: "{{ sysctl_test_tmp.path }}/60-homelab-hardening.conf"
+            content: "fs.suid_dumpable = 0\n"
+            mode: "0644"
+
+        - name: Run 1 of the role's file tasks
+          ansible.builtin.include_tasks: ../tasks/sysctl_files.yml
+
+        - name: Run the notified handler now
+          ansible.builtin.meta: flush_handlers
+
+        - name: Look at both names after run 1
+          ansible.builtin.stat:
+            path: "{{ sysctl_test_tmp.path }}/{{ item }}"
+          loop: [60-homelab-hardening.conf, 99-zz-homelab-hardening.conf]
+          register: sysctl_test_stat1
+
+        - name: Run 1 wrote the new file, removed the old one and applied the settings once
+          ansible.builtin.assert:
+            that:
+              - not sysctl_test_stat1.results[0].stat.exists
+              - sysctl_test_stat1.results[1].stat.exists
+              - base_sysctl_written is changed
+              - base_sysctl_stale_removed is changed
+              - sysctl_test_applied | default(0) | int == 1
+            quiet: true
+
+        - name: Run 2 of the role's file tasks
+          ansible.builtin.include_tasks: ../tasks/sysctl_files.yml
+
+        - name: Run any notified handler now
+          ansible.builtin.meta: flush_handlers
+
+        - name: Run 2 changed nothing and applied nothing
+          ansible.builtin.assert:
+            that:
+              - base_sysctl_written is not changed
+              - base_sysctl_stale_removed is not changed
+              - sysctl_test_applied | default(0) | int == 1
+            quiet: true
+
+        - name: Read the file the role rendered
+          ansible.builtin.slurp:
+            src: "{{ sysctl_test_tmp.path }}/99-zz-homelab-hardening.conf"
+          register: sysctl_test_rendered
+
+        - name: Build the synthetic merged configs
+          ansible.builtin.set_fact:
+            sysctl_test_fixture: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/fixtures/vendor-cat-config.txt') }}"
+
+        - name: Append the rendered file under its real path, as --cat-config would
+          ansible.builtin.set_fact:
+            sysctl_test_clean: "{{ sysctl_test_fixture ~ sysctl_test_header ~ (sysctl_test_rendered.content | b64decode) }}"
+
+        - name: Check every merged config with the role's boot-precedence task
+          ansible.builtin.include_tasks: check_one.yml
+          loop:
+            - {name: clean, expect: pass, text: "{{ sysctl_test_clean }}"}
+            - {name: later file with the same value, expect: pass, text: "{{ sysctl_test_clean ~ sysctl_test_later_vendor ~ 'fs.protected_fifos = 2\n' }}"}
+            - {name: later file overrides a value, expect: fail, text: "{{ sysctl_test_clean ~ sysctl_test_later_vendor ~ 'fs.protected_fifos = 1\n' }}"}
+            - {name: later -key cancels a setting, expect: fail, text: "{{ sysctl_test_clean ~ sysctl_test_later_vendor ~ '-kernel.kptr_restrict\n' }}"}
+            - {name: later bpf value 2, expect: fail, text: "{{ sysctl_test_clean ~ sysctl_test_later_vendor ~ 'kernel.unprivileged_bpf_disabled = 2\n' }}"}
+            - name: later overlapping glob
+              expect: fail
+              text: "{{ sysctl_test_clean ~ sysctl_test_later_vendor ~ 'net.ipv4.conf.eth*.send_redirects = 1\n' }}"
+            - {name: old name still present, expect: fail, text: "{{ sysctl_test_clean ~ sysctl_test_old_header ~ 'fs.suid_dumpable = 0\n' }}"}
+          loop_control:
+            loop_var: sysctl_test_case
+            label: "{{ sysctl_test_case.name }}"
+
+        - name: Show the verdicts
+          ansible.builtin.debug:
+            var: sysctl_test_results
+
+        - name: Every case got the expected verdict
+          ansible.builtin.assert:
+            that:
+              - sysctl_test_results | dict2items | rejectattr('value.ok') | list | length == 0
+            fail_msg: "Wrong verdicts: {{ sysctl_test_results | dict2items | rejectattr('value.ok') | list }}"
+            quiet: true
+
+        - name: The bpf failure explains the boot-time consequence
+          ansible.builtin.assert:
+            that:
+              - sysctl_test_results['later bpf value 2'].message is search('fail at boot')
+            quiet: true
+
+      always:
+        - name: Remove the scratch directory
+          ansible.builtin.file:
+            path: "{{ sysctl_test_tmp.path }}"
+            state: absent
+
+  handlers:
+    - name: Apply hardening sysctls (base)
+      ansible.builtin.set_fact:
+        sysctl_test_applied: "{{ sysctl_test_applied | default(0) | int + 1 }}"

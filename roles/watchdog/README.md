@@ -22,8 +22,9 @@ kept because it's harmless and may work on other hardware, but crash recovery re
   asserts the values are live.
 - Known gap: a hard freeze that never panics (and isn't a hard lockup) still needs the power button.
 - Boot-time precedence: every run reads `systemd-sysctl --cat-config` and checks, with the
-  `homelab_sysctl_overrides` filter (`filter_plugins/`, an identical copy of base's), that no
-  later-sorting file overrides these settings at the next boot.
+  `homelab_sysctl_overrides` filter (`filter_plugins/`, an identical copy of base's, tested by
+  `roles/base/tests/test_homelab_sysctl.py`), that no later-sorting file overrides or cancels these
+  settings at the next boot.
 
 ## kdump is removed (Noah, 2026-10-24)
 - `kdump-tools` (and `linux-crashdump`, if present) is purged. Its postrm runs `update-grub`; the

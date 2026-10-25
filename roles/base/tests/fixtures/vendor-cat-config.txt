@@ -1,0 +1,32 @@
+# /usr/lib/sysctl.d/10-apparmor.conf
+# Synthetic fixture shaped like `systemd-sysctl --cat-config` on Ubuntu 26.04 (vendor files only,
+# trimmed; not copied from a real box). Tests append the homelab files to it.
+kernel.apparmor_restrict_unprivileged_userns = 1
+
+# /usr/lib/sysctl.d/10-coredump-debian.conf
+kernel.core_pattern=core
+
+# /usr/lib/sysctl.d/50-default.conf
+kernel.sysrq = 0x01b6
+kernel.core_uses_pid = 1
+net.ipv4.conf.default.rp_filter = 2
+net.ipv4.conf.*.rp_filter = 2
+-net.ipv4.conf.all.rp_filter
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv4.conf.*.accept_source_route = 0
+fs.protected_hardlinks = 1
+fs.protected_symlinks = 1
+fs.protected_regular = 1
+fs.protected_fifos = 1
+
+# /usr/lib/sysctl.d/55-kernel-hardening.conf
+# Hide kernel addresses from unprivileged users. Some tools read them from
+# /proc/kallsyms, /proc/modules, etc), and this setting can censor the addresses.
+kernel.kptr_restrict = 1
+
+# /usr/lib/sysctl.d/55-magic-sysrq.conf
+kernel.sysrq = 176
+
+# /usr/lib/sysctl.d/55-network-security.conf
+net.ipv4.conf.default.rp_filter=2
+net.ipv4.conf.all.rp_filter=2

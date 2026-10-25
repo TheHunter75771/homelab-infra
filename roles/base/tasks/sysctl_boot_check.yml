@@ -1,0 +1,18 @@
+---
+# Imported by main.yml after it has read `systemd-sysctl --cat-config` into base_sysctl_merged;
+# also run on its own by tests/test_sysctl_files.yml with synthetic merged configs.
+- name: Every hardening setting wins at boot, under the current file name only
+  ansible.builtin.assert:
+    that:
+      - base_sysctl_problems | length == 0
+      - base_sysctl_stale_files | map('regex_replace', '^', '# ') | select('in', base_sysctl_merged.stdout_lines) | list | length == 0
+    fail_msg: >-
+      At the next boot these settings would not take effect: {{ base_sysctl_problems }}.
+      Stale file names still present: {{ base_sysctl_stale_files | map('regex_replace', '^', '# ')
+      | select('in', base_sysctl_merged.stdout_lines) | list }}.
+      A later-sorting vendor file now overrides ours; rename ours to sort after it, or drop that key.
+      (kernel.unprivileged_bpf_disabled is locked once it's 1: a later file writing another value also
+      makes systemd-sysctl.service fail at boot.)
+    quiet: true
+  vars:
+    base_sysctl_problems: "{{ base_sysctl_merged.stdout | homelab_sysctl_overrides(base_sysctl_file) }}"

@@ -74,12 +74,30 @@ Host baseline (docs/CONTRACTS.md §7, module A).
   - Our file is named `99-zz-…`, so it sorts after every vendor file, including Debian's `99-sysctl.conf`.
   - The old `60-homelab-hardening.conf` is removed after the new file is written.
   - Every run, the role reads `systemd-sysctl --cat-config` and checks, with the `homelab_sysctl_overrides`
-    filter (`filter_plugins/`), that every assignment in our file wins at boot. That covers glob
-    exclusions too, so a vendor override fails the run without waiting for a reboot. A later file writing
-    anything but 1 to `kernel.unprivileged_bpf_disabled` would also make `systemd-sysctl.service` fail at
-    boot, because 1 is locked; the failure message says so.
+    filter (`filter_plugins/`), that every assignment in our file takes effect at boot. The filter models
+    systemd-sysctl's option table:
+    - a later *different* value overrides ours, while the same value again is fine;
+    - a later `-key` line cancels our setting;
+    - an explicit or `-key` entry anywhere makes our glob skip that key;
+    - a later different glob overlapping ours wins on the keys both match;
+    - `.`/`/` separators and a leading `/` are normalized.
+  - So a vendor override fails the run without waiting for a reboot. A later file writing anything but 1 to
+    `kernel.unprivileged_bpf_disabled` would also make `systemd-sysctl.service` fail at boot, because 1 is
+    locked; the failure message says so.
   - The live-value assert stays.
-  - The filter is duplicated in `roles/watchdog/filter_plugins/`; keep the two copies identical.
+  - The filter is duplicated in `roles/watchdog/filter_plugins/`, and the unit tests fail if the two copies differ.
+
+## Tests (CI job `role-tests`)
+- `python3 -m unittest discover -s roles/base/tests -v`: the filter's rules, run against a synthetic,
+  Ubuntu-shaped vendor config (`tests/fixtures/vendor-cat-config.txt`) plus the base and watchdog sysctl
+  files rendered from their real templates. It also checks that the two plugin copies are byte-identical.
+- `tests/test_sysctl_files.yml` (localhost, scratch paths, no root) runs the role's real
+  `tasks/sysctl_files.yml` twice. The first run writes the new name, removes the old one and notifies
+  the handler (a stub here) once; the second run changes nothing. It then puts seven synthetic merged
+  configs through the real `tasks/sysctl_boot_check.yml` and checks each verdict: pass when clean or
+  re-setting the same value; fail on a later override, a later `-key`, bpf=2, an overlapping later glob, or
+  the old file name. The run command is in its header; `tests/templates` is a symlink to `../templates`, so
+  the task file finds its template outside role context.
 
 ### Considered and declined (Lynis suggestions)
 - USB-storage blocking: the media drive is USB.
@@ -111,4 +129,4 @@ If no source is reachable at all, set the clock by hand (`sudo date -s '2026-10-
 Variables: `timezone` (group_vars), `lan_iface` (host_vars), `base_packages`,
 `base_journald_system_max_use`, `base_wait_online_timeout`, `base_ntp_fallback_servers`,
 `base_purge_packages`, `base_never_install`, `base_apport_units`, `base_sysctl_file`,
-`base_sysctl_stale_files`, `base_blacklisted_modules` (defaults).
+`base_sysctl_file_owner`, `base_sysctl_file_group`, `base_sysctl_stale_files`, `base_blacklisted_modules` (defaults).

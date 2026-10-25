@@ -1,0 +1,19 @@
+---
+# Imported by main.yml; also run on its own by tests/test_sysctl_files.yml (scratch paths).
+- name: Network and core-dump hardening sysctls are set
+  ansible.builtin.template:
+    src: sysctl-homelab-hardening.conf.j2
+    dest: "{{ base_sysctl_file }}"
+    owner: "{{ base_sysctl_file_owner }}"
+    group: "{{ base_sysctl_file_group }}"
+    mode: "0644"
+  register: base_sysctl_written
+  notify: Apply hardening sysctls (base)
+
+# Same settings, so removing the old name changes nothing live; the new file is already in place.
+- name: Earlier names of the hardening sysctl file are removed
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ base_sysctl_stale_files }}"
+  register: base_sysctl_stale_removed

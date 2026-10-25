@@ -130,21 +130,8 @@
   loop_control:
     label: "{{ item.item }}"
 
-- name: Network and core-dump hardening sysctls are set
-  ansible.builtin.template:
-    src: sysctl-homelab-hardening.conf.j2
-    dest: "{{ base_sysctl_file }}"
-    owner: root
-    group: root
-    mode: "0644"
-  notify: Apply hardening sysctls (base)
-
-# Same settings, so removing the old name changes nothing live; the new file is already in place.
-- name: Earlier names of the hardening sysctl file are removed
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: absent
-  loop: "{{ base_sysctl_stale_files }}"
+- name: Hardening sysctl file (new name, old names removed)
+  ansible.builtin.import_tasks: sysctl_files.yml
 
 - name: Unused network protocols can't be loaded
   ansible.builtin.template:
@@ -206,21 +193,8 @@
   changed_when: false
   check_mode: false
 
-- name: Every hardening setting wins at boot, under the current file name only
-  ansible.builtin.assert:
-    that:
-      - base_sysctl_problems | length == 0
-      - base_sysctl_stale_files | map('regex_replace', '^', '# ') | select('in', base_sysctl_merged.stdout_lines) | list | length == 0
-    fail_msg: >-
-      At the next boot these settings would not take effect: {{ base_sysctl_problems }}.
-      Stale file names still present: {{ base_sysctl_stale_files | map('regex_replace', '^', '# ')
-      | select('in', base_sysctl_merged.stdout_lines) | list }}.
-      A later-sorting vendor file now overrides ours; rename ours to sort after it, or drop that key.
-      (kernel.unprivileged_bpf_disabled is locked once it's 1: a later file writing another value also
-      makes systemd-sysctl.service fail at boot.)
-    quiet: true
-  vars:
-    base_sysctl_problems: "{{ base_sysctl_merged.stdout | homelab_sysctl_overrides(base_sysctl_file) }}"
+- name: Hardening settings win at boot
+  ansible.builtin.import_tasks: sysctl_boot_check.yml
 
 - name: Read service states
   ansible.builtin.service_facts:

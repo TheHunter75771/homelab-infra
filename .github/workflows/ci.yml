@@ -118,5 +118,11 @@ jobs:
           ansible-galaxy collection install -r requirements.yml -p ./collections
           printf 'dummy\n' > /tmp/vault-pass
           ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/storage/tests/test_format_guard.yml
+      - name: base sysctl filter
+        run: python3 -m unittest discover -s roles/base/tests -v
+      - name: base sysctl files
+        run: |
+          ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ANSIBLE_FILTER_PLUGINS=$PWD/roles/base/filter_plugins \
+            ansible-playbook -i localhost, -c local roles/base/tests/test_sysctl_files.yml
       - name: tailscale serve config
         run: ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/tailscale_serve/tests/test_serve_config.yml

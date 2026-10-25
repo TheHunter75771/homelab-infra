@@ -1,0 +1,27 @@
+---
+# One synthetic merged config through the role's real boot-precedence task; records the verdict.
+- name: Run the role's boot-precedence check on "{{ sysctl_test_case.name }}"
+  block:
+    - name: Include the role's check for "{{ sysctl_test_case.name }}"
+      ansible.builtin.include_tasks: ../tasks/sysctl_boot_check.yml
+      vars:
+        base_sysctl_file: "{{ sysctl_test_real_path }}"
+        base_sysctl_stale_files: ["{{ sysctl_test_old_real_path }}"]
+        base_sysctl_merged:
+          stdout: "{{ sysctl_test_case.text }}"
+          stdout_lines: "{{ sysctl_test_case.text.splitlines() }}"
+    - name: Mark as passed "{{ sysctl_test_case.name }}"
+      ansible.builtin.set_fact:
+        sysctl_test_msg: ""
+  rescue:
+    - name: Mark as failed "{{ sysctl_test_case.name }}"
+      ansible.builtin.set_fact:
+        sysctl_test_msg: "{{ ansible_failed_result.msg | default('failed') }}"
+
+- name: Record the verdict for "{{ sysctl_test_case.name }}"
+  ansible.builtin.set_fact:
+    sysctl_test_results: >-
+      {{ sysctl_test_results | default({}) | combine({sysctl_test_case.name: {
+           'expected': sysctl_test_case.expect,
+           'ok': (sysctl_test_msg | length == 0) == (sysctl_test_case.expect == 'pass'),
+           'message': sysctl_test_msg}}) }}
