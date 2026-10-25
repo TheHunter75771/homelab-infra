@@ -5,7 +5,9 @@ OpenSSH hardening (docs/CONTRACTS.md §7, module A).
 Order, so a bad config can never be loaded:
 1. Render `/etc/ssh/sshd_config.d/10-homelab.conf` (key-only via `AuthenticationMethods publickey`, no
    passwords or keyboard-interactive, `PermitRootLogin no`, `X11Forwarding no`, `MaxAuthTries 3`,
-   `AllowUsers {{ admin_user }} {{ automation_user }} {{ backup_pull_user }}`, `UsePAM yes`). The template
+   `AllowUsers {{ admin_user }} {{ automation_user }} {{ backup_pull_user }}`, `UsePAM yes`,
+   `AllowTcpForwarding no`, `AllowAgentForwarding no`, `ClientAliveInterval 300` with
+   `ClientAliveCountMax 2`, `TCPKeepAlive no`, `LogLevel VERBOSE`). The template
    is checked with `sshd -t -f` before it replaces anything.
 2. Check the whole config with `sshd -t`.
 3. Only then remove the stale `99-hardening.conf`.
@@ -17,4 +19,8 @@ sshd keeps the first value it reads and `sshd_config` includes the drop-in direc
 the service accounts have locked passwords, and sshd only accepts keys for locked accounts when PAM is on.
 Port and listen addresses are untouched, so the `ssh.socket` generator needs no restart.
 
-Variables: `ssh_hardening_max_auth_tries`, `ssh_hardening_allow_users`, `ssh_hardening_stale_dropins` (defaults).
+`MaxSessions` stays at the default 10: Ansible's multiplexed connection can open parallel sessions, and
+no full `site.yml` run has measured a lower safe value. `Port` is unchanged.
+
+Variables: `ssh_hardening_max_auth_tries`, `ssh_hardening_client_alive_interval`,
+`ssh_hardening_client_alive_count_max`, `ssh_hardening_allow_users`, `ssh_hardening_stale_dropins` (defaults).

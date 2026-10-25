@@ -33,7 +33,7 @@
   changed_when: false
   check_mode: false
 
-- name: Effective sshd configuration is key-only, no root, no X11, limited users
+- name: Effective sshd configuration is key-only, no root, no X11 or forwarding, limited users, verbose log
   ansible.builtin.assert:
     that:
       - "'passwordauthentication no' in ssh_hardening_effective.stdout_lines"
@@ -43,6 +43,12 @@
       - "'permitrootlogin no' in ssh_hardening_effective.stdout_lines"
       - "'x11forwarding no' in ssh_hardening_effective.stdout_lines"
       - "('maxauthtries ' ~ ssh_hardening_max_auth_tries) in ssh_hardening_effective.stdout_lines"
+      - "'allowtcpforwarding no' in ssh_hardening_effective.stdout_lines"
+      - "'allowagentforwarding no' in ssh_hardening_effective.stdout_lines"
+      - "('clientaliveinterval ' ~ ssh_hardening_client_alive_interval) in ssh_hardening_effective.stdout_lines"
+      - "('clientalivecountmax ' ~ ssh_hardening_client_alive_count_max) in ssh_hardening_effective.stdout_lines"
+      - "'tcpkeepalive no' in ssh_hardening_effective.stdout_lines"
+      - "'loglevel VERBOSE' in ssh_hardening_effective.stdout_lines"
       - ssh_hardening_allow_users | map('regex_replace', '^', 'allowusers ') | difference(ssh_hardening_effective.stdout_lines) | length == 0
     fail_msg: "sshd's effective configuration does not match the homelab drop-in; check sshd_config and its drop-ins."
     quiet: true

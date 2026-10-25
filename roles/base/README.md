@@ -39,7 +39,7 @@ Host baseline (docs/CONTRACTS.md §7, module A).
 - **Apport is stopped and masked**: `apport.service`, `apport-autoreport.path`, `apport-autoreport.timer`
   and `apport-forward.socket`. It can't be purged, because `ubuntu-server` and `ubuntu-server-minimal`
   depend on it. Its stop hook puts `fs.suid_dumpable` back to 0 and `kernel.core_pattern` to `core`.
-- `/etc/sysctl.d/60-homelab-hardening.conf`, applied by the handler with `systemd-sysctl` on that file only:
+- `/etc/sysctl.d/99-zz-homelab-hardening.conf`, applied by the handler with `systemd-sysctl` on that file only:
   - `send_redirects = 0` for `all`, `default` **and every interface** (`net.ipv4.conf.*`). The kernel
     ORs `all` with each interface's own value, so `all=0` alone wouldn't stop the LAN interface or docker0. systemd's
     udev rule applies the glob to interfaces created later. The box routes for nobody: Docker forwards
@@ -53,6 +53,43 @@ Host baseline (docs/CONTRACTS.md §7, module A).
   - the live values, including the LAN interface's `send_redirects`;
   - that avahi is absent or not found and apport is masked;
   - that nothing listens on UDP 5353.
+
+- Kernel and BPF (2026-10-25 Lynis run), in the same sysctl file and live assert:
+  `fs.protected_fifos = 2`, `kernel.kptr_restrict = 2`, `net.core.bpf_jit_harden = 2`,
+  `kernel.unprivileged_bpf_disabled = 1` (locked; dockerd runs as root and doesn't need unprivileged BPF).
+  The assert also checks that `kernel.sysrq` isn't 0 (Ubuntu's 176 stays).
+- **Deliberately not set** (comments in the file):
+  - `kernel.modules_disabled=1`: the boot gate's USB repair and the iTCO loader need module loading;
+  - `net.ipv4.conf.all.forwarding=0`: Docker needs it;
+  - `rp_filter=1`: Tailscale needs 2;
+  - `kernel.sysrq=0`: 176 stays as the emergency keyboard path, since the hardware watchdog doesn't reset this HP.
+- `/etc/modprobe.d/homelab-blacklist-net.conf` blacklists `dccp`, `sctp`, `rds` and `tipc`
+  (`blacklist` plus `install … /bin/false`). None was loaded or referenced on the box; dccp isn't even
+  in this kernel any more. The role checks with `modprobe --dry-run` that none would load, and that
+  none is in `/proc/modules`.
+
+- **Boot-time precedence.** systemd-sysctl merges `/usr/lib`, `/run` and `/etc` `sysctl.d` files in
+  filename order, and the last setting wins. A glob also skips any key that's set explicitly, or
+  excluded with `-key`, anywhere.
+  - Our file is named `99-zz-…`, so it sorts after every vendor file, including Debian's `99-sysctl.conf`.
+  - The old `60-homelab-hardening.conf` is removed after the new file is written.
+  - Every run, the role reads `systemd-sysctl --cat-config` and checks, with the `homelab_sysctl_overrides`
+    filter (`filter_plugins/`), that every assignment in our file wins at boot. That covers glob
+    exclusions too, so a vendor override fails the run without waiting for a reboot. A later file writing
+    anything but 1 to `kernel.unprivileged_bpf_disabled` would also make `systemd-sysctl.service` fail at
+    boot, because 1 is locked; the failure message says so.
+  - The live-value assert stays.
+  - The filter is duplicated in `roles/watchdog/filter_plugins/`; keep the two copies identical.
+
+### Considered and declined (Lynis suggestions)
+- USB-storage blocking: the media drive is USB.
+- GRUB password: the box is in the house; a password would only block recovery at the console.
+- Password ageing: every login is key-only and the accounts have locked passwords.
+- Legal banners: nobody but the owner logs in.
+- auditd: extra disk and log volume for no reviewer; journald plus sshd's `LogLevel VERBOSE` cover logins.
+- AIDE (file integrity): the box's state is declared in this repo and re-converged by Ansible; a nightly hash scan adds noise, not a reviewer.
+- Malware scanners: no untrusted uploads or mail; the attack surface is the tailnet and one Cloudflare tunnel.
+- Compiler removal: Docker builds run inside images; the host toolchain isn't an exposure on a tailnet-only box.
 
 ## Clock recovery (why the fallback exists)
 DNS here is strict DNS-over-TLS (role `dns`), and TLS needs a roughly correct clock. Ubuntu's NTS
@@ -73,4 +110,5 @@ If no source is reachable at all, set the clock by hand (`sudo date -s '2026-10-
 
 Variables: `timezone` (group_vars), `lan_iface` (host_vars), `base_packages`,
 `base_journald_system_max_use`, `base_wait_online_timeout`, `base_ntp_fallback_servers`,
-`base_purge_packages`, `base_never_install`, `base_apport_units`, `base_sysctl_file` (defaults).
+`base_purge_packages`, `base_never_install`, `base_apport_units`, `base_sysctl_file`,
+`base_sysctl_stale_files`, `base_blacklisted_modules` (defaults).

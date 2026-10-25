@@ -1,5 +1,8 @@
 ---
 ssh_hardening_max_auth_tries: 3
+# Dead-client detection: drop a session after this many unanswered probes, this many seconds apart.
+ssh_hardening_client_alive_interval: 300
+ssh_hardening_client_alive_count_max: 2
 # Accounts allowed to log in over SSH (all key-only).
 ssh_hardening_allow_users:
   - "{{ admin_user }}"

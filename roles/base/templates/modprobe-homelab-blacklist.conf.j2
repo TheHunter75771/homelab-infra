@@ -1,0 +1,7 @@
+# {{ ansible_managed }}
+# Unused network protocols (2026-10-25 Lynis run). "blacklist" stops alias autoloading;
+# "install ... /bin/false" makes even an explicit modprobe fail.
+{% for module in base_blacklisted_modules %}
+blacklist {{ module }}
+install {{ module }} /bin/false
+{% endfor %}

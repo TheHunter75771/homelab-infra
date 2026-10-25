@@ -9,7 +9,8 @@ the box **stayed hung for 10 minutes** until the power button. The BIOS seems to
 timeout itself. **On this hardware the iTCO/systemd watchdog below does not reset the box.** It's
 kept because it's harmless and may work on other hardware, but crash recovery rests on the kernel:
 
-- `/etc/sysctl.d/60-homelab-panic.conf` sets the following, applied at once by the handler
+- `/etc/sysctl.d/99-zz-homelab-panic.conf` (named to sort after every vendor file; the old
+  `60-homelab-panic.conf` is removed) sets the following, applied at once by the handler
   (`sysctl --load` on this one file only):
   - `kernel.panic = 10`: reboot 10 s after any panic (the default 0 hangs forever);
   - `kernel.panic_on_oops = 1`: already 1 at runtime, persisted explicitly;
@@ -20,6 +21,9 @@ kept because it's harmless and may work on other hardware, but crash recovery re
 - After the handlers run, the role reads `/proc/sys/kernel/{panic,panic_on_oops,hardlockup_panic}` and
   asserts the values are live.
 - Known gap: a hard freeze that never panics (and isn't a hard lockup) still needs the power button.
+- Boot-time precedence: every run reads `systemd-sysctl --cat-config` and checks, with the
+  `homelab_sysctl_overrides` filter (`filter_plugins/`, an identical copy of base's), that no
+  later-sorting file overrides these settings at the next boot.
 
 ## kdump is removed (Noah, 2026-10-24)
 - `kdump-tools` (and `linux-crashdump`, if present) is purged. Its postrm runs `update-grub`; the
@@ -59,4 +63,5 @@ missing at startup. Confirm after the first reboot: `busctl get-property org.fre
 This role doesn't touch the boot gate's state.
 
 Variables: `watchdog_module`, `watchdog_device`, `watchdog_runtime_sec`, `watchdog_reboot_sec`,
-`watchdog_sysctl_file`, `watchdog_panic_reboot_sec`, `watchdog_kdump_packages`, `watchdog_kdump_grub_cfg` (defaults).
+`watchdog_sysctl_file`, `watchdog_sysctl_stale_files`, `watchdog_panic_reboot_sec`, `watchdog_kdump_packages`,
+`watchdog_kdump_grub_cfg` (defaults).

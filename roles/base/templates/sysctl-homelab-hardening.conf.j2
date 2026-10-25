@@ -19,3 +19,24 @@ net.ipv4.conf.default.log_martians = 1
 
 # No core dumps from setuid programs (apport set 2; it's masked now and kdump is gone).
 fs.suid_dumpable = 0
+
+# Kernel and BPF hardening (2026-10-25 Lynis run).
+# O_CREAT on a FIFO in a sticky world-writable directory fails unless the opener owns it
+# (Ubuntu ships 1, which covers only the world-writable case).
+fs.protected_fifos = 2
+# Kernel pointers are hidden even from root (only perf/bpftrace symbolisation would miss them).
+kernel.kptr_restrict = 2
+# Constant blinding for every BPF JIT program, root's included (systemd's and Docker's cgroup
+# programs only lose a little speed).
+net.core.bpf_jit_harden = 2
+# Unprivileged BPF off and locked until reboot (2 is "off but re-enableable"). dockerd runs as
+# root, not rootless, so it doesn't need unprivileged BPF. Re-applying 1 is allowed; any other value isn't.
+kernel.unprivileged_bpf_disabled = 1
+
+# Deliberately NOT set, because they would break this box:
+# - kernel.modules_disabled = 1: the boot gate's USB repair and the iTCO_wdt loader load modules
+#   after boot.
+# - net.ipv4.conf.all.forwarding = 0: Docker forwards container traffic.
+# - net.ipv4.conf.*.rp_filter = 1: Tailscale needs loose mode (Ubuntu's 2 stays).
+# - kernel.sysrq = 0: Ubuntu's 176 stays as the emergency keyboard path, since the hardware
+#   watchdog doesn't reset this HP.

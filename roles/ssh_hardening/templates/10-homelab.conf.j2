@@ -16,3 +16,20 @@ PermitRootLogin no
 X11Forwarding no
 MaxAuthTries {{ ssh_hardening_max_auth_tries }}
 AllowUsers {{ ssh_hardening_allow_users | join(' ') }}
+
+# No forwarding: Ansible uses pipelining over one multiplexed connection, and the apps are
+# reached through `tailscale serve`, never through SSH tunnels.
+AllowTcpForwarding no
+AllowAgentForwarding no
+
+# Drop dead clients after 2 unanswered probes 5 minutes apart. The probes run inside the
+# encrypted channel, so plain TCP keepalives (spoofable, and redundant) are off.
+ClientAliveInterval {{ ssh_hardening_client_alive_interval }}
+ClientAliveCountMax {{ ssh_hardening_client_alive_count_max }}
+TCPKeepAlive no
+
+# Log the key fingerprint used for each login.
+LogLevel VERBOSE
+
+# MaxSessions stays at the default (10): Ansible's multiplexed connection can open parallel
+# sessions (async tasks, fact gathering), and no full site.yml run has measured a lower safe value.

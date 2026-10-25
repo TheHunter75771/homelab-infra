@@ -139,6 +139,21 @@
     mode: "0644"
   notify: Apply hardening sysctls (base)
 
+# Same settings, so removing the old name changes nothing live; the new file is already in place.
+- name: Earlier names of the hardening sysctl file are removed
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ base_sysctl_stale_files }}"
+
+- name: Unused network protocols can't be loaded
+  ansible.builtin.template:
+    src: modprobe-homelab-blacklist.conf.j2
+    dest: /etc/modprobe.d/homelab-blacklist-net.conf
+    owner: root
+    group: root
+    mode: "0644"
+
 - name: Apply base changes before checking them
   ansible.builtin.meta: flush_handlers
 
@@ -152,9 +167,14 @@
     - net/ipv4/conf/all/log_martians
     - net/ipv4/conf/default/log_martians
     - fs/suid_dumpable
+    - fs/protected_fifos
+    - kernel/kptr_restrict
+    - net/core/bpf_jit_harden
+    - kernel/unprivileged_bpf_disabled
+    - kernel/sysrq
   register: base_sysctl_live
 
-- name: Redirects off (also on the LAN interface), martians logged, no setuid core dumps
+- name: Hardening sysctls are live (redirects off incl. the LAN interface, martians logged, BPF/kptr/FIFO locked down)
   ansible.builtin.assert:
     that:
       - base_live['net/ipv4/conf/all/send_redirects'] == '0'
@@ -163,12 +183,44 @@
       - base_live['net/ipv4/conf/all/log_martians'] == '1'
       - base_live['net/ipv4/conf/default/log_martians'] == '1'
       - base_live['fs/suid_dumpable'] == '0'
+      - base_live['fs/protected_fifos'] == '2'
+      - base_live['kernel/kptr_restrict'] == '2'
+      - base_live['net/core/bpf_jit_harden'] == '2'
+      - base_live['kernel/unprivileged_bpf_disabled'] == '1'
+      # Left alone on purpose: the emergency SysRq path must still exist. (Forwarding isn't checked:
+      # base runs before Docker, which is what turns it on.)
+      - base_live['kernel/sysrq'] != '0'
     fail_msg: "Live kernel settings: {{ base_live }}"
     quiet: true
   vars:
     base_live: >-
       {{ dict(base_sysctl_live.results | map(attribute='item')
          | zip(base_sysctl_live.results | map(attribute='content') | map('b64decode') | map('trim'))) }}
+
+# The live check above only proves the values right after our handler. This one proves they
+# survive a reboot: systemd-sysctl merges every sysctl.d file in name order, and a later vendor
+# file (or an explicit key that a glob then skips) would silently undo ours at the next boot.
+- name: Read the merged sysctl configuration that systemd applies at boot
+  ansible.builtin.command: /usr/lib/systemd/systemd-sysctl --cat-config --no-pager
+  register: base_sysctl_merged
+  changed_when: false
+  check_mode: false
+
+- name: Every hardening setting wins at boot, under the current file name only
+  ansible.builtin.assert:
+    that:
+      - base_sysctl_problems | length == 0
+      - base_sysctl_stale_files | map('regex_replace', '^', '# ') | select('in', base_sysctl_merged.stdout_lines) | list | length == 0
+    fail_msg: >-
+      At the next boot these settings would not take effect: {{ base_sysctl_problems }}.
+      Stale file names still present: {{ base_sysctl_stale_files | map('regex_replace', '^', '# ')
+      | select('in', base_sysctl_merged.stdout_lines) | list }}.
+      A later-sorting vendor file now overrides ours; rename ours to sort after it, or drop that key.
+      (kernel.unprivileged_bpf_disabled is locked once it's 1: a later file writing another value also
+      makes systemd-sysctl.service fail at boot.)
+    quiet: true
+  vars:
+    base_sysctl_problems: "{{ base_sysctl_merged.stdout | homelab_sysctl_overrides(base_sysctl_file) }}"
 
 - name: Read service states
   ansible.builtin.service_facts:
@@ -198,3 +250,41 @@
       - base_mdns_listeners.stdout | trim | length == 0
     fail_msg: "Still listening on 5353: {{ base_mdns_listeners.stdout_lines }}"
     quiet: true
+
+- name: Ask modprobe what loading each blacklisted protocol would do
+  ansible.builtin.command:
+    argv: [modprobe, --dry-run, --verbose, "{{ item }}"]
+  loop: "{{ base_blacklisted_modules }}"
+  register: base_blacklist_dry_run
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Read the loaded modules
+  ansible.builtin.slurp:
+    src: /proc/modules
+  register: base_proc_modules
+
+# A dry run of a blacklisted module shows its own action as "install /bin/false" (dccp too: it's
+# not in this kernel, but the install line still defines it). Shared helper modules a protocol
+# depends on (sctp and tipc pull in udp_tunnel) may still show as insmod, which is harmless; the
+# protocol module itself must never be insmod'ed.
+- name: Each blacklisted protocol resolves to /bin/false, never to its own module
+  ansible.builtin.assert:
+    that:
+      - item.stdout is search('install /bin/false')
+      - item.stdout is not search('insmod [^ ]*/' ~ item.item ~ '[.]ko')
+    fail_msg: "modprobe --dry-run {{ item.item }}: {{ item.stdout_lines | default([]) }} {{ item.stderr | default('') }}"
+    quiet: true
+  loop: "{{ base_blacklist_dry_run.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: No blacklisted protocol is loaded
+  ansible.builtin.assert:
+    that:
+      - base_loaded | intersect(base_blacklisted_modules) | length == 0
+    fail_msg: "Loaded: {{ base_loaded | intersect(base_blacklisted_modules) }} (the blacklist stops new loads; unload or reboot)"
+    quiet: true
+  vars:
+    base_loaded: "{{ (base_proc_modules.content | b64decode).splitlines() | map('split') | map('first') | list }}"

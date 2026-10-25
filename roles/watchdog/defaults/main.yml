@@ -9,7 +9,11 @@ watchdog_reboot_sec: 10min
 
 # Crash recovery (docs/CONTRACTS.md §7, amended 2026-10-24). On this hardware the TCO timer never
 # resets the box, so recovery rests on the kernel rebooting itself after a panic.
-watchdog_sysctl_file: /etc/sysctl.d/60-homelab-panic.conf
+# "99-zz-" sorts after every vendor file (the last setting wins); checked on every run.
+watchdog_sysctl_file: /etc/sysctl.d/99-zz-homelab-panic.conf
+# Earlier names of our own file, removed after the new one is in place.
+watchdog_sysctl_stale_files:
+  - /etc/sysctl.d/60-homelab-panic.conf
 watchdog_panic_reboot_sec: 10
 
 # kdump is disabled (Noah, 2026-10-24): purged, its crashkernel= reservation removed, and pinned

@@ -39,4 +39,18 @@ base_apport_units:
   - apport-forward.socket
 
 # Network and core-dump hardening (Lynis/CIS items from the 2026-10-24 audit).
-base_sysctl_file: /etc/sysctl.d/60-homelab-hardening.conf
+# "99-zz-" sorts after every vendor file (sysctl.d applies files in name order; the last setting
+# wins), including Debian's 99-sysctl.conf. The precedence check below proves it on every run.
+base_sysctl_file: /etc/sysctl.d/99-zz-homelab-hardening.conf
+# Earlier names of our own file, removed after the new one is in place.
+base_sysctl_stale_files:
+  - /etc/sysctl.d/60-homelab-hardening.conf
+
+# Network protocols nothing here uses; modprobe refuses to load them (install -> /bin/false).
+# dccp no longer exists in this kernel (removed upstream in 6.16); listing it guards against a
+# kernel that brings it back.
+base_blacklisted_modules:
+  - dccp
+  - sctp
+  - rds
+  - tipc

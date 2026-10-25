@@ -84,6 +84,12 @@
     mode: "0644"
   notify: Apply panic sysctls (watchdog)
 
+- name: Earlier names of the panic sysctl file are removed
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ watchdog_sysctl_stale_files }}"
+
 - name: Kdump is removed (its postrm also regenerates GRUB)
   ansible.builtin.apt:
     name: "{{ watchdog_kdump_packages }}"
@@ -162,6 +168,27 @@
     watchdog_live: >-
       {{ dict(watchdog_panic_live.results | map(attribute='item')
          | zip(watchdog_panic_live.results | map(attribute='content') | map('b64decode') | map('trim'))) }}
+
+# Live values prove nothing about the next boot: a later-sorting vendor file would undo them.
+- name: Read the merged sysctl configuration that systemd applies at boot
+  ansible.builtin.command: /usr/lib/systemd/systemd-sysctl --cat-config --no-pager
+  register: watchdog_sysctl_merged
+  changed_when: false
+  check_mode: false
+
+- name: The panic settings win at boot, under the current file name only
+  ansible.builtin.assert:
+    that:
+      - watchdog_sysctl_problems | length == 0
+      - watchdog_sysctl_stale_files | map('regex_replace', '^', '# ') | select('in', watchdog_sysctl_merged.stdout_lines) | list | length == 0
+    fail_msg: >-
+      At the next boot these settings would not take effect: {{ watchdog_sysctl_problems }}.
+      Stale file names still present: {{ watchdog_sysctl_stale_files | map('regex_replace', '^', '# ')
+      | select('in', watchdog_sysctl_merged.stdout_lines) | list }}.
+      A later-sorting vendor file now overrides ours; rename ours to sort after it, or drop that key.
+    quiet: true
+  vars:
+    watchdog_sysctl_problems: "{{ watchdog_sysctl_merged.stdout | homelab_sysctl_overrides(watchdog_sysctl_file) }}"
 
 - name: Look for the generated GRUB config
   ansible.builtin.stat:
