@@ -20,3 +20,23 @@ base_wait_online_timeout: 60
 base_ntp_fallback_servers:
   - 162.159.200.123
   - 162.159.200.1
+
+# mDNS off: avahi announced the host on every link, including the public Wi-Fi backup uplink.
+# Purging it removes only avahi-daemon and avahi-utils (checked with apt-get -s on the box).
+base_purge_packages:
+  - avahi-daemon
+  - avahi-utils
+# Pinned to -1 so a Recommends (libnss-mdns recommends avahi-daemon) or an upgrade can't bring it back.
+base_never_install:
+  - avahi-daemon
+
+# Apport can't be purged (ubuntu-server and ubuntu-server-minimal depend on it), so it's stopped and
+# masked. Its own stop hook resets fs.suid_dumpable to 0 and kernel.core_pattern to "core".
+base_apport_units:
+  - apport.service
+  - apport-autoreport.path
+  - apport-autoreport.timer
+  - apport-forward.socket
+
+# Network and core-dump hardening (Lynis/CIS items from the 2026-10-24 audit).
+base_sysctl_file: /etc/sysctl.d/60-homelab-hardening.conf

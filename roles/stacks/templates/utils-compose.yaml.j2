@@ -1,6 +1,7 @@
 # {{ ansible_managed }}
 # Utils stack (docs/CONTRACTS.md §6): the Wake-on-LAN relay. Host networking so the magic packet
-# leaves on the physical LAN; the host firewall admits port {{ stacks_wol_relay_port }} on the tailnet interface only.
+# leaves on the physical LAN. Port {{ stacks_wol_relay_port }} listens on the tailnet address only (LISTEN_ADDR),
+# and the host firewall also admits it on the tailnet interface only: two layers.
 # Built locally from ./wol-relay; pull_policy build means it is never pulled from a registry.
 # No provenance/SBOM attestations: they carry build timestamps and would change the image ID per build.
 # homelab.source-hash lets role stacks skip the build when the source is unchanged (tasks/local_image.yml).
@@ -30,12 +31,16 @@ services:
       - .env
     environment:
       PORT: "{{ stacks_wol_relay_port }}"
+      # Listen on the tailnet address only (relay.js retries until tailscaled has put it on the host).
+      LISTEN_ADDR: "{{ stacks_wol_relay_listen_addr }}"
     mem_limit: {{ stacks_mem_limits.wol_relay }}
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:{{ stacks_wol_relay_port }}/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      # Probes the address the relay actually listens on; failing until the bind succeeds.
+      # start_period covers a slow tailscaled at boot before failures count.
+      test: ["CMD", "node", "-e", "fetch('http://{{ stacks_wol_relay_listen_addr }}:{{ stacks_wol_relay_port }}/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 120s
     labels:
       homelab.watch: "true"

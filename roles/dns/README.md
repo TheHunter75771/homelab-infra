@@ -9,6 +9,8 @@ systemd-resolved with encrypted-only DNS (docs/CONTRACTS.md §7, §9d; module A)
   - `DNS=1.1.1.1#cloudflare-dns.com 9.9.9.9#dns.quad9.net`, `FallbackDNS=1.0.0.1#cloudflare-dns.com
     149.112.112.112#dns.quad9.net` (the `#name` is checked against the server's certificate and sent as SNI);
   - `DNSOverTLS=yes` (strict: no plaintext fallback) and `DNSSEC=allow-downgrade`.
+  - `MulticastDNS=no` and `LLMNR=no` (no multicast name resolution on any link; Ubuntu already ships
+    `MulticastDNS=no`, this makes both explicit). The post-check reads all three modes from resolved.
 
   The `zz-` name sorts last, and each list is reset before it's set, so earlier files can't add to or
   override it. The host's `resolved.conf` still has the stub off from AdGuard days; this overrides it.

@@ -92,3 +92,109 @@
   loop:
     - apt-daily.timer
     - apt-daily-upgrade.timer
+
+- name: Avahi (mDNS) is purged
+  ansible.builtin.apt:
+    name: "{{ base_purge_packages }}"
+    state: absent
+    purge: true
+
+- name: APT never installs the purged packages again
+  ansible.builtin.template:
+    src: apt-never-install.pref.j2
+    dest: /etc/apt/preferences.d/homelab-never-install.pref
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Look for apport's units
+  ansible.builtin.stat:
+    path: "/usr/lib/systemd/system/{{ item }}"
+  loop: "{{ base_apport_units }}"
+  register: base_apport_unit_files
+
+# Stop before masking: apport's ExecStop puts fs.suid_dumpable and kernel.core_pattern back.
+- name: Apport is stopped
+  ansible.builtin.systemd_service:
+    name: "{{ item.item }}"
+    state: stopped
+  loop: "{{ base_apport_unit_files.results | selectattr('stat.exists') | list }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Apport can't start again (masked)
+  ansible.builtin.systemd_service:
+    name: "{{ item.item }}"
+    masked: true
+  loop: "{{ base_apport_unit_files.results | selectattr('stat.exists') | list }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Network and core-dump hardening sysctls are set
+  ansible.builtin.template:
+    src: sysctl-homelab-hardening.conf.j2
+    dest: "{{ base_sysctl_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Apply hardening sysctls (base)
+
+- name: Apply base changes before checking them
+  ansible.builtin.meta: flush_handlers
+
+- name: Read the live hardening settings
+  ansible.builtin.slurp:
+    src: "/proc/sys/{{ item }}"
+  loop:
+    - net/ipv4/conf/all/send_redirects
+    - net/ipv4/conf/default/send_redirects
+    - "net/ipv4/conf/{{ lan_iface }}/send_redirects"
+    - net/ipv4/conf/all/log_martians
+    - net/ipv4/conf/default/log_martians
+    - fs/suid_dumpable
+  register: base_sysctl_live
+
+- name: Redirects off (also on the LAN interface), martians logged, no setuid core dumps
+  ansible.builtin.assert:
+    that:
+      - base_live['net/ipv4/conf/all/send_redirects'] == '0'
+      - base_live['net/ipv4/conf/default/send_redirects'] == '0'
+      - base_live['net/ipv4/conf/' ~ lan_iface ~ '/send_redirects'] == '0'
+      - base_live['net/ipv4/conf/all/log_martians'] == '1'
+      - base_live['net/ipv4/conf/default/log_martians'] == '1'
+      - base_live['fs/suid_dumpable'] == '0'
+    fail_msg: "Live kernel settings: {{ base_live }}"
+    quiet: true
+  vars:
+    base_live: >-
+      {{ dict(base_sysctl_live.results | map(attribute='item')
+         | zip(base_sysctl_live.results | map(attribute='content') | map('b64decode') | map('trim'))) }}
+
+- name: Read service states
+  ansible.builtin.service_facts:
+
+- name: Avahi is gone and apport is masked
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.services['avahi-daemon.service'] is not defined
+        or ansible_facts.services['avahi-daemon.service'].status in ['masked', 'not-found']
+      - ansible_facts.services['apport.service'] is not defined
+        or ansible_facts.services['apport.service'].status == 'masked'
+    fail_msg: >-
+      avahi-daemon: {{ ansible_facts.services['avahi-daemon.service'] | default('absent') }};
+      apport: {{ ansible_facts.services['apport.service'] | default('absent') }}
+    quiet: true
+
+- name: Look for anything listening on UDP 5353 (mDNS)
+  ansible.builtin.command:
+    argv: [ss, -H, -l, -n, -u, sport, "=", ":5353"]
+  register: base_mdns_listeners
+  changed_when: false
+  check_mode: false
+
+- name: Nothing listens on UDP 5353
+  ansible.builtin.assert:
+    that:
+      - base_mdns_listeners.stdout | trim | length == 0
+    fail_msg: "Still listening on 5353: {{ base_mdns_listeners.stdout_lines }}"
+    quiet: true

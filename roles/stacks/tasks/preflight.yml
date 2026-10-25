@@ -3,9 +3,27 @@
   ansible.builtin.assert:
     that:
       - lan_ip | default('') | length > 0
+      - tailnet_ip | default('') is match('^([0-9]{1,3}\.){3}[0-9]{1,3}$')
       - tailnet_fqdn | default('') | length > 0
       - media_uuid | default('') | length > 0
-    fail_msg: lan_ip, tailnet_fqdn and media_uuid must be set in inventory/host_vars for this host.
+    fail_msg: lan_ip, tailnet_ip (IPv4), tailnet_fqdn and media_uuid must be set in inventory/host_vars for this host.
+    quiet: true
+
+# wol-relay binds to this address only; catch a host_vars typo now rather than as a relay that waits forever.
+- name: Preflight | IPv4 addresses on this host
+  ansible.builtin.command:
+    argv: [ip, -4, -o, addr, show]
+  register: stacks_host_ipv4
+  changed_when: false
+  check_mode: false
+
+- name: Preflight | the wol-relay listen address is on this host (tailscale up)
+  ansible.builtin.assert:
+    that:
+      - stacks_host_ipv4.stdout is search('inet ' ~ (stacks_wol_relay_listen_addr | regex_escape) ~ '/')
+    fail_msg: >-
+      {{ stacks_wol_relay_listen_addr }} (stacks_wol_relay_listen_addr, default tailnet_ip) is not on this host.
+      Is tailscale up, and does host_vars tailnet_ip match `tailscale ip -4`?
     quiet: true
 
 # The .env files quote values with single quotes, so a secret may not contain one (or whitespace).

@@ -9,6 +9,10 @@
 //        GET  /health
 // Queue: optional. If WOL_QUEUE names a directory, *.json request files dropped there
 //        (same body as /wake) are sent and deleted. Unset = no queue polling.
+// Bind:  LISTEN_ADDR (e.g. the tailnet address) limits the listener to one address; unset = every
+//        interface (the old behaviour). If that address isn't on the host yet (tailscaled still
+//        starting at boot), the relay keeps retrying instead of exiting: no crash loop, and the
+//        healthcheck fails until it binds. Any other bind error exits non-zero.
 // No MAC or address is built in: callers supply them per request.
 
 const http = require('http');
@@ -20,6 +24,8 @@ const crypto = require('crypto');
 const PORT = parseInt(process.env.PORT, 10) || 9999;
 const TOKEN = process.env.WOL_RELAY_TOKEN || '';
 const QUEUE = process.env.WOL_QUEUE || '';
+const LISTEN_ADDR = process.env.LISTEN_ADDR || '';
+const BIND_RETRY_MS = 2000;
 const MAX_BODY = 1024;
 
 function tokenOk(given) {
@@ -66,7 +72,23 @@ const server = http.createServer((req, res) => {
     }
   });
 });
-server.listen(PORT, () => console.log(`[wol-relay] listening on :${PORT} (host network)`));
+let lastBindLog = 0;
+function listen() { server.listen(PORT, LISTEN_ADDR || undefined); }
+server.on('listening', () => console.log(`[wol-relay] listening on ${LISTEN_ADDR || '*'}:${PORT} (host network)`));
+server.on('error', (e) => {
+  if (e.code === 'EADDRNOTAVAIL' && LISTEN_ADDR) {
+    const now = Date.now();
+    if (now - lastBindLog >= 30000) {
+      console.error(`[wol-relay] ${LISTEN_ADDR} is not on this host yet (${e.code}); retrying every ${BIND_RETRY_MS / 1000}s`);
+      lastBindLog = now;
+    }
+    setTimeout(() => { server.close(); listen(); }, BIND_RETRY_MS);
+    return;
+  }
+  console.error(`[wol-relay] cannot listen on ${LISTEN_ADDR || '*'}:${PORT}: ${e.code || e.message}`);
+  process.exit(1);
+});
+listen();
 
 async function pollQueue() {
   let files = [];

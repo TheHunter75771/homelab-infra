@@ -40,6 +40,10 @@ stacks_retired_push_image_repo: homelab/push-core
 # wol-relay runs with host networking; "nobody" so the process maps to no real host account.
 stacks_wol_relay_port: 9999
 stacks_wol_relay_user: "65534:65534"
+# Second layer behind UFW: the relay listens on the tailnet address only, so it stays closed on the
+# LAN and the Wi-Fi uplink even if the firewall is disabled. It waits (healthcheck failing) until
+# tailscaled has put the address on the host; preflight checks the address exists at deploy time.
+stacks_wol_relay_listen_addr: "{{ tailnet_ip }}"
 
 stacks_mem_limits:
   jellyfin: 2g

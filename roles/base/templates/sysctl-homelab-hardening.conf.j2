@@ -1,0 +1,21 @@
+# {{ ansible_managed }}
+# Host hardening (2026-10-24 audit). rp_filter stays at Ubuntu's 2 (loose), which Tailscale needs.
+
+# No ICMP redirects: the box routes for nobody. Docker forwards between its bridges and the LAN
+# (never back out the interface a packet came in on), and Tailscale isn't a subnet router or exit
+# node here. The kernel ORs "all" with each interface's own value, so the glob also clears the
+# interfaces that already exist; systemd's udev rule applies it to interfaces created later
+# (Docker bridges and veths).
+net.ipv4.conf.*.send_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+
+# Log packets with impossible source addresses. With loose rp_filter and a default route, Docker
+# (172.16.0.0/12) and tailnet (100.64.0.0/10) sources are routable, so they don't count. Only truly
+# bogus sources (multicast, broadcast, loopback or 0.0.0.0 off-link) are logged, and the kernel
+# rate-limits these messages (net.core.message_burst 10, message_cost 5 s).
+net.ipv4.conf.all.log_martians = 1
+net.ipv4.conf.default.log_martians = 1
+
+# No core dumps from setuid programs (apport set 2; it's masked now and kdump is gone).
+fs.suid_dumpable = 0

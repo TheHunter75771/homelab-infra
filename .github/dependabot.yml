@@ -1,0 +1,34 @@
+---
+# Version updates (security alerts and security-fix PRs are enabled in the repo settings).
+# Image pins in inventory/group_vars/all/versions.yml and the gitleaks digest in ci.yml are
+# bumped by hand (Renovate is P8 #3); Dependabot covers the ecosystems below.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    commit-message: { prefix: ci }
+    groups:
+      actions: { patterns: ["*"], update-types: [minor, patch] }
+  - package-ecosystem: npm
+    directory: /apps/dashboard/server
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    commit-message: { prefix: deps, prefix-development: deps-dev }
+    groups:
+      server: { patterns: ["*"], update-types: [minor, patch] }
+  - package-ecosystem: npm
+    directory: /apps/dashboard/web
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    commit-message: { prefix: deps, prefix-development: deps-dev }
+    groups:
+      web: { patterns: ["*"], update-types: [minor, patch] }
+  - package-ecosystem: pip
+    directory: /
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    commit-message: { prefix: deps-dev }
+    groups:
+      tools: { patterns: ["*"], update-types: [minor, patch] }

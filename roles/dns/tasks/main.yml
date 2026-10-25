@@ -159,23 +159,24 @@
       /etc/systemd/networkd.conf.d/zz-homelab.conf; `systemctl restart tailscaled` restores the rules.
     quiet: true
 
-- name: Read resolved's DNS-over-TLS mode
+- name: Read resolved's DNS-over-TLS, mDNS and LLMNR modes
   ansible.builtin.command: >-
     busctl get-property org.freedesktop.resolve1 /org/freedesktop/resolve1
-    org.freedesktop.resolve1.Manager DNSOverTLS
+    org.freedesktop.resolve1.Manager DNSOverTLS MulticastDNS LLMNR
   register: dns_dot
   changed_when: false
   check_mode: false
 
-- name: Strict DoT to exactly the declared upstreams; no link-learned servers, no MagicDNS
+- name: Strict DoT to exactly the declared upstreams; no mDNS/LLMNR, no link-learned servers, no MagicDNS
   ansible.builtin.assert:
     that:
-      - dns_dot.stdout == 's "' ~ dns_over_tls ~ '"'
+      - dns_dot.stdout_lines == ['s "' ~ dns_over_tls ~ '"', 's "no"', 's "no"']
       - dns_global == dns_upstreams
       - dns_link_servers | length == 0
       - "'100.100.100.100' not in dns_servers.stdout"
     fail_msg: >-
-      DNSOverTLS={{ dns_dot.stdout }} (want {{ dns_over_tls }}); global {{ dns_global }} (want {{ dns_upstreams }});
+      DNSOverTLS/MulticastDNS/LLMNR={{ dns_dot.stdout_lines }} (want {{ dns_over_tls }}/no/no);
+      global {{ dns_global }} (want {{ dns_upstreams }});
       links with servers: {{ dns_link_servers }}.
     quiet: true
   vars:

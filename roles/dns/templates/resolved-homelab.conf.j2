@@ -12,3 +12,6 @@ FallbackDNS=
 FallbackDNS={{ dns_fallback | join(' ') }}
 DNSOverTLS={{ dns_over_tls }}
 DNSSEC={{ dns_dnssec }}
+# No multicast name resolution on any link (the backup Wi-Fi is a public network); avahi is gone too.
+MulticastDNS=no
+LLMNR=no

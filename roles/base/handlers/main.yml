@@ -14,3 +14,12 @@
 - name: Reload chrony sources (base)
   ansible.builtin.command: chronyc reload sources
   changed_when: true
+
+# Only this file, through systemd-sysctl, which expands the net.ipv4.conf.* glob (sysctl.d(5); procps
+# sysctl(8) documents no glob support). Other services' runtime settings aren't re-applied.
+- name: Apply hardening sysctls (base)
+  ansible.builtin.command:
+    argv:
+      - /usr/lib/systemd/systemd-sysctl
+      - "{{ base_sysctl_file }}"
+  changed_when: true

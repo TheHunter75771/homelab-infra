@@ -36,17 +36,20 @@ You type the sudo password: `.venv/bin/ansible-playbook playbooks/bootstrap.yml 
 
 ## 4. Restore app data (optional; the default is a clean start)
 There's no restore playbook yet, so do it by hand:
-1. Copy the newest archive from the workstation's pull folder (`appdata-<stamp>.tar`) to the box. Then, in an **empty scratch dir**:
+1. If the box's own `/srv/homelab/backups/appdata/` survived, use its newest archive and check its `sha256sum` matches the workstation's copy (`~/backups/mediaserver/nightly/v2/appdata/`). Otherwise copy that file to the box. Then:
    ```bash
-   mkdir ~/restore && cd ~/restore && sudo tar -xpf ../appdata-*.tar && sudo sha256sum -c MANIFEST.sha256
+   sudo install -d -m 0700 /var/tmp/restore && cd /var/tmp/restore && sudo tar -xpf /path/to/appdata-<stamp>.tar && sudo sha256sum -c MANIFEST.sha256
    ```
-   **Stop if any line isn't OK.** (sudo keeps the owners stored in the archive; extracted without sudo, the databases would end up owned by the admin and the apps couldn't read them.)
+   **Stop if any line isn't OK.** sudo keeps the owners stored in the archive. The extracted tree holds secrets (Usenet login, *arr/SABnzbd/Jellyfin/Jellyseerr API keys, the VAPID private key), so keep it root-only and finish with `sudo rm -rf /var/tmp/restore`.
 2. Stop what you're restoring: `sudo docker compose -f /srv/homelab/stacks/media/compose.yaml stop`, and `sudo systemctl stop homelab-dashboard` if you're restoring push devices or dashboard data.
 3. App files, keeping the owners stored in the archive (no blanket chown):
    ```bash
    sudo tar -xpzf files.tar.gz -C /srv/homelab/data
    ```
-4. SQLite databases: for each `sqlite/<path>`, `sudo cp -p` it over the matching file under `/srv/homelab/data/<path>`, and `sudo rm -f` any `<db>-wal`/`<db>-shm` next to it.
+4. SQLite databases. Every file under `sqlite/` goes over the same path under `/srv/homelab/data/`, including Jellyseerr's `jellyseerr/db/db.sqlite3`, which isn't a `*.db`:
+   ```bash
+   cd /var/tmp/restore/sqlite && sudo find . -type f -exec sh -c 'd="/srv/homelab/data/${1#./}"; cp -p "$1" "$d" && rm -f "$d-wal" "$d-shm"' _ {} \;
+   ```
 5. Push devices (optional; otherwise phones subscribe again): `sudo tar -xpzf push.tar.gz -C /srv/homelab/push`, then `sudo chown -R dashboard:dashboard /srv/homelab/push && sudo chown root:dashboard /srv/homelab/push/vapid.json` (archives from before Dashboard v2 carry the old `pushcore` uid, which is the same uid 10101, so this is a no-op for them).
 6. Dashboard data and alert history (optional; only archives that contain `dashboard.tar.gz`/`notify.tar.gz`, since older ones don't). With `homelab-dashboard` still stopped:
    ```bash
@@ -56,7 +59,14 @@ There's no restore playbook yet, so do it by hand:
    ```
    Expect `750 dashboard` and `600 dashboard`. The archive stores numeric owners and modes, and `tar -p` under sudo restores them, so don't chown. `dashboard.tar.gz` brings back the settings (Jellyfin/Jellyseerr API keys, renewal dates, thresholds), the drive samples and the uptime rollups. `notify.tar.gz` holds only `history.jsonl`, never the notifier's dedupe state. Then `sudo systemctl start homelab-dashboard`.
 7. **Don't restore `bootgate.tar.gz`.** Its state is stale and the gate rebuilds it.
-8. **Use the same app versions the backup came from** (`inventory/group_vars/all/versions.yml` at that commit), start the stacks (`sudo docker compose -f ... up -d`) and, if you stopped it and skipped step 6, `sudo systemctl start homelab-dashboard`. Check them, then upgrade.
+8. **Use the same app versions the backup came from** (`inventory/group_vars/all/versions.yml` at that commit), start the stacks (`sudo docker compose -f ... up -d`) and, if you stopped it and skipped step 6, `sudo systemctl start homelab-dashboard`. Check them, then upgrade. Check list:
+   - Sonarr/Radarr: series and movies, root folders, download client, Connect.
+   - Prowlarr: the indexer and its app links.
+   - SABnzbd: the server and categories.
+   - Jellyfin: wizard done, libraries present.
+   - Jellyseerr: `initialized`, with its Radarr/Sonarr servers.
+
+   **Rehearsed 2026-10-25:** extract and verify take under a second, each app is up within about 5 s, and the whole thing is about 5 minutes hands-on. In an *offline* restore, Jellyseerr's `/api/v1/status` (its healthcheck) takes about 7 s per call because it checks GitHub releases, so the container can show unhealthy until the network is back. That's harmless.
 
 ## 5. Off-box pieces
 Re-run `playbooks/gaming-pc.yml` and `playbooks/edge.yml`. Check the Cloudflare tunnel route (`cloudflare.md`).

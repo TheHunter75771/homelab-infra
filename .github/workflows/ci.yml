@@ -94,6 +94,8 @@ jobs:
         run: python3 -m unittest discover -s roles/bootgate/files/tests -v
       - name: notifier
         run: python3 -m unittest discover -s roles/notifier/files/tests -v
+      - name: wol-relay
+        run: node --test roles/stacks/tests/wol_relay.test.js
       - name: dashboard helper
         run: python3 -m unittest discover -s roles/dashboard/files/homelab-dockerctl/tests -v
       - name: storage format guard

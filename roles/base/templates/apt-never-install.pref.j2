@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+# Packages removed on purpose (role base). Priority -1 stops apt from installing them again,
+# including as a Recommends or during an upgrade.
+{% for package in base_never_install %}
+Package: {{ package }}
+Pin: version *
+Pin-Priority: -1
+{% if not loop.last %}
+
+{% endif %}
+{% endfor %}
