@@ -61,6 +61,9 @@ jobs:
           python-version: "3.13"
       - run: npm ci
       - run: npm test
+      - name: Time-travel (suite at +40 d and +220 d)
+        run: npm run test:time-travel
+
   dashboard-web:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -79,6 +82,27 @@ jobs:
         working-directory: apps/dashboard/server
       - run: npm ci
       - run: npm test
+  opentofu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: opentofu/setup-opentofu@v2
+        with:
+          tofu_version: 1.11.5
+          tofu_wrapper: false
+      - name: tofu fmt
+        run: tofu fmt -check -recursive terraform/
+      - name: tofu validate (cloudflare)
+        working-directory: terraform/cloudflare
+        run: |
+          tofu init -backend=false -input=false -lockfile=readonly
+          tofu validate
+      - name: plan guard tests
+        run: bash terraform/cloudflare/tests/test_plan_guard.sh
+
   role-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -97,7 +121,7 @@ jobs:
           PIN=$(python3 -c 'import yaml;v=yaml.safe_load(open("inventory/group_vars/all/versions.yml"));print(v["python_packages"]["pywebpush"])')
           pip install "pywebpush==$PIN"
       - name: shellcheck
-        run: shellcheck roles/*/files/*.sh roles/*/tests/*.sh
+        run: shellcheck roles/*/files/*.sh roles/*/tests/*.sh terraform/cloudflare/*.sh terraform/cloudflare/tests/*.sh
       - name: backups
         run: bash roles/backups/tests/test_backup.sh
       - name: backup pull

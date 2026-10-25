@@ -175,6 +175,7 @@ This is the single spec for the MVP build. Builders own exactly the paths listed
 | D dashboard server | `apps/dashboard/server/` (was `apps/push-core/`, retired 2026-10-24) |
 | G dashboard web | `apps/dashboard/web/` |
 | H dashboard host | `roles/dashboard/` |
+| T cloudflare-as-code | `terraform/cloudflare/` (OpenTofu; P8 #2, encrypted local state, never applied without a reviewed plan) |
 | E ops | `roles/backups/`, `playbooks/gaming-pc.yml`, `playbooks/edge.yml`, `roles/heartbeat/`, `roles/backup_pull/` |
 
 ## 11. Dashboard v2 (build started 2026-10-24)

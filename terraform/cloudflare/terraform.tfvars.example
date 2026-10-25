@@ -1,0 +1,34 @@
+# Copy to terraform.tfvars (git-ignored, chmod 600) and fill in your own values.
+# Read them from the Cloudflare API or dashboard; README.md shows read-only API calls.
+# The state passphrase is NOT set here: it comes from TF_VAR_state_passphrase.
+
+account_id = "<32-hex account id>"
+zone_id    = "<32-hex zone id>"
+domain     = "<apex domain, e.g. example.com>"
+
+tunnel_id          = "<uuid of the media server's tunnel>"
+pages_project_name = "<Pages project name>"
+game_ipv4          = "<edge VPS public IPv4>"
+
+email_forward_to = "<verified destination address>"
+email_dkim_txt   = "<content of the cf2024-1._domainkey TXT record, quotes included>"
+email_mx_priorities = {
+  route1 = 0 # <priority of route1.mx.cloudflare.net>
+  route2 = 0 # <priority of route2.mx.cloudflare.net>
+  route3 = 0 # <priority of route3.mx.cloudflare.net>
+}
+
+# Import ids: only needed until the first reviewed apply has imported everything.
+dns_record_ids = {
+  apex      = "<record id>"
+  watch     = "<record id>"
+  game      = "<record id>"
+  mx_route1 = "<record id>"
+  mx_route2 = "<record id>"
+  mx_route3 = "<record id>"
+  dkim      = "<record id>"
+  spf       = "<record id>"
+}
+cache_ruleset_id         = "<id of the http_request_cache_settings entry-point ruleset>"
+email_routing_address_id = "<destination address id>"
+email_routing_rule_id    = "<id of the hello@ rule>"

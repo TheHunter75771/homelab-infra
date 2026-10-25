@@ -22,3 +22,14 @@ vault-pass*
 
 # Controller-side build output (e.g. dashboard node_modules)
 .build/
+
+# OpenTofu (terraform/): state, plans, vars and generated config never go public
+*.tfplan
+*.tfvars.json
+crash.log
+crash.*.log
+terraform/**/generated*.tf
+override.tf
+*_override.tf
+override.tf.json
+*_override.tf.json
