@@ -1,0 +1,19 @@
+---
+# Refresh only caches that already exist; never create one. A user icon-theme.cache that nothing
+# keeps current hides icons added later (Steam writes game icons into this same hicolor tree and
+# never refreshes it). Without a cache, GTK and the shell scan the directories and find ours.
+- name: Refresh the user icon cache for homelab-dashboard
+  ansible.builtin.command:
+    argv: [/usr/bin/gtk-update-icon-cache, --force, --ignore-theme-index, --quiet, "{{ dashboard_desktop_icon_root }}"]
+  changed_when: true
+  when:
+    - dashboard_desktop_found['/usr/bin/gtk-update-icon-cache'].exists
+    - dashboard_desktop_found[dashboard_desktop_icon_root ~ '/icon-theme.cache'].exists
+
+- name: Refresh the user desktop database for homelab-dashboard
+  ansible.builtin.command:
+    argv: [/usr/bin/update-desktop-database, --quiet, "{{ dashboard_desktop_apps_dir }}"]
+  changed_when: true
+  when:
+    - dashboard_desktop_found['/usr/bin/update-desktop-database'].exists
+    - dashboard_desktop_found[dashboard_desktop_apps_dir ~ '/mimeinfo.cache'].exists

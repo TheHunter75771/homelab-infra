@@ -1,8 +1,9 @@
 ---
-# Workstation side of the backups (docs/CONTRACTS.md §8): a user timer pulls the media
-# server's nightly archives read-only and keeps only verified copies. Runs as the desktop
-# user over the local connection; nothing here needs root.
-- name: Backup pull on the workstation
+# Workstation side (docs/CONTRACTS.md §8): a user timer pulls the media server's nightly
+# archives read-only and keeps only verified copies, and the Media Server desktop app
+# (role dashboard_desktop) opens Dashboard v2 in its own window. Runs as the desktop user
+# over the local connection; nothing here needs root.
+- name: Workstation (backup pull, dashboard desktop app)
   hosts: workstations
   become: false
   gather_facts: true
@@ -11,3 +12,4 @@
     - min
   roles:
     - role: backup_pull
+    - role: dashboard_desktop

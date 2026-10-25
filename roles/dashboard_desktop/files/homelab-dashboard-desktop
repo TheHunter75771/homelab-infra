@@ -1,0 +1,567 @@
+#!/usr/bin/python3
+"""The media server's dashboard as a native desktop window.
+
+A WebKitGTK window pointed at Dashboard v2 (a PWA served over the tailnet): no browser chrome,
+its own taskbar entry, and it remembers its size, position and zoom. The URL lives in
+~/.config/homelab-dashboard/app.conf (written by the dashboard_desktop role), so a renamed host
+only needs the role re-run.
+
+    homelab-dashboard-desktop                   # opens the configured URL
+    homelab-dashboard-desktop URL               # one-off override (not saved)
+    homelab-dashboard-desktop --selftest [URL]  # headless load check: "ok <title>" or "fail <reason>"
+
+Only the dashboard origin (https, its host, port 443) loads in the window. Other http(s) links open
+in the default browser after a real user gesture (never for a script's click); every other scheme
+(file:, javascript:, data:, ...) is dropped. Permission requests are denied, downloads from the
+dashboard go to the browser (others are dropped), and TLS errors are never ignored.
+
+Website data (the service worker, its cache, the last summary) persists under
+~/.local/share/homelab-dashboard and ~/.cache/homelab-dashboard, so the dashboard's offline
+screen still works when the box is down.
+
+Keys: F5 / Ctrl+R reload, Ctrl+Q quit, Ctrl+Plus / Ctrl+Minus / Ctrl+0 zoom.
+
+Everything above load_gi() is plain Python (no GTK), so it tests without a display:
+    python3 -m unittest discover -s roles/dashboard_desktop/tests
+"""
+from __future__ import annotations
+
+import argparse
+import configparser
+import fcntl
+import math
+import os
+import re
+import sys
+from dataclasses import dataclass
+from html import escape
+from pathlib import Path
+from string import Template
+from urllib.parse import urlsplit
+
+APP_ID = "homelab-dashboard"  # WM class, Wayland app_id, icon name and XDG directory name
+APP_NAME = "Media Server"
+SELFTEST_TIMEOUT = 20.0  # seconds
+ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 0.5, 3.0, 0.1
+LOAD, EXTERNAL, DROP = "load", "external", "drop"
+
+# Whitespace, control characters and backslashes: URL parsers disagree about them, so a URL that
+# contains one is never treated as the dashboard's. (WebKit hands over canonical URLs, which never do.)
+_AMBIGUOUS = re.compile(r"[\x00-\x20\x7f\\]")
+
+# GTlsCertificateFlags bits, for the error page.
+TLS_FLAGS = {
+    1: "issuer not trusted",
+    2: "name does not match",
+    4: "not valid yet",
+    8: "expired",
+    16: "revoked",
+    32: "insecure algorithm",
+    64: "invalid",
+}
+
+KEYS = {  # (Ctrl held, GDK key name) -> action
+    (False, "F5"): "reload",
+    (True, "F5"): "reload",
+    (True, "r"): "reload",
+    (True, "q"): "quit",
+    (True, "plus"): "zoom_in",
+    (True, "equal"): "zoom_in",
+    (True, "KP_Add"): "zoom_in",
+    (True, "minus"): "zoom_out",
+    (True, "KP_Subtract"): "zoom_out",
+    (True, "0"): "zoom_reset",
+    (True, "KP_0"): "zoom_reset",
+}
+
+ERROR_PAGE = Template("""<!doctype html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<title>$title</title>
+<style>
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#161826;color:#e7e9f3;
+font:15px/1.5 system-ui,sans-serif}
+main{max-width:36rem;padding:2rem}h1{font-size:1.3rem;margin:0 0 .75rem}p{margin:.4rem 0;color:#b9bdd0}
+kbd{border:1px solid #4a4f6a;border-radius:4px;padding:0 .35rem}
+</style></head>
+<body><main><h1>$title</h1><p>$detail</p><p>Press <kbd>F5</kbd> to try again.</p></main></body></html>
+""")
+
+
+@dataclass
+class Prefs:
+    """The [app] section of app.conf. The role owns url; the app owns the rest."""
+
+    url: str = ""
+    width: int = 1280
+    height: int = 860
+    x: int | None = None
+    y: int | None = None
+    maximized: bool = False
+    zoom: float = 1.0
+
+
+def xdg_dir(var: str, fallback: str, env=None) -> Path:
+    """$var/homelab-dashboard, else ~/<fallback>/homelab-dashboard (XDG: ignore relative values)."""
+    base = (os.environ if env is None else env).get(var, "")
+    return (Path(base) if os.path.isabs(base) else Path.home() / fallback) / APP_ID
+
+
+def https_origin(url):
+    """("https", host, 443) for a clean https URL on the default port, else None."""
+    if not isinstance(url, str) or _AMBIGUOUS.search(url):
+        return None
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:  # bad port or bracketed host
+        return None
+    if parts.scheme != "https" or "@" in parts.netloc or not parts.hostname:
+        return None
+    return ("https", parts.hostname, 443) if port in (None, 443) else None
+
+
+def classify(url, dashboard) -> str:
+    """Where a navigation goes: LOAD (in the window), EXTERNAL (default browser) or DROP."""
+    if dashboard is not None and https_origin(url) == dashboard:
+        return LOAD
+    if not isinstance(url, str) or _AMBIGUOUS.search(url):
+        return DROP
+    try:
+        parts = urlsplit(url)
+        _ = parts.port
+    except ValueError:
+        return DROP
+    return EXTERNAL if parts.scheme in ("http", "https") and parts.hostname else DROP
+
+
+def is_user_action(action) -> bool:
+    """True only for a real user gesture (a click or key press). WebKit labels a script's
+    a.click() and a dispatched MouseEvent LINK_CLICKED too, so the navigation type proves nothing."""
+    return bool(action.is_user_gesture())
+
+
+def route(url, dashboard, *, gesture: bool) -> str:
+    """Where a navigation the window does not take itself goes (a new window, another origin):
+    LOAD here, EXTERNAL to the browser only after a user gesture, otherwise DROP."""
+    verdict = classify(url, dashboard)
+    return DROP if verdict == EXTERNAL and not gesture else verdict
+
+
+def route_download(url, dashboard) -> str:
+    """Downloads go to the browser only from the dashboard origin. WebKit reports no gesture for a
+    download, so a script can start one: anything else is dropped."""
+    return EXTERNAL if classify(url, dashboard) == LOAD else DROP
+
+
+def describe(url) -> str:
+    """scheme://host for log lines: no path, query or credentials."""
+    try:
+        parts = urlsplit(url) if isinstance(url, str) else None
+    except ValueError:
+        parts = None
+    if parts is None:
+        return "an unparsable URL"
+    return f"{parts.scheme}://{parts.hostname}" if parts.hostname else f"a {parts.scheme or 'relative'}: URL"
+
+
+def private_dir(path: Path) -> Path:
+    """Create path as 0700, or tighten an existing one of ours that group or others can reach."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = path.stat()
+    if info.st_uid == os.getuid() and info.st_mode & 0o077:
+        path.chmod(0o700)
+    elif info.st_uid != os.getuid():
+        log(f"{path} belongs to uid {info.st_uid}; leaving its mode alone")
+    return path
+
+
+def _int(raw, default, lo, hi):
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if lo <= value <= hi else default
+
+
+def _parse(path: Path) -> configparser.ConfigParser:
+    """app.conf as it is on disk now (empty when missing). Raises on unreadable or junk files."""
+    cfg = configparser.ConfigParser(interpolation=None)  # URLs may contain '%'
+    try:
+        with path.open(encoding="utf-8") as handle:
+            cfg.read_file(handle)
+    except FileNotFoundError:
+        pass
+    if not cfg.has_section("app"):
+        cfg.add_section("app")
+    return cfg
+
+
+def read_prefs(path: Path) -> Prefs:
+    """Prefs from app.conf; missing or junk values fall back to the defaults."""
+    try:
+        app = _parse(path)["app"]
+    except (OSError, configparser.Error, UnicodeDecodeError) as err:
+        raise SystemExit(f"{APP_ID}: cannot read {path}: {err}") from None
+    d = Prefs()
+    try:
+        zoom = float(app.get("zoom", d.zoom))
+    except ValueError:
+        zoom = d.zoom
+    try:
+        maximized = app.getboolean("maximized", fallback=False)
+    except ValueError:
+        maximized = False
+    return Prefs(
+        url=app.get("url", "").strip(),
+        width=_int(app.get("width"), d.width, 320, 16384),
+        height=_int(app.get("height"), d.height, 240, 16384),
+        x=_int(app.get("x"), None, -65536, 65536),
+        y=_int(app.get("y"), None, -65536, 65536),
+        maximized=maximized,
+        zoom=min(ZOOM_MAX, max(ZOOM_MIN, zoom)) if math.isfinite(zoom) else d.zoom,
+    )
+
+
+def write_prefs(path: Path, prefs: Prefs) -> None:
+    """Save the window keys atomically, mode 0600. It re-reads the file first and never writes url,
+    so a url the role changed while the window was open survives, and so do other keys and sections.
+    Raises (and saves nothing) when the file can no longer be read or parsed."""
+    cfg = _parse(path)
+    app = cfg["app"]
+    app["width"], app["height"] = str(prefs.width), str(prefs.height)
+    app["maximized"] = "yes" if prefs.maximized else "no"
+    app["zoom"] = f"{round(prefs.zoom, 2):g}"
+    for key, value in (("x", prefs.x), ("y", prefs.y)):
+        if value is None:
+            app.pop(key, None)
+        else:
+            app[key] = str(value)
+    private_dir(path.parent)
+    tmp = path.with_name(f".{path.name}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)  # a leftover tmp file keeps its old mode otherwise
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        cfg.write(handle)
+    os.replace(tmp, path)
+
+
+def step_zoom(level: float, step: int) -> float:
+    """+1 / -1 zooms by 10 %, 0 resets to 100 %; clamped to 50-300 %."""
+    if step == 0:
+        return 1.0
+    return round(min(ZOOM_MAX, max(ZOOM_MIN, level + step * ZOOM_STEP)), 2)
+
+
+def key_action(name: str, ctrl: bool):
+    """The action for a key press (GDK key name), or None to pass it to the page."""
+    return KEYS.get((ctrl, name.lower() if len(name) == 1 else name))
+
+
+def on_screen(x: int, y: int, monitors) -> bool:
+    """True when a window placed at x,y keeps a grabbable title bar on one of the monitors."""
+    return any(mx <= x + 48 < mx + mw and my <= y + 16 < my + mh for mx, my, mw, mh in monitors)
+
+
+def tls_problem(flags: int) -> str:
+    return ", ".join(text for bit, text in TLS_FLAGS.items() if flags & bit) or "certificate rejected"
+
+
+def error_page(title: str, detail: str) -> str:
+    return ERROR_PAGE.substitute(title=escape(title), detail=escape(detail))
+
+
+def log(message: str) -> None:
+    print(f"{APP_ID}: {message}", file=sys.stderr, flush=True)
+
+
+# --- GTK below this line ------------------------------------------------------------------------
+
+Gdk = GLib = Gtk = WebKit2 = None  # set by load_gi()
+
+
+def load_gi() -> bool:
+    """Import GTK + WebKitGTK and open the display; False when there is no display."""
+    global Gdk, GLib, Gtk, WebKit2
+    import gi
+
+    gi.require_version("Gdk", "3.0")
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("WebKit2", "4.1")
+    from gi.repository import GLib
+
+    GLib.set_prgname(APP_ID)  # before GTK opens the display: the Wayland app_id and X11 WM_CLASS
+    GLib.set_application_name(APP_NAME)
+    from gi.repository import Gdk, Gtk, WebKit2
+
+    Gdk.set_program_class(APP_ID)  # X11 WM_CLASS class, matched by StartupWMClass
+    return Gtk.init_check(None)[0]
+
+
+def web_context(persistent: bool):
+    """A context with strict TLS, a sandboxed web process and (unless ephemeral) XDG website data."""
+    if persistent:
+        data_dir = xdg_dir("XDG_DATA_HOME", ".local/share")
+        cache_dir = xdg_dir("XDG_CACHE_HOME", ".cache")
+        for directory in (data_dir, cache_dir):
+            private_dir(directory)
+        data = WebKit2.WebsiteDataManager(base_data_directory=str(data_dir), base_cache_directory=str(cache_dir))
+        cookies = data.get_cookie_manager()
+        cookies.set_persistent_storage(str(data_dir / "cookies.sqlite"), WebKit2.CookiePersistentStorage.SQLITE)
+        cookies.set_accept_policy(WebKit2.CookieAcceptPolicy.NO_THIRD_PARTY)
+    else:
+        data = WebKit2.WebsiteDataManager.new_ephemeral()
+    data.set_tls_errors_policy(WebKit2.TLSErrorsPolicy.FAIL)
+    context = WebKit2.WebContext.new_with_website_data_manager(data)
+    context.set_sandbox_enabled(True)  # bubblewrap (a webkit2gtk4.1 dependency on Fedora)
+    return context
+
+
+class Dashboard:
+    """A WebView with the dashboard's navigation, permission, download and TLS policy.
+
+    external(uri) opens a URL in the browser; failed(uri, title, detail) reports a failed load."""
+
+    def __init__(self, url: str, *, persistent: bool, external, failed):
+        self.origin = https_origin(url)
+        self.external, self.failed = external, failed
+        context = web_context(persistent)
+        context.connect("download-started", self.on_download)
+        self.view = WebKit2.WebView(web_context=context)
+        settings = self.view.get_settings()
+        settings.set_enable_developer_extras(False)
+        settings.set_enable_media_stream(False)
+        settings.set_enable_webrtc(False)
+        settings.set_javascript_can_open_windows_automatically(False)
+        settings.set_enable_write_console_messages_to_stdout(False)
+        for signal, handler in (
+            ("decide-policy", self.on_decide_policy),
+            ("create", self.on_create),
+            ("permission-request", self.on_permission_request),
+            ("query-permission-state", self.on_query_permission_state),
+            ("load-failed-with-tls-errors", self.on_tls_error),
+            ("load-failed", self.on_load_failed),
+        ):
+            self.view.connect(signal, handler)
+
+    def follow(self, uri: str, gesture: bool) -> None:
+        """A navigation the view did not take itself (a new window, or another origin)."""
+        verdict = route(uri, self.origin, gesture=gesture)
+        if verdict == LOAD:  # a same-origin new window: show it here
+            GLib.idle_add(self.view.load_uri, uri)
+        elif verdict == EXTERNAL:
+            self.external(uri)
+        else:  # other schemes, and foreign origins with no user gesture (scripts, redirects, iframes)
+            log(f"dropped a navigation to {describe(uri)}")
+
+    def download(self, uri: str) -> None:
+        if route_download(uri, self.origin) == EXTERNAL:
+            self.external(uri)
+        else:
+            log(f"dropped a download from {describe(uri)}")
+
+    def on_decide_policy(self, _view, decision, kind):
+        if kind == WebKit2.PolicyDecisionType.RESPONSE:
+            if decision.is_mime_type_supported():
+                return False  # WebKit's default: show it
+            decision.ignore()  # it would become a download
+            if decision.is_main_frame_main_resource():
+                self.download(decision.get_request().get_uri())
+            return True
+        action = decision.get_navigation_action()
+        uri = action.get_request().get_uri()
+        if kind == WebKit2.PolicyDecisionType.NAVIGATION_ACTION and classify(uri, self.origin) == LOAD:
+            decision.use()
+        else:
+            decision.ignore()
+            self.follow(uri, is_user_action(action))
+        return True
+
+    def on_create(self, _view, action):  # window.open(): returns no WebView, so no second window
+        self.follow(action.get_request().get_uri(), is_user_action(action))
+
+    def on_download(self, _context, download):  # <a download> and friends
+        download.cancel()
+        self.download(download.get_request().get_uri())
+
+    def on_permission_request(self, _view, request):
+        # Geolocation, camera/mic, notifications, pointer lock, clipboard read, storage access...
+        # Notifications too: WebKitGTK has no Web Push, so the dashboard's alerts reach the phone.
+        request.deny()
+        log(f"denied {type(request).__name__}")
+        return True
+
+    def on_query_permission_state(self, _view, query):
+        query.finish(WebKit2.PermissionState.DENIED)  # navigator.permissions.query() agrees
+        return True
+
+    def on_tls_error(self, _view, uri, _certificate, flags):
+        self.failed(
+            uri,
+            "The dashboard's certificate was rejected",
+            f"{tls_problem(int(flags))}. This window never skips certificate checks, so nothing was "
+            "loaded. The tailnet name should present a valid Let's Encrypt certificate.",
+        )
+        return True
+
+    def on_load_failed(self, _view, _event, uri, error):
+        if error.matches(WebKit2.network_error_quark(), WebKit2.NetworkError.CANCELLED) or error.matches(
+            WebKit2.policy_error_quark(), WebKit2.PolicyError.FRAME_LOAD_INTERRUPTED_BY_POLICY_CHANGE
+        ):
+            return False  # a newer load, or this policy, stopped it: not an error
+        self.failed(uri, "Can't reach the media server", error.message)
+        return True
+
+
+class Window:
+    def __init__(self, url: str, prefs: Prefs, conf: Path):
+        self.prefs, self.conf = prefs, conf
+        self.win = Gtk.Window(title=APP_NAME)
+        self.dash = Dashboard(url, persistent=True, external=self.open_external, failed=self.show_error)
+        view = self.dash.view
+        display = self.win.get_display()
+        # Wayland neither reports nor sets window positions: keep the saved one for X11 sessions.
+        self.wayland = display.__gtype__.name.startswith("GdkWayland")
+        monitors = [display.get_monitor(i).get_geometry() for i in range(display.get_n_monitors())]
+        rects = [(m.x, m.y, m.width, m.height) for m in monitors]
+        self.win.set_icon_name(APP_ID)
+        self.win.set_default_size(prefs.width, prefs.height)
+        if not self.wayland and prefs.x is not None and prefs.y is not None and on_screen(prefs.x, prefs.y, rects):
+            self.win.move(prefs.x, prefs.y)
+        if prefs.maximized:
+            self.win.maximize()
+        view.set_zoom_level(prefs.zoom)
+        view.connect("notify::title", lambda v, _p: self.win.set_title(v.get_title() or APP_NAME))
+        self.win.connect("key-press-event", self.on_key)
+        self.win.connect("delete-event", self.quit)
+        self.win.add(view)
+        view.load_uri(url)
+        self.win.show_all()
+
+    def open_external(self, uri: str) -> None:
+        try:
+            Gtk.show_uri_on_window(self.win, uri, Gtk.get_current_event_time())
+        except GLib.Error as err:
+            log(f"could not open {describe(uri)} in the browser: {err.message}")
+
+    def show_error(self, uri: str, title: str, detail: str) -> None:
+        # Same-origin base URI: the policy lets it through, and F5 (reload) retries that URI.
+        self.dash.view.load_alternate_html(error_page(title, detail), uri, None)
+
+    def on_key(self, _win, event) -> bool:
+        mods = event.state & Gtk.accelerator_get_default_mod_mask()
+        ctrl = mods & Gdk.ModifierType.CONTROL_MASK
+        if mods & ~(Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK):
+            return False  # Alt / Super combinations belong to the page and the desktop
+        action = key_action(Gdk.keyval_name(event.keyval) or "", bool(ctrl))
+        view = self.dash.view
+        if action == "reload":
+            view.reload()  # on the error page this retries the failed URL
+        elif action == "quit":
+            self.quit()
+        elif action:
+            view.set_zoom_level(step_zoom(view.get_zoom_level(), {"zoom_in": 1, "zoom_out": -1}.get(action, 0)))
+        return bool(action)
+
+    def quit(self, *_args) -> bool:
+        p = self.prefs
+        p.maximized = self.win.is_maximized()
+        if not p.maximized:  # keep the restored size, not the maximized one
+            p.width, p.height = self.win.get_size()
+            if not self.wayland:
+                p.x, p.y = self.win.get_position()
+        p.zoom = self.dash.view.get_zoom_level()
+        try:
+            write_prefs(self.conf, p)
+        except (OSError, configparser.Error, UnicodeDecodeError) as err:
+            log(f"window size not saved: cannot rewrite {self.conf}: {err}")
+        Gtk.main_quit()
+        return False
+
+
+def selftest(url: str, timeout: float) -> str:
+    """Load url in an offscreen window and return "ok <title>" or "fail <reason>".
+
+    It uses throwaway website data: a cached shell from the service worker must not pass for a
+    working server."""
+    outcome = []
+
+    def finish(line: str) -> bool:
+        if not outcome:
+            outcome.append(line)
+            Gtk.main_quit()
+        return False
+
+    dash = Dashboard(url, persistent=False, external=lambda _uri: None, failed=lambda _u, t, d: finish(f"fail {t}: {d}"))
+    view = dash.view
+    view.get_settings().set_hardware_acceleration_policy(WebKit2.HardwareAccelerationPolicy.NEVER)  # no GL offscreen
+
+    def on_title(v, result, _data):
+        try:
+            title = " ".join(v.evaluate_javascript_finish(result).to_string().split())
+        except GLib.Error as err:
+            finish(f"fail could not read document.title: {err.message}")
+            return
+        finish(f"ok {title}" if title else "fail the page has no title")
+
+    def on_load(v, event):
+        if event != WebKit2.LoadEvent.FINISHED or outcome:
+            return
+        resource = v.get_main_resource()
+        response = resource.get_response() if resource else None
+        status = response.get_status_code() if response else 0
+        if classify(v.get_uri() or "", dash.origin) != LOAD:
+            finish("fail the page left the dashboard origin")
+        elif not 200 <= status < 400:
+            finish(f"fail HTTP {status}" if status else "fail no response")
+        else:
+            v.evaluate_javascript("document.title", -1, None, None, None, on_title, None)
+
+    view.connect("load-changed", on_load)
+    window = Gtk.OffscreenWindow()  # never mapped on screen
+    window.add(view)
+    window.show_all()
+    GLib.timeout_add(int(max(timeout, 1.0) * 1000), finish, f"fail timeout after {timeout:g}s")
+    view.load_uri(url)
+    Gtk.main()
+    return outcome[0]
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(prog="homelab-dashboard-desktop", description=__doc__.splitlines()[0])
+    parser.add_argument("url", nargs="?", help="open this URL instead of the configured one (not saved)")
+    parser.add_argument("--selftest", action="store_true", help='load headless, print "ok <title>" or "fail <reason>"')
+    parser.add_argument("--timeout", type=float, default=SELFTEST_TIMEOUT, help="selftest timeout in seconds")
+    args = parser.parse_args(argv)
+
+    conf = xdg_dir("XDG_CONFIG_HOME", ".config") / "app.conf"
+    prefs = read_prefs(conf)
+    url = args.url or prefs.url
+    origin = https_origin(url)
+    if origin is None:
+        reason = f"no https:// dashboard URL on port 443 (set url in {conf}, or re-run the dashboard_desktop role)"
+    elif not load_gi():
+        reason = "cannot open a display (run it inside a desktop session)"
+    else:
+        reason = ""
+    if args.selftest:
+        line = f"fail {reason}" if reason else selftest(url, args.timeout)
+        print(line.replace(origin[1], "<dashboard>") if origin else line)  # pasteable: no host name
+        return 0 if line.startswith("ok ") else 1
+    if reason:
+        log(reason)
+        return 1
+
+    lock = (private_dir(xdg_dir("XDG_CACHE_HOME", ".cache")) / "instance.lock").open("w")
+    try:  # one window per website-data directory
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        log("already running")
+        return 0
+    Window(url, prefs, conf)
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

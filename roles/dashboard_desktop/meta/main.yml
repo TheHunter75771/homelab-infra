@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  author: homelab-infra
+  description: Workstation desktop app (a WebKitGTK window) for the media server's Dashboard v2 over the tailnet.
+  license: MIT
+  min_ansible_version: "2.17"
+  platforms:
+    - name: Fedora
+      versions:
+        - all
+dependencies: []

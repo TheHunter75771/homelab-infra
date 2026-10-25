@@ -1,0 +1,14 @@
+---
+# Absolute paths in the desktop user's home on the workstation.
+dashboard_desktop_home: "{{ ansible_facts['user_dir'] }}"
+dashboard_desktop_server: "{{ groups[dashboard_desktop_server_group] | default([]) | first | default('') }}"
+dashboard_desktop_fqdn: "{{ (hostvars[dashboard_desktop_server]['tailnet_fqdn'] | default('') | lower) if dashboard_desktop_server else '' }}"
+dashboard_desktop_url: "https://{{ dashboard_desktop_fqdn }}/"
+dashboard_desktop_bin: "{{ dashboard_desktop_home }}/.local/bin/homelab-dashboard-desktop"
+dashboard_desktop_apps_dir: "{{ dashboard_desktop_home }}/.local/share/applications"
+dashboard_desktop_icon_root: "{{ dashboard_desktop_home }}/.local/share/icons/hicolor"
+dashboard_desktop_conf_dir: "{{ dashboard_desktop_home }}/.config/homelab-dashboard"
+# The PWA's own icons (apps/dashboard/web, module G): copied, never duplicated in this role.
+dashboard_desktop_icon_src: "{{ role_path }}/../../apps/dashboard/web/public/icons"
+# path -> stat result for the desktop tools and user caches (the probe task in tasks/main.yml).
+dashboard_desktop_found: "{{ dashboard_desktop_probe.results | items2dict(key_name='item', value_name='stat') }}"

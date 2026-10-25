@@ -1,0 +1,5 @@
+---
+# Role dashboard_desktop: Dashboard v2 as a desktop app on a workstation, installed for the desktop
+# user (no become). The app opens https://<tailnet_fqdn>/ of the first host in this group; that
+# host's tailnet_fqdn lives in inventory/host_vars/<host>.yml (git-ignored).
+dashboard_desktop_server_group: media_servers

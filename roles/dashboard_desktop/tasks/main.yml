@@ -1,0 +1,117 @@
+---
+# Everything is tagged so `--tags dashboard_desktop` runs this role alone.
+- name: Dashboard desktop app
+  tags: [dashboard_desktop]
+  block:
+    - name: Dashboard host name is known
+      ansible.builtin.assert:
+        that:
+          - dashboard_desktop_server | length > 0
+          - dashboard_desktop_fqdn is match('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]*[a-z0-9])?$')
+        fail_msg: >-
+          The app opens https://<tailnet_fqdn>/ of the first host in group {{ dashboard_desktop_server_group }}.
+          Set tailnet_fqdn (a bare host name: no scheme, port or slash) in
+          inventory/host_vars/{{ dashboard_desktop_server | default('<server>', true) }}.yml.
+        quiet: true
+
+    - name: Home path needs no escaping in the launcher's Exec line
+      ansible.builtin.assert:
+        that:
+          - dashboard_desktop_home is match('^/[A-Za-z0-9._/-]+$')
+        fail_msg: "{{ dashboard_desktop_home }} has characters a .desktop Exec line would need quoted."
+        quiet: true
+
+    # The script's own interpreter (its shebang). Read-only, so it runs in check mode too.
+    - name: Probe the GTK and WebKitGTK bindings
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - import gi; gi.require_version('Gtk', '3.0'); gi.require_version('WebKit2', '4.1'); from gi.repository import WebKit2
+      register: dashboard_desktop_gi
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: GTK and WebKitGTK bindings are installed
+      ansible.builtin.assert:
+        that:
+          - dashboard_desktop_gi.rc == 0
+        fail_msg: >-
+          /usr/bin/python3 cannot import gi with Gtk 3.0 and WebKit2 4.1
+          ({{ dashboard_desktop_gi.stderr_lines | default([], true) | last | default('no output', true) }}).
+          Install the Fedora packages: sudo dnf install python3-gobject webkit2gtk4.1
+        quiet: true
+
+    - name: Look for the desktop tools and user caches
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: false
+      loop:
+        - /usr/bin/desktop-file-validate
+        - /usr/bin/update-desktop-database
+        - /usr/bin/gtk-update-icon-cache
+        - "{{ dashboard_desktop_apps_dir }}/mimeinfo.cache"
+        - "{{ dashboard_desktop_icon_root }}/icon-theme.cache"
+      register: dashboard_desktop_probe
+
+    # u+rwx only adds bits: an existing ~/.local/bin or icon directory keeps its mode.
+    - name: User directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: u+rwx
+      loop:
+        - "{{ dashboard_desktop_home }}/.local/bin"
+        - "{{ dashboard_desktop_apps_dir }}"
+        - "{{ dashboard_desktop_icon_root }}/512x512/apps"
+        - "{{ dashboard_desktop_icon_root }}/scalable/apps"
+
+    - name: Config directory is private
+      ansible.builtin.file:
+        path: "{{ dashboard_desktop_conf_dir }}"
+        state: directory
+        mode: "0700"
+
+    # Only the url key: a new file gets just url (the app fills in its own defaults), an existing
+    # one keeps the size, position and zoom the app saved, and a renamed tailnet host reaches the
+    # app on the next run instead of leaving it pointed at a dead name.
+    - name: App points at the dashboard
+      community.general.ini_file:
+        path: "{{ dashboard_desktop_conf_dir }}/app.conf"
+        section: app
+        option: url
+        value: "{{ dashboard_desktop_url }}"
+        create: true
+        mode: "0600"
+
+    - name: App script is installed
+      ansible.builtin.copy:
+        src: homelab-dashboard-desktop
+        dest: "{{ dashboard_desktop_bin }}"
+        mode: "0755"
+
+    - name: App icons are installed
+      ansible.builtin.copy:
+        src: "{{ dashboard_desktop_icon_src }}/{{ item.src }}"
+        dest: "{{ dashboard_desktop_icon_root }}/{{ item.size }}/apps/homelab-dashboard.{{ item.ext }}"
+        mode: "0644"
+      loop:
+        - { src: icon-512.png, size: 512x512, ext: png }
+        - { src: icon.svg, size: scalable, ext: svg }
+      notify: Refresh the user icon cache for homelab-dashboard
+
+    - name: Launcher entry is installed
+      ansible.builtin.template:
+        src: homelab-dashboard.desktop.j2
+        dest: "{{ dashboard_desktop_apps_dir }}/homelab-dashboard.desktop"
+        mode: "0644"
+      notify: Refresh the user desktop database for homelab-dashboard
+
+    # A separate check, not the template's validate: desktop-file-validate refuses any file whose
+    # name does not end in .desktop, and validate runs on a temp file. Skipped in check mode.
+    - name: Launcher entry passes desktop-file-validate
+      ansible.builtin.command:
+        argv: [/usr/bin/desktop-file-validate, "{{ dashboard_desktop_apps_dir }}/homelab-dashboard.desktop"]
+      changed_when: false
+      when: dashboard_desktop_found['/usr/bin/desktop-file-validate'].exists
