@@ -1,0 +1,13 @@
+# {{ ansible_managed }}
+# Read from /etc/chrony/conf.d, which Ubuntu's chrony.conf includes last (after its own "makestep 1 3"),
+# so these settings win.
+#
+# The clock deadlock (docs/CONTRACTS.md §12.9): with the clock badly wrong (dead RTC battery), TLS fails,
+# so DNS-over-TLS fails and the NTS sources fail. With chrony's default "authselectmode mix" every NTS
+# source is *required*, so the IP-literal sources in sources.d/homelab-fallback.sources could never be
+# selected and the clock never got fixed. "ignore" lets chrony select them when no NTS source works; the
+# NTS pools keep "prefer", so they're the only ones used whenever one is selectable.
+authselectmode {{ base_chrony_authselectmode }}
+# Step a large offset whenever it's seen, not only during chrony's first updates: the fallback may only
+# become usable long after boot, and chrony would otherwise slew a months-off clock for years.
+makestep {{ base_chrony_makestep_threshold }} {{ base_chrony_makestep_limit }}

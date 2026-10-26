@@ -1,0 +1,22 @@
+---
+# Pull ai_gpu_model once, through the server on its tailnet address (the server downloads it as
+# the ollama user into ollama_rocm_models_dir). Needs tailscaled up, like the service itself.
+# tests/test_render.yml runs this against a stub /api/tags server.
+# Waits up to 3 min (60 x 3 s): at boot the unit's restart backoff grows to 60 s per attempt.
+- name: Ollama answers on its tailnet address
+  ansible.builtin.uri:
+    url: "http://{{ ollama_rocm_listen }}/api/tags"
+    return_content: true
+    timeout: 5
+  register: ollama_rocm_tags
+  retries: 60
+  delay: 3
+  until: ollama_rocm_tags.status == 200
+
+# /api/tags lists names in their shortest form (ollama_rocm_model_listed); compared in lower case.
+- name: Pull the GPU model when it isn't present
+  ansible.builtin.include_tasks: pull_model.yml
+  when: ollama_rocm_model_listed not in ollama_rocm_models_present
+  vars:
+    ollama_rocm_models_present: >-
+      {{ (ollama_rocm_tags.content | from_json).models | default([]) | map(attribute='name') | map('lower') | list }}

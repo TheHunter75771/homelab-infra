@@ -1,0 +1,37 @@
+---
+# Helper for test_render.yml: tasks/pull_model.yml with a stand-in client (`case.script`), a short
+# limit, and the expected failure message (empty = must succeed and report changed).
+- name: Stand-in client for {{ case.name }}
+  ansible.builtin.copy:
+    content: "#!/bin/bash\n{{ case.script }}\n"
+    dest: "{{ t }}/pull-{{ case.name }}"
+    mode: "0755"
+
+- name: Run the bounded pull
+  vars:
+    ollama_rocm_bin: "{{ t }}/pull-{{ case.name }}"
+    ollama_rocm_model: test-model:1b
+    ollama_rocm_pull_timeout: "{{ case.timeout }}"
+    ollama_rocm_pull_kill_after: 1
+  block:
+    - name: Pull
+      ansible.builtin.include_tasks: ../tasks/pull_model.yml
+
+    - name: Pulled
+      ansible.builtin.set_fact:
+        pull_case_msg: ""
+  rescue:
+    - name: Keep the failure message
+      ansible.builtin.set_fact:
+        pull_case_msg: "{{ ansible_failed_result.results | default([ansible_failed_result])
+                                 | map(attribute='msg', default='') | join(' ') }}"
+
+- name: The outcome matches
+  ansible.builtin.assert:
+    that:
+      - (case.error == '' and pull_case_msg == '' and ollama_rocm_pull is changed)
+        or (case.error != '' and case.error in pull_case_msg and ollama_rocm_pull is not changed)
+      - case.name != 'ignores-term' or ollama_rocm_pull.rc in [137, -9]
+      - case.name != 'hangs' or ollama_rocm_pull.rc == 124
+    fail_msg: "expected '{{ case.error }}', got '{{ pull_case_msg }}' (rc {{ ollama_rocm_pull.rc | default('?') }})"
+    quiet: true

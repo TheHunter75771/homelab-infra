@@ -1,0 +1,51 @@
+---
+# Helper for test_install.yml: what the install left in the scratch prefix and cache.
+# install_test_tree lists every file under the prefix (symlinks not followed), with the live tree's
+# random directory name written as <tree>.
+- name: List the prefix
+  ansible.builtin.find:
+    paths: "{{ ollama_rocm_prefix }}"
+    recurse: true
+    hidden: true
+    file_type: any
+  register: install_test_find
+
+- name: List the cache
+  ansible.builtin.find:
+    paths: "{{ ollama_rocm_cache_dir }}"
+    hidden: true
+  register: install_test_find_cache
+
+- name: Look at lib/ollama
+  ansible.builtin.stat:
+    path: "{{ ollama_rocm_lib }}"
+  register: install_test_lib
+
+- name: Read the marker
+  ansible.builtin.slurp:
+    src: "{{ ollama_rocm_marker }}"
+  register: install_test_marker_read
+
+- name: Run the installed binary
+  ansible.builtin.command:
+    argv: ["{{ ollama_rocm_bin }}"]
+  register: install_test_bin
+  changed_when: false
+
+- name: Keep the results
+  vars:
+    tree_name: "{{ install_test_lib.stat.lnk_source | dirname | dirname | basename }}"
+  ansible.builtin.set_fact:
+    install_test_tree: >-
+      {{ install_test_find.files | rejectattr('isdir') | map(attribute='path')
+         | map('regex_replace', '^' ~ (ollama_rocm_prefix | regex_escape) ~ '/', '')
+         | map('regex_replace', '^lib/' ~ (tree_name | regex_escape) ~ '/', 'lib/<tree>/') | sort }}
+    install_test_dirs: >-
+      {{ install_test_find.files | selectattr('isdir') | map(attribute='path')
+         | map('regex_replace', '^' ~ (ollama_rocm_prefix | regex_escape) ~ '/', '')
+         | map('regex_replace', '^lib/' ~ (tree_name | regex_escape) ~ '(/|$)', 'lib/<tree>\1') | sort }}
+    install_test_link: "{{ install_test_lib.stat.lnk_target | default('') }}"
+    install_test_tree_name: "{{ tree_name }}"
+    install_test_cache: "{{ install_test_find_cache.files | map(attribute='path') | list }}"
+    install_test_marker: "{{ install_test_marker_read.content | b64decode | trim }}"
+    install_test_bin_out: "{{ install_test_bin.stdout }}"

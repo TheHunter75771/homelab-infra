@@ -150,7 +150,62 @@ jobs:
         run: |
           ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ANSIBLE_FILTER_PLUGINS=$PWD/roles/base/filter_plugins \
             ansible-playbook -i localhost, -c local roles/base/tests/test_sysctl_files.yml
+      - name: base sudo switch (stubbed)
+        run: |
+          ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/base/tests/test_sudo_switch.yml
+          ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook --check -i localhost, -c local roles/base/tests/test_sudo_switch.yml
+      - name: base sudo behavioural probe
+        run: ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/base/tests/test_sudo_probe.yml
+      - name: base sudo alternative decision
+        run: ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/base/tests/test_sudo_decide.yml
+      - name: base chrony selectdata (clock-deadlock check)
+        run: ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/base/tests/test_chrony_selectdata.yml
+      - name: base sysctl live drift repair
+        run: ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/base/tests/test_sysctl_live.yml
+      - name: base sysctl live drift repair (check mode)
+        run: ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook --check -i localhost, -c local roles/base/tests/test_sysctl_live_check.yml
+      - name: ufw sysctl agrees with base (log_martians)
+        run: ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/firewall/tests/test_ufw_sysctl.yml
+      - name: ollama_rocm install + render
+        run: |
+          ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/ollama_rocm/tests/test_install.yml
+          ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/ollama_rocm/tests/test_render.yml
+      - name: gpu_gate deploy
+        run: ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/gpu_gate/tests/test_gpu_gate.yml
+      - name: ai_stack render
+        run: ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/ai_stack/tests/test_render.yml
+      - name: operator_account render
+        run: ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/operator_account/tests/test_render.yml
+      - name: docker apt key and pin filters
+        run: python3 -m unittest discover -s roles/docker/tests -v
+      - name: firewall declared rules
+        run: python3 -m unittest discover -s roles/firewall/tests -v
+      - name: skill-library
+        run: python3 -m unittest discover -s apps/skill-library/tests -t apps/skill-library -v
+      - name: gpu-gate
+        run: python3 -m unittest discover -s apps/gpu-gate/tests -t apps/gpu-gate -v
+      - name: finance-tools (Money Hub read-only Open WebUI tool)
+        # pydantic + langchain-core let the two Open WebUI spec tests run instead of skipping
+        run: |
+          pip install pydantic==2.14.1 langchain-core==1.7.0
+          python3 -m unittest discover -s apps/finance-tools/tests -t apps/finance-tools -v
       - name: jellyfin network preset
         run: python3 -m unittest discover -s roles/stacks/tests -v
       - name: tailscale serve config
         run: ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/tailscale_serve/tests/test_serve_config.yml
+
+  gpu-broker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Locked deps (hashes, wheels only)
+        run: "pip install --require-hashes --only-binary=:all: -r apps/gpu-broker/requirements.lock"
+      - name: Tests
+        working-directory: apps/gpu-broker
+        run: python -m unittest discover -s tests -v

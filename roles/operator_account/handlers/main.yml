@@ -1,0 +1,33 @@
+---
+# All listen on one topic and run in this order: check the whole config, make sure sshd is running,
+# then reload. Never start or restart sshd: an inactive sshd stays inactive (and the play fails, so
+# Noah sees it), and a reload keeps open sessions up. Fedora's sshd.service reload doesn't run sshd -t.
+- name: Check sshd before the operator reload
+  ansible.builtin.command:
+    argv: ["{{ operator_account_sshd }}", -t]
+  changed_when: false
+  listen: Operator account sshd changed
+
+- name: Read whether sshd is running before the operator reload
+  ansible.builtin.command:
+    argv: [systemctl, is-active, "{{ operator_account_sshd_service }}"]
+  register: operator_account_sshd_active
+  changed_when: false
+  failed_when: false
+  listen: Operator account sshd changed
+
+- name: Sshd is running (the operator reload never starts it)
+  ansible.builtin.assert:
+    that:
+      - operator_account_sshd_active.stdout | trim == 'active'
+    fail_msg: >-
+      {{ operator_account_sshd_service }} is {{ operator_account_sshd_active.stdout | trim }}; the drop-in is in place but
+      sshd was not reloaded or started. Start it by hand if that's intended.
+    quiet: true
+  listen: Operator account sshd changed
+
+- name: Reload sshd for the operator accounts
+  ansible.builtin.systemd_service:
+    name: "{{ operator_account_sshd_service }}"
+    state: reloaded
+  listen: Operator account sshd changed

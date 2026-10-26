@@ -19,3 +19,9 @@ timezone: America/New_York
 # Default docker0 gateway; resolved also listens here so containers get encrypted DNS (CONTRACTS §9d).
 docker_dns_ip: 172.17.0.1
 docker_dns_bip: 172.17.0.1/16
+# AI models (Noah, 2026-10-26; see the LocalAI MODELS.md benchmark): the GPU model runs on the gaming PC (role
+# ollama_rocm), the CPU fallback on ai-box (role ai_stack). The broker serves both under the alias "assistant".
+ai_gpu_model: "qwen3.5:9b"
+ai_cpu_model: "qwen3.5:4b"
+# AI operator accounts (docs/CONTRACTS.md §12.13): claude = Claude (full logged sudo); localai = Noah's local AI.
+operator_user: claude

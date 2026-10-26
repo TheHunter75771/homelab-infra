@@ -1,0 +1,93 @@
+---
+# Pure checks on operator_accounts (no host access). Runs first, also in check mode, and is what the
+# offline tests exercise. Output: operator_accounts_resolved (defaults filled in, per-account paths).
+- name: Collect operator account errors
+  vars:
+    accts: "{{ operator_accounts if (operator_accounts is sequence and operator_accounts is not string and operator_accounts is not mapping) else [] }}"
+    names: "{{ accts | map('default', {}) | map(attribute='name', default='') | list }}"
+    reserved: "{{ operator_reserved_names | select | list }}"
+  ansible.builtin.set_fact:
+    operator_account_errors: >-
+      {%- set e = [] -%}
+      {%- if accts | length == 0 -%}{%- set _ = e.append('operator_accounts must be a non-empty list') -%}{%- endif -%}
+      {%- for n in names | unique -%}
+      {%-   if n and names | select('equalto', n) | list | length > 1 -%}{%- set _ = e.append('duplicate account name: ' ~ n) -%}{%- endif -%}
+      {%- endfor -%}
+      {%- for a in accts -%}
+      {%-   if a is not mapping -%}{%- set _ = e.append('entry ' ~ loop.index ~ ' is not a mapping') -%}{%- else -%}
+      {%-   set n = a.name | default('') | string -%}
+      {%-   set id = n if n else 'entry ' ~ loop.index -%}
+      {%-   set r = operator_account_defaults | combine(a) -%}
+      {%-   set shell_base = (r.shell | default('') | string).split('/') | last -%}
+      {%-   set nologin = shell_base in operator_account_nologin_shells -%}
+      {%-   for k in a.keys() | difference(operator_account_keys) -%}{%- set _ = e.append(id ~ ': unknown setting ' ~ k) -%}{%- endfor -%}
+      {%-   if not n is match('^[a-z_][a-z0-9_-]{0,30}$') -%}{%- set _ = e.append(id ~ ': invalid account name') -%}{%- endif -%}
+      {%-   if n in reserved -%}{%- set _ = e.append(id ~ ': reserved account name') -%}{%- endif -%}
+      {%-   if not (r.shell | default('') | string) is match('^/') -%}{%- set _ = e.append(id ~ ': shell must be an absolute path') -%}{%- endif -%}
+      {%-   if r.sudo not in operator_account_sudo_modes -%}
+      {%-     set _ = e.append(id ~ ': sudo must be one of ' ~ operator_account_sudo_modes | join('|')) -%}
+      {%-   endif -%}
+      {%-   if r.sudo == 'full_logged' and nologin -%}{%- set _ = e.append(id ~ ': sudo full_logged with a no-login shell') -%}{%- endif -%}
+      {%-   if r.ssh_login | bool -%}
+      {%-     if nologin -%}{%- set _ = e.append(id ~ ': ssh_login with a no-login shell') -%}{%- endif -%}
+      {%-     if not (r.ssh_pubkey | string | trim) -%}
+      {%-       set _ = e.append(id ~ ': ssh_login needs ssh_pubkey (is operator_pubkey defined for ' ~ inventory_hostname ~ '?)') -%}
+      {%-     elif not (r.ssh_pubkey | string | trim) is match('^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp[0-9]+|sk-[a-z0-9@.-]+) [A-Za-z0-9+/=]+( [^\r\n]*)?$') -%}
+      {%-       set _ = e.append(id ~ ': ssh_pubkey is not a single public key line') -%}
+      {%-     endif -%}
+      {%-     if r.ssh_from is string or r.ssh_from | length == 0 -%}
+      {%-       set _ = e.append(id ~ ': ssh_login needs a non-empty ssh_from list (is operator_key_from defined for ' ~ inventory_hostname ~ '?)') -%}
+      {%-     elif r.ssh_from | select('match', '^[0-9A-Fa-f:.*?!/]+$') | list | length != r.ssh_from | length -%}
+      {%-       set _ = e.append(id ~ ': ssh_from entries must be addresses or address patterns') -%}
+      {%-     elif '*' in r.ssh_from -%}
+      {%-       set _ = e.append(id ~ ': ssh_from contains a bare * (from anywhere)') -%}
+      {%-     elif r.ssh_from | select('search', '[*?]') | list | length > 0 and r.ssh_from | select('match', '!') | list | length == 0 -%}
+      {%-       set _ = e.append(id ~ ': ssh_from has a wildcard without negations (that is "from anywhere")') -%}
+      {%-     endif -%}
+      {%-   endif -%}
+      {%-   if r.sshd_loopback_only | bool -%}
+      {%-     if not r.ssh_login | bool -%}{%- set _ = e.append(id ~ ': sshd_loopback_only needs ssh_login') -%}{%- endif -%}
+      {%-     if r.ssh_from is not string and r.ssh_from | difference(operator_account_loopback) | length > 0 -%}
+      {%-       set _ = e.append(id ~ ': sshd_loopback_only but ssh_from allows non-loopback sources') -%}
+      {%-     endif -%}
+      {%-   endif -%}
+      {%-   if r.sshd_deny | bool and r.ssh_login | bool -%}{%- set _ = e.append(id ~ ': sshd_deny with ssh_login') -%}{%- endif -%}
+      {%-   if r.sshd_deny | bool and r.sshd_loopback_only | bool -%}{%- set _ = e.append(id ~ ': sshd_deny with sshd_loopback_only') -%}{%- endif -%}
+      {%-   if r.groups is string -%}{%- set _ = e.append(id ~ ': groups must be a list') -%}
+      {%-   elif r.groups | intersect(operator_account_forbidden_groups) | length > 0 -%}
+      {%-     set _ = e.append(id ~ ': privileged groups not allowed: ' ~ r.groups | intersect(operator_account_forbidden_groups) | join(',')) -%}
+      {%-   endif -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ e | to_json }}
+
+- name: Operator accounts are well-formed
+  ansible.builtin.assert:
+    that:
+      - operator_account_errors | from_json | length == 0
+    fail_msg: "operator_accounts is misconfigured: {{ operator_account_errors | from_json | join('; ') }}"
+    quiet: true
+
+# Every per-account path is derived from the name, never configured, so two accounts can't share one.
+- name: Resolve operator accounts
+  ansible.builtin.set_fact:
+    operator_accounts_resolved: >-
+      {%- set out = [] -%}
+      {%- for a in operator_accounts -%}
+      {%-   set r = operator_account_defaults | combine({'home': '/home/' ~ a.name}) | combine(a) -%}
+      {%-   set _ = out.append(r | combine({
+            'ssh_login': r.ssh_login | bool,
+            'sshd_loopback_only': r.sshd_loopback_only | bool,
+            'sshd_deny': r.sshd_deny | bool,
+            'sshd_mode': 'loopback' if r.sshd_loopback_only | bool else ('deny' if r.sshd_deny | bool else 'none'),
+            'ssh_pubkey': r.ssh_pubkey | string | trim,
+            'sudoers_name': '20-operator-' ~ a.name,
+            'iolog_dir': operator_account_iolog_root ~ '/' ~ a.name,
+            'tmpfiles_name': 'operator-' ~ a.name ~ '.conf',
+            'sshd_dropin_name': '20-operator-' ~ a.name ~ '.conf'})) -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Resolved operator accounts are a list
+  ansible.builtin.set_fact:
+    operator_accounts_resolved: "{{ operator_accounts_resolved | from_json }}"

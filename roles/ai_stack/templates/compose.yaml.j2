@@ -1,0 +1,110 @@
+# {{ ansible_managed }}
+# AI stack on ai-box (docs/CONTRACTS.md §12.10). Three services on the project's own bridge network:
+#   ollama-cpu  CPU Ollama, not published; reached only as http://ollama-cpu:11434 on this network.
+#   gpu-broker  Ollama-compatible front door (apps/gpu-broker): the gaming PC's GPU when gpu-gate says it
+#               is free, else ollama-cpu. Published on {{ tailnet_ip }}:{{ ai_stack_broker_port }} (tailnet only).
+#   open-webui  Chat UI, talks only to the broker. Published on {{ tailnet_ip }}:{{ ai_stack_webui_port }} (tailnet only).
+# Nothing is published on the LAN address or 0.0.0.0. Published ports are DNAT rules (userland-proxy off),
+# so UFW's INPUT rules don't see them; see roles/ai_stack/README.md, "Exposure".
+name: {{ ai_stack_name }}
+
+x-common: &common
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  networks: [ai]
+
+services:
+  ollama-cpu:
+    <<: *common
+    image: "{{ images.ollama }}"
+    container_name: ollama-cpu
+    mem_limit: {{ ai_stack_mem_limits.ollama_cpu }}
+    # Same as mem_limit: no swap, so it is OOM-killed instead of thrashing the HDD.
+    memswap_limit: {{ ai_stack_mem_limits.ollama_cpu }}
+    environment:
+{% for key, value in ai_stack_ollama_env.items() %}
+      {{ key }}: {{ value | string | to_json }}
+{% endfor %}
+    volumes:
+      - ollama-models:/root/.ollama
+    labels:
+      homelab.watch: "true"
+    healthcheck:
+      # The ollama CLI asks the server in this container; it fails until the API answers.
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  gpu-broker:
+    <<: *common
+    image: "{{ local_images.gpu_broker }}"
+    # Built on the host by role ai_stack (tasks/broker_image.yml); never resolved against a registry.
+    pull_policy: never
+    container_name: gpu-broker
+    mem_limit: {{ ai_stack_mem_limits.gpu_broker }}
+    # Same as mem_limit: no swap, so it is OOM-killed instead of thrashing the HDD.
+    memswap_limit: {{ ai_stack_mem_limits.gpu_broker }}
+    read_only: true
+    cap_drop: [ALL]
+    environment:
+      GPU_BROKER_CONFIG: /etc/gpu-broker/config.json
+    volumes:
+      - type: bind
+        source: "{{ ai_stack_broker_config_file }}"
+        target: /etc/gpu-broker/config.json
+        read_only: true
+        bind:
+          create_host_path: false
+    ports:
+      - "{{ tailnet_ip }}:{{ ai_stack_broker_port }}:11434"
+    # The image's HEALTHCHECK (python -m gpu_broker --healthcheck, reads GPU_BROKER_CONFIG) applies.
+    labels:
+      homelab.watch: "true"
+      # A config change recreates the container (the broker reads its config only at start).
+      homelab.config-hash: "{{ ai_stack_broker_config_hash }}"
+
+  open-webui:
+    <<: *common
+    image: "{{ images.open_webui }}"
+    container_name: open-webui
+    mem_limit: {{ ai_stack_mem_limits.open_webui }}
+    # Same as mem_limit: no swap, so it is OOM-killed instead of thrashing the HDD.
+    memswap_limit: {{ ai_stack_mem_limits.open_webui }}
+    # WEBUI_SECRET_KEY only: generated once on the host, root 0600 (tasks/main.yml).
+    env_file:
+      - .env
+    environment:
+      OLLAMA_BASE_URL: http://gpu-broker:11434
+      # Login always required. The role never creates accounts: Noah creates the first (admin) one.
+      WEBUI_AUTH: "true"
+      ENABLE_SIGNUP: "{{ 'true' if ai_webui_enable_signup | bool else 'false' }}"
+      # Anyone who signs up after the admin waits for approval and can't use anything until then.
+      DEFAULT_USER_ROLE: pending
+      # No OpenAI connection: the broker is the only backend, so nothing calls api.openai.com.
+      ENABLE_OPENAI_API: "false"
+      # Telemetry and analytics off.
+      SCARF_NO_ANALYTICS: "true"
+      DO_NOT_TRACK: "true"
+      ANONYMIZED_TELEMETRY: "false"
+    volumes:
+      - open-webui-data:/app/backend/data
+    labels:
+      homelab.watch: "true"
+    ports:
+      - "{{ tailnet_ip }}:{{ ai_stack_webui_port }}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # First start: migrations and a first-run model download, on an HDD.
+      start_period: 300s
+
+networks:
+  ai: {}
+
+volumes:
+  ollama-models: {}
+  open-webui-data: {}

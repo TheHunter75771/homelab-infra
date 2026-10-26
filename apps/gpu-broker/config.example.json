@@ -1,0 +1,14 @@
+{
+  "gate_url": "http://GAMING_PC_TAILNET_IP:11500",
+  "gpu_url": "http://GAMING_PC_TAILNET_IP:11434",
+  "cpu_url": "http://ollama:11434",
+  "status_ttl": 5,
+  "gate_timeout": 1,
+  "connect_timeout": 3,
+  "gpu_first_byte_timeout": null,
+  "failover_statuses": [500, 502, 503, 504],
+  "aliases": {
+    "chat": {"gpu": "qwen3:8b", "cpu": "qwen3:1.7b"},
+    "embed": {"gpu": "nomic-embed-text", "cpu": "nomic-embed-text"}
+  }
+}

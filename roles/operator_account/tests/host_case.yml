@@ -1,0 +1,23 @@
+---
+# One host-check case (host_case: {name, accounts, expect: pass | <substring of the error>}).
+- name: "Host case {{ host_case.name }}"
+  vars:
+    operator_account_polkit_rule_dirs: ["{{ t }}/polkit", "{{ t }}/missing"]
+  block:
+    # set_fact, not vars: the role's own set_fact of this name would outrank block vars.
+    - name: "Accounts for this case ({{ host_case.name }})"
+      ansible.builtin.set_fact:
+        operator_accounts_resolved: "{{ host_case.accounts }}"
+
+    - name: "Host checks ({{ host_case.name }})"
+      ansible.builtin.include_tasks: ../tasks/host_checks.yml
+
+    - name: "Record a pass ({{ host_case.name }})"
+      ansible.builtin.set_fact:
+        host_verdicts: "{{ host_verdicts | default({}) | combine({host_case.name: host_case.expect == 'pass'}) }}"
+  rescue:
+    - name: "Record a failure ({{ host_case.name }})"
+      ansible.builtin.set_fact:
+        host_verdicts: >-
+          {{ host_verdicts | default({}) | combine({host_case.name: host_case.expect != 'pass'
+             and host_case.expect in (ansible_failed_result.msg | default(''))}) }}

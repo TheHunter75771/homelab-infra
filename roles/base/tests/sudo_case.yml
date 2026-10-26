@@ -1,0 +1,17 @@
+---
+# One case of tests/test_sudo_decide.yml.
+- name: Decide (case {{ sudo_case.name }})
+  vars:
+    base_sudo_alternatives: {rc: "{{ sudo_case.rc }}", stdout_lines: "{{ sudo_case.lines }}"}
+    base_sudo_alternative: "{{ sudo_case.alternative | default('/usr/bin/sudo.ws') }}"
+  block:
+    - name: The role's decision (case {{ sudo_case.name }})
+      ansible.builtin.include_tasks: ../tasks/sudo_decide.yml
+
+    - name: The decision is as expected (case {{ sudo_case.name }})
+      ansible.builtin.assert:
+        that:
+          - base_sudo_managed | bool == sudo_case.managed
+          - base_sudo_switch | bool == sudo_case.switch
+        fail_msg: "{{ sudo_case.name }}: managed={{ base_sudo_managed }} switch={{ base_sudo_switch }}"
+        quiet: true

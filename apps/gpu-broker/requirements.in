@@ -1,0 +1,2 @@
+# Top-level runtime dependency. requirements.lock pins it and its dependencies with hashes.
+aiohttp==3.14.5

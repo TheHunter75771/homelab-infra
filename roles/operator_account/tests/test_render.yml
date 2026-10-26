@@ -1,0 +1,737 @@
+---
+# Offline test for role operator_account. No root, nothing applied, nothing outside a scratch dir.
+#  1. operator_accounts validation: the defaults pass; misconfigurations fail with a clear message.
+#  2. Renders every per-account file into a scratch root (tasks/files.yml with operator_account_render_root):
+#     claude gets a sudoers rule (checked by classic visudo), a tmpfiles rule, an authorized_keys line and,
+#     gaming-PC style, the sshd drop-in; localai gets none of them.
+#  3. Runs sshd -T -C on a full scratch sshd config that includes the drop-in: claude is refused from a
+#     non-loopback address, allowed from 127.0.0.1/::1, key-only; other users are untouched.
+# Documentation addresses only (RFC 5737); the key is generated here.
+#   .venv/bin/ansible-playbook -i localhost, -c local roles/operator_account/tests/test_render.yml </dev/null 2>&1 | cat
+- name: Operator account validation and rendering
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  gather_subset:
+    - "!all"
+    - min
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  vars:
+    admin_user: mediaadmin
+    automation_user: ansible
+  handlers:
+    - name: Stand-in for the sshd reload
+      ansible.builtin.debug:
+        msg: sshd would be checked and reloaded
+      listen: Operator account sshd changed
+  tasks:
+    - name: Load the role defaults under their own name (the cases replace operator_accounts)
+      ansible.builtin.include_vars:
+        file: ../defaults/main.yml
+        name: role_defaults
+
+    - name: Make a scratch directory
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: .operator-test
+      register: op_tmp
+
+    - name: Everything after the scratch dir, cleaned up even on failure
+      block:
+        - name: Make a throwaway key pair (operator key and sshd host key)
+          ansible.builtin.command:
+            argv: [ssh-keygen, -q, -t, ed25519, -N, "", -C, "test-key", -f, "{{ op_tmp.path }}/{{ item }}"]
+            creates: "{{ op_tmp.path }}/{{ item }}"
+          loop: [opkey, hostkey]
+
+        - name: Read the test public key
+          ansible.builtin.slurp:
+            src: "{{ op_tmp.path }}/opkey.pub"
+          register: op_pub
+
+        - name: Start with no verdicts
+          ansible.builtin.set_fact:
+            test_pubkey: "{{ op_pub.content | b64decode | trim }}"
+            validate_verdicts: {}
+            validate_messages: {}
+
+        # ---------------------------------------------------------------- 1. validation
+        - name: Run each validation case
+          ansible.builtin.include_tasks: validate_case.yml
+          loop:
+            - { name: defaults-server, accounts: defaults, expect: pass }
+            - name: defaults-gaming-pc
+              accounts: defaults
+              key_from: ["127.0.0.1", "::1"]
+              sshd_match: true
+              expect: pass
+            - { name: no-pubkey, accounts: defaults, pubkey: "", expect: "ssh_login needs ssh_pubkey (is operator_pubkey defined" }
+            - { name: two-keys, accounts: defaults, pubkey: "{{ test_pubkey }}\n{{ test_pubkey }}", expect: "not a single public key line" }
+            - { name: no-from, accounts: defaults, key_from: [], expect: "needs a non-empty ssh_from" }
+            - { name: hostname-from, accounts: defaults, key_from: [gaming.example], expect: "must be addresses" }
+            - name: loopback-sshd-remote-from
+              accounts: defaults
+              sshd_match: true
+              expect: "sshd_loopback_only but ssh_from allows non-loopback"
+            - name: sudo-on-nologin
+              accounts: [{ name: localai, shell: /usr/sbin/nologin, sudo: full_logged }]
+              expect: "localai: sudo full_logged with a no-login shell"
+            - name: ssh-on-nologin
+              accounts: [{ name: localai, shell: /usr/sbin/nologin, ssh_login: true, ssh_pubkey: "{{ test_pubkey }}", ssh_from: ["127.0.0.1"] }]
+              expect: "localai: ssh_login with a no-login shell"
+            - name: duplicate-name
+              accounts: [{ name: localai, shell: /usr/sbin/nologin }, { name: localai, shell: /bin/bash }]
+              expect: "duplicate account name: localai"
+            - name: unknown-key
+              accounts: [{ name: localai, shell: /usr/sbin/nologin, sudo_mode: full }]
+              expect: "localai: unknown setting sudo_mode"
+            - name: bad-sudo-mode
+              accounts: [{ name: localai, shell: /usr/sbin/nologin, sudo: partial }]
+              expect: "localai: sudo must be one of none|full_logged"
+            - name: docker-group
+              accounts: [{ name: localai, shell: /usr/sbin/nologin, groups: [docker] }]
+              expect: "localai: privileged groups not allowed: docker"
+            - name: reserved-name
+              accounts: [{ name: ansible, shell: /bin/bash }]
+              expect: "ansible: reserved account name"
+            - name: sshd-without-ssh
+              accounts: [{ name: localai, shell: /usr/sbin/nologin, sshd_loopback_only: true }]
+              expect: "localai: sshd_loopback_only needs ssh_login"
+            - { name: empty-list, accounts: [], expect: "must be a non-empty list" }
+            - { name: bare-star-from, accounts: defaults, key_from: ["*"], expect: "bare * (from anywhere)" }
+            - { name: bare-star-with-negation, accounts: defaults, key_from: ["*", "!192.0.2.9"], expect: "bare * (from anywhere)" }
+            - { name: wildcard-from, accounts: defaults, key_from: ["192.0.2.*"], expect: "wildcard without negations" }
+            - { name: wildcard-with-negation, accounts: defaults, key_from: ["192.0.2.*", "!192.0.2.9"], expect: pass }
+            - { name: extra-from, accounts: defaults, key_from_extra: ["2001:db8::20"], expect: pass }
+            - { name: revoke-ssh-no-key-needed, accounts: defaults, pubkey: "", ssh_login: false, sshd_match: true, expect: pass }
+            - { name: revoke-sudo, accounts: defaults, sudo: none, expect: pass }
+            - { name: revoke-sudo-bad-value, accounts: defaults, sudo: full, expect: "claude: sudo must be one of" }
+            - name: deny-with-ssh
+              accounts: [{ name: claude, shell: /bin/bash, ssh_login: true, ssh_pubkey: "{{ test_pubkey }}", ssh_from: ["127.0.0.1"], sshd_deny: true }]
+              expect: "claude: sshd_deny with ssh_login"
+            - name: deny-with-loopback
+              accounts: [{ name: claude, shell: /bin/bash, sshd_deny: true, sshd_loopback_only: true }]
+              expect: "claude: sshd_deny with sshd_loopback_only"
+          loop_control:
+            loop_var: validate_case
+            label: "{{ validate_case.name }}"
+
+        - name: Every validation case got the expected verdict
+          ansible.builtin.assert:
+            that:
+              - validate_verdicts | length == 26
+              - validate_verdicts | dict2items | rejectattr('value') | list | length == 0
+            fail_msg: >-
+              Wrong verdicts: {{ validate_verdicts | dict2items | rejectattr('value') | map(attribute='key')
+              | map('extract', validate_messages) | list }}
+            quiet: true
+
+        # ---------------------------------------------------------------- 2. rendering
+        - name: Render and check
+          vars:
+            t: "{{ op_tmp.path }}"
+            operator_accounts: "{{ role_defaults.operator_accounts }}"
+            operator_pubkey: "{{ test_pubkey }}"
+            operator_key_from: ["127.0.0.1", "::1"]
+            operator_manage_sshd_match: true
+          block:
+            - name: Scratch root directories exist
+              ansible.builtin.file:
+                path: "{{ t }}/root/{{ item }}"
+                state: directory
+                mode: "0755"
+              loop: [etc/sudoers.d, etc/tmpfiles.d, etc/ssh/sshd_config.d, home, var/lib, var/log]
+
+            # Validates a drop-in the way sshd reads it: included by a full config with a host key.
+            - name: Scratch sshd validator
+              ansible.builtin.copy:
+                dest: "{{ t }}/sshd-validate.sh"
+                mode: "0755"
+                content: |
+                  #!/bin/sh
+                  set -eu
+                  d=$(mktemp -d)
+                  trap 'rm -rf "$d"' EXIT
+                  printf 'HostKey %s\nInclude %s\n' "{{ t }}/hostkey" "$1" > "$d/sshd_config"
+                  exec {{ operator_account_sshd }} -t -f "$d/sshd_config"
+
+            - name: Point the role at the scratch root
+              ansible.builtin.set_fact:
+                operator_account_render_root: "{{ t }}/root"
+                operator_account_sshd_validate: "{{ t }}/sshd-validate.sh %s"
+                operator_account_template_dir: "{{ playbook_dir }}/../templates"
+
+            - name: Validate (gaming-PC inputs)
+              ansible.builtin.include_tasks: ../tasks/validate.yml
+
+            - name: Find classic sudo on this machine (no sudo-rs expected on Fedora)
+              ansible.builtin.include_tasks: ../tasks/sudo_detect.yml
+
+            - name: Render each account's files
+              ansible.builtin.include_tasks: ../tasks/files.yml
+              loop: "{{ operator_accounts_resolved }}"
+              loop_control:
+                loop_var: operator_acct
+                label: "{{ operator_acct.name }}"
+
+            - name: Look at what was rendered
+              ansible.builtin.find:
+                paths: "{{ t }}/root"
+                recurse: true
+                hidden: true
+                file_type: file
+              register: op_found
+
+            - name: Exactly claude's files exist; localai gets only its sshd deny drop-in
+              vars:
+                got: "{{ op_found.files | map(attribute='path') | map('regex_replace', '^' ~ (t ~ '/root') | regex_escape, '') | sort }}"
+              ansible.builtin.assert:
+                that:
+                  - got == ['/etc/ssh/sshd_config.d/20-operator-claude.conf', '/etc/ssh/sshd_config.d/20-operator-localai.conf',
+                            '/etc/sudoers.d/20-operator-claude',
+                            '/etc/tmpfiles.d/operator-claude.conf', '/home/claude/.ssh/authorized_keys']
+                fail_msg: "Rendered files: {{ got }}"
+                quiet: true
+
+            - name: Read the rendered files
+              ansible.builtin.slurp:
+                src: "{{ t }}/root/{{ item }}"
+              loop:
+                - etc/sudoers.d/20-operator-claude
+                - home/claude/.ssh/authorized_keys
+                - etc/tmpfiles.d/operator-claude.conf
+              register: op_files
+
+            - name: Sudoers, authorized_keys and tmpfiles content
+              vars:
+                sudoers: "{{ (op_files.results[0].content | b64decode).splitlines() | reject('match', '^#') | list }}"
+                keys: "{{ (op_files.results[1].content | b64decode).splitlines() }}"
+                tmpfiles: "{{ (op_files.results[2].content | b64decode).splitlines() | reject('match', '^#') | list }}"
+              ansible.builtin.assert:
+                that:
+                  - >-
+                    sudoers == ['Defaults:claude log_input, log_output, iolog_dir=/var/log/sudo-io/claude, iolog_file=%{seq}',
+                                'Defaults:claude !requiretty', 'claude ALL=(ALL) NOPASSWD: ALL']
+                  - keys == ['from="127.0.0.1,::1" ' ~ test_pubkey]
+                  - tmpfiles == ['d /var/log/sudo-io/claude 0700 root root 90d', 'x /var/log/sudo-io/claude/seq']
+                fail_msg: "{{ sudoers }} / {{ keys }} / {{ tmpfiles }}"
+                quiet: true
+
+            - name: Classic visudo accepts the sudoers rule
+              ansible.builtin.command:
+                argv: ["{{ operator_account_visudo }}", -c, -f, "{{ t }}/root/etc/sudoers.d/20-operator-claude"]
+              changed_when: false
+
+            - name: The ssh-keygen parser accepts the authorized_keys line (options included)
+              ansible.builtin.command:
+                argv: [ssh-keygen, -l, -f, "{{ t }}/root/home/claude/.ssh/authorized_keys"]
+              changed_when: false
+
+            - name: Read the systemd version (--dry-run needs 256+)
+              ansible.builtin.command:
+                argv: [systemd-tmpfiles, --version]
+              register: op_tmpfiles_version
+              changed_when: false
+
+            - name: The systemd-tmpfiles parser accepts the rule
+              when: (op_tmpfiles_version.stdout | regex_search('systemd ([0-9]+)', '\\1') | first | int) >= 256
+              ansible.builtin.command:
+                argv: [systemd-tmpfiles, --dry-run, --create, "--root={{ t }}/root", "{{ t }}/root/etc/tmpfiles.d/operator-claude.conf"]
+              register: op_tmpfiles
+              changed_when: false
+              failed_when: op_tmpfiles.rc != 0 or 'Invalid' in op_tmpfiles.stderr
+
+            # ------------------------------------------------------------ 3. sshd semantics
+            - name: Full scratch sshd config (drop-in first, as on Fedora/Ubuntu; then permissive globals)
+              ansible.builtin.copy:
+                dest: "{{ t }}/sshd_config"
+                mode: "0600"
+                content: |
+                  HostKey {{ t }}/hostkey
+                  Include {{ t }}/root/etc/ssh/sshd_config.d/*.conf
+                  PasswordAuthentication yes
+                  KbdInteractiveAuthentication yes
+
+            - name: Effective sshd settings per connection
+              ansible.builtin.command:
+                argv:
+                  - "{{ operator_account_sshd }}"
+                  - -T
+                  - -f
+                  - "{{ t }}/sshd_config"
+                  - -C
+                  - "user={{ item.user }},addr={{ item.addr }},host=h,laddr=127.0.0.1,lport=22"
+              loop:
+                - { user: claude, addr: 192.0.2.1 }
+                - { user: claude, addr: "::ffff:192.0.2.1" }
+                - { user: claude, addr: 127.0.0.1 }
+                - { user: claude, addr: "::1" }
+                - { user: someone, addr: 192.0.2.1 }
+                - { user: localai, addr: 192.0.2.1 }
+                - { user: localai, addr: 127.0.0.1 }
+                - { user: localai, addr: "::1" }
+              register: op_sshd
+              changed_when: false
+
+            - name: Claude is refused off-loopback, allowed on loopback, key-only; others untouched
+              vars:
+                r: "{{ op_sshd.results | map(attribute='stdout_lines') | list }}"
+              ansible.builtin.assert:
+                that:
+                  - "'denyusers claude' in r[0]"
+                  - "'denyusers claude' in r[1]"
+                  - "'denyusers claude' not in r[2]"
+                  - "'denyusers claude' not in r[3]"
+                  - >-
+                    r[2] is superset(['passwordauthentication no', 'kbdinteractiveauthentication no',
+                                      'authenticationmethods publickey', 'pubkeyauthentication yes'])
+                  - r[3] is superset(['passwordauthentication no', 'kbdinteractiveauthentication no', 'authenticationmethods publickey'])
+                  - r[4] | select('match', '^denyusers') | list | length == 0
+                  - "'passwordauthentication yes' in r[4]"
+                  - "'kbdinteractiveauthentication yes' in r[4]"
+                  - "'denyusers localai' in r[5]"
+                  - "'denyusers localai' in r[6]"
+                  - "'denyusers localai' in r[7]"
+                quiet: true
+
+            # Strict globals as the probe: for any other user, the effective config with the drop-ins must be
+            # identical, line for line, to the same config without them (nothing leaks out of a Match).
+            - name: Scratch configs with strict globals, with and without the drop-ins
+              ansible.builtin.copy:
+                dest: "{{ t }}/{{ item.name }}"
+                mode: "0600"
+                content: |
+                  HostKey {{ t }}/hostkey
+                  {{ item.include }}
+                  PasswordAuthentication no
+                  KbdInteractiveAuthentication no
+                  PubkeyAuthentication yes
+              loop:
+                - { name: strict-with, include: "Include {{ t }}/root/etc/ssh/sshd_config.d/*.conf" }
+                - { name: strict-without, include: "" }
+
+            - name: Effective config of another user, with and without the drop-ins
+              ansible.builtin.command:
+                argv:
+                  - "{{ operator_account_sshd }}"
+                  - -T
+                  - -f
+                  - "{{ t }}/{{ item.0 }}"
+                  - -C
+                  - "user=someone,addr={{ item.1 }},host=h,laddr=127.0.0.1,lport=22"
+              loop: "{{ ['strict-with', 'strict-without'] | product(['192.0.2.1', '127.0.0.1', '::1']) | list }}"
+              register: op_strict
+              changed_when: false
+
+            - name: Other users are untouched by the drop-ins
+              vars:
+                out: "{{ op_strict.results | map(attribute='stdout') | list }}"
+              ansible.builtin.assert:
+                that:
+                  - out[0] == out[3]
+                  - out[1] == out[4]
+                  - out[2] == out[5]
+                  - "'passwordauthentication no' in op_strict.results[0].stdout_lines"
+                quiet: true
+
+            # The negation-only form (a common mistake) matches nothing, so it would never refuse anyone.
+            - name: Negation-only Match line, for contrast
+              ansible.builtin.copy:
+                dest: "{{ t }}/negonly.conf"
+                mode: "0600"
+                content: |
+                  HostKey {{ t }}/hostkey
+                  Match User claude Address !127.0.0.1,!::1
+                      DenyUsers claude
+
+            - name: The negation-only form does not refuse a remote claude
+              ansible.builtin.command:
+                argv: ["{{ operator_account_sshd }}", -T, -f, "{{ t }}/negonly.conf", -C, "user=claude,addr=192.0.2.1,host=h,laddr=127.0.0.1,lport=22"]
+              register: op_negonly
+              changed_when: false
+              failed_when: op_negonly.rc != 0 or 'denyusers claude' in op_negonly.stdout_lines
+
+            # Server style: key from the gaming PC's addresses, no sshd drop-in (ssh_hardening owns sshd there).
+            - name: Server-style inputs remove the drop-in and keep the key restriction
+              vars:
+                operator_key_from: ["192.0.2.20", "198.51.100.20"]
+                operator_manage_sshd_match: false
+              block:
+                - name: Validate (server inputs)
+                  ansible.builtin.include_tasks: ../tasks/validate.yml
+
+                - name: Render each account's files (server)
+                  ansible.builtin.include_tasks: ../tasks/files.yml
+                  loop: "{{ operator_accounts_resolved }}"
+                  loop_control:
+                    loop_var: operator_acct
+                    label: "{{ operator_acct.name }}"
+
+                - name: Read the server-style authorized_keys
+                  ansible.builtin.slurp:
+                    src: "{{ t }}/root/home/claude/.ssh/authorized_keys"
+                  register: op_srv_keys
+
+                - name: Look for drop-ins
+                  ansible.builtin.find:
+                    paths: "{{ t }}/root/etc/ssh/sshd_config.d"
+                  register: op_srv_dropins
+
+                - name: Server key line and no drop-ins (ssh_hardening's AllowUsers keeps localai out there)
+                  ansible.builtin.assert:
+                    that:
+                      - (op_srv_keys.content | b64decode).splitlines() == ['from="192.0.2.20,198.51.100.20" ' ~ test_pubkey]
+                      - op_srv_dropins.files | length == 0
+                    quiet: true
+
+            # Revoking is done in the inventory: operator_sudo none + operator_ssh_login false, no key needed.
+            - name: Revoked claude (inventory switches) converges to a deny drop-in and kept logs
+              vars:
+                operator_sudo: none
+                operator_ssh_login: false
+                operator_pubkey: ""
+                operator_key_from: ["127.0.0.1", "::1"]
+                operator_manage_sshd_match: true
+              block:
+                - name: Validate (revoked)
+                  ansible.builtin.include_tasks: ../tasks/validate.yml
+
+                - name: Render (revoked)
+                  ansible.builtin.include_tasks: ../tasks/files.yml
+                  loop: "{{ operator_accounts_resolved }}"
+                  loop_control:
+                    loop_var: operator_acct
+                    label: "{{ operator_acct.name }}"
+
+                - name: Look at what is left
+                  ansible.builtin.find:
+                    paths: "{{ t }}/root"
+                    recurse: true
+                    hidden: true
+                    file_type: file
+                  register: op_left
+
+                - name: No sudoers, no keys; the aging rule and the deny drop-ins remain
+                  vars:
+                    got: "{{ op_left.files | map(attribute='path') | map('regex_replace', '^' ~ (t ~ '/root') | regex_escape, '') | sort }}"
+                  ansible.builtin.assert:
+                    that:
+                      - got == ['/etc/ssh/sshd_config.d/20-operator-claude.conf', '/etc/ssh/sshd_config.d/20-operator-localai.conf',
+                                '/etc/tmpfiles.d/operator-claude.conf']
+                    fail_msg: "{{ got }}"
+                    quiet: true
+
+                - name: Revoked claude is refused even from loopback
+                  ansible.builtin.command:
+                    argv: ["{{ operator_account_sshd }}", -T, -f, "{{ t }}/sshd_config", -C, "user=claude,addr=127.0.0.1,host=h,laddr=127.0.0.1,lport=22"]
+                  register: op_revoked
+                  changed_when: false
+                  failed_when: op_revoked.rc != 0 or 'denyusers claude' not in op_revoked.stdout_lines
+
+            # ------------------------------------------------------ 5. sudo-rs guarded set
+            # A fake Debian host: dpkg-query (on PATH) lists a scratch sudo-rs package:
+            #   sudo (setuid, "sudo-rs 0.2.99")      su (setuid, "su-rs 0.2.99")
+            #   sudoedit -> sudo                     visudo (not setuid)
+            #   passwd-link -> ../../other/passwd (setuid, owned by another package: must NOT be guarded)
+            #   sudo diverted to sudo.distrib (setuid, the diverted-to path must be guarded)
+            # Guarded set must be exactly {su, sudo, sudo.distrib}; only sudo/sudo.distrib answer -l -U.
+            - name: Fake sudo-rs package tree
+              ansible.builtin.file:
+                path: "{{ t }}/{{ item }}"
+                state: directory
+                mode: "0755"
+              loop: [pkg/usr/lib/cargo/bin, pkg/usr/share/doc/sudo-rs, other, bin]
+
+            - name: Fake package files
+              ansible.builtin.copy:
+                dest: "{{ t }}/{{ item.path }}"
+                mode: "{{ item.mode }}"
+                content: "#!/bin/sh\necho {{ item.version }}\n"
+              loop:
+                - { path: pkg/usr/lib/cargo/bin/sudo, mode: "04755", version: "sudo-rs 0.2.99" }
+                - { path: pkg/usr/lib/cargo/bin/sudo.distrib, mode: "04755", version: "sudo-rs 0.2.99" }
+                - { path: pkg/usr/lib/cargo/bin/su, mode: "04755", version: "su-rs 0.2.99" }
+                - { path: pkg/usr/lib/cargo/bin/visudo, mode: "0755", version: "visudo-rs 0.2.99" }
+                - { path: pkg/usr/share/doc/sudo-rs/README, mode: "0644", version: "" }
+                - { path: other/passwd, mode: "04755", version: "passwd from shadow 4.16" }
+
+            - name: Fake symlinks (sudoedit inside, passwd-link outside the package)
+              ansible.builtin.file:
+                src: "{{ item.src }}"
+                dest: "{{ t }}/pkg/usr/lib/cargo/bin/{{ item.dest }}"
+                state: link
+              loop:
+                - { src: sudo, dest: sudoedit }
+                - { src: "{{ t }}/other/passwd", dest: passwd-link }
+
+            - name: Fake dpkg-query
+              ansible.builtin.copy:
+                dest: "{{ t }}/bin/dpkg-query"
+                mode: "0755"
+                content: |
+                  #!/bin/sh
+                  case "$1" in
+                    -W) [ -e "{{ t }}/pkg-installed" ] && printf "$(cat "{{ t }}/pkg-installed")" || { echo "no packages found" >&2; exit 1; } ;;
+                    -L) for p in / /usr /usr/lib/cargo/bin /usr/lib/cargo/bin/sudo /usr/lib/cargo/bin/sudoedit \
+                                 /usr/lib/cargo/bin/su /usr/lib/cargo/bin/visudo /usr/lib/cargo/bin/passwd-link \
+                                 /usr/share/doc/sudo-rs/README; do
+                          echo "{{ t }}/pkg$p"; done
+                        echo "diverted by local-sudo to: {{ t }}/pkg/usr/lib/cargo/bin/sudo.distrib" ;;
+                    -S) case "$2" in
+                          "{{ t }}/pkg/"*) echo "sudo-rs: $2" ;;
+                          *) echo "passwd: $2" ;;
+                        esac ;;
+                  esac
+
+            - name: Run the guarded-set cases
+              ansible.builtin.include_tasks: sudo_rs_case.yml
+              loop:
+                - { name: package-installed, status: installed, setuid: true, expect: pass }
+                - { name: package-half-configured, status: half-configured, setuid: true, expect: pass }
+                - { name: package-absent, status: "", setuid: true, expect: pass }
+                - { name: package-config-files-only, status: config-files, setuid: true, expect: pass }
+                - { name: package-without-setuid, status: installed, setuid: false, expect: "no setuid file of it was found" }
+              loop_control:
+                loop_var: rs_case
+                label: "{{ rs_case.name }}"
+
+            - name: Every guarded-set case got the expected verdict
+              ansible.builtin.assert:
+                that:
+                  - rs_verdicts | length == 5
+                  - rs_verdicts | dict2items | rejectattr('value') | list | length == 0
+                fail_msg: "{{ rs_verdicts | to_json }}"
+                quiet: true
+
+            # Pure classification with fakes (sudo_rs_classify.yml): who is guarded, who answers -l -U.
+            - name: Classify fake candidates
+              vars:
+                operator_account_rs_files: [/f/rs-sudo, /f/rs-su, /f/owned-silent, /f/unowned-says, /f/foreign, /f/named]
+                operator_account_rs_always: [/f/named]
+                operator_account_rs_owner_map:
+                  /f/rs-sudo: [sudo-rs]
+                  /f/rs-su: [sudo-rs]
+                  /f/owned-silent: [sudo-rs]
+                  /f/foreign: [passwd]
+                operator_account_rs_version:
+                  /f/rs-sudo: sudo-rs 0.2.8
+                  /f/rs-su: su-rs 0.2.8
+                  /f/owned-silent: ""
+                  /f/unowned-says: sudo-rs 0.2.8
+                  /f/foreign: passwd from shadow 4.16
+                  /f/named: ""
+              ansible.builtin.include_tasks: ../tasks/sudo_rs_classify.yml
+
+            - name: Owned, self-identified or named files are guarded; only sudo-rs's sudo is queried
+              ansible.builtin.assert:
+                that:
+                  - operator_account_sudo_rs == ['/f/named', '/f/owned-silent', '/f/rs-su', '/f/rs-sudo', '/f/unowned-says']
+                  - operator_account_sudo_rs_sudo == ['/f/rs-sudo', '/f/unowned-says']
+                fail_msg: "{{ operator_account_sudo_rs | to_json }} / {{ operator_account_sudo_rs_sudo | to_json }}"
+                quiet: true
+
+            # ------------------------------------------------------ 6. classic sudo / visudo detection
+            # Fake binaries with the real banners. Ubuntu runs the real file, so classic visudo says
+            # "visudo.ws version"; sudo-rs's visudo says "visudo-rs 0.x" and must never count as classic.
+            - name: Run the detection cases
+              ansible.builtin.include_tasks: detect_case.yml
+              vars:
+                ws_sudo: { path: usr/bin/sudo.ws, out: "Sudo version 1.9.17p2" }
+                ws_visudo: { path: usr/sbin/visudo.ws, out: "$n version 1.9.17p2\n$n grammar version 50" }
+                rs_sudo: { path: usr/lib/cargo/bin/sudo, out: "sudo-rs 0.2.8" }
+                rs_visudo: { path: usr/lib/cargo/bin/visudo, out: "visudo-rs 0.2.8" }
+                rs_su: { path: usr/lib/cargo/bin/su, err: "su-rs 0.2.8" }
+              loop:
+                # ai-box after base switched the alternatives (the Integrator's failing layout)
+                - name: ubuntu-switched
+                  files: ["{{ ws_sudo }}", "{{ ws_visudo }}", "{{ rs_sudo }}", "{{ rs_visudo }}", "{{ rs_su }}"]
+                  links:
+                    - { path: etc/alternatives/sudo, src: usr/bin/sudo.ws }
+                    - { path: usr/bin/sudo, src: etc/alternatives/sudo }
+                    - { path: etc/alternatives/visudo, src: usr/sbin/visudo.ws }
+                    - { path: usr/sbin/visudo, src: etc/alternatives/visudo }
+                    - { path: usr/bin/visudo-rs, src: usr/lib/cargo/bin/visudo }
+                  expect: { sudo: usr/bin/sudo.ws, visudo: usr/sbin/visudo.ws, rs_by_path: [usr/lib/cargo/bin/sudo] }
+                # Ubuntu 26.04 default: the alternatives point at sudo-rs
+                - name: ubuntu-default
+                  files: ["{{ ws_sudo }}", "{{ ws_visudo }}", "{{ rs_sudo }}", "{{ rs_visudo }}"]
+                  links:
+                    - { path: etc/alternatives/sudo, src: usr/lib/cargo/bin/sudo }
+                    - { path: usr/bin/sudo, src: etc/alternatives/sudo }
+                    - { path: etc/alternatives/visudo, src: usr/lib/cargo/bin/visudo }
+                    - { path: usr/sbin/visudo, src: etc/alternatives/visudo }
+                  expect: { sudo: usr/bin/sudo.ws, visudo: usr/sbin/visudo.ws, rs_by_path: [usr/lib/cargo/bin/sudo] }
+                # Fedora: classic only, plain names
+                - name: fedora
+                  files:
+                    - { path: usr/bin/sudo, out: "Sudo version 1.9.17p2" }
+                    - { path: usr/sbin/visudo, out: "$n version 1.9.17p2" }
+                  expect: { sudo: usr/bin/sudo, visudo: usr/sbin/visudo, rs_by_path: [] }
+                # Only sudo-rs's visudo reachable: must refuse
+                - name: no-classic-visudo
+                  files: ["{{ ws_sudo }}", "{{ rs_sudo }}", "{{ rs_visudo }}"]
+                  links:
+                    - { path: usr/sbin/visudo, src: usr/lib/cargo/bin/visudo }
+                  expect: "Classic sudo (and its visudo) not found"
+                # A visudo.ws that is really visudo-rs: must refuse
+                - name: visudo-ws-is-rs
+                  files: ["{{ ws_sudo }}", { path: usr/sbin/visudo.ws, out: "visudo-rs 0.2.8" }]
+                  expect: "Classic sudo (and its visudo) not found"
+              loop_control:
+                loop_var: detect_case
+                label: "{{ detect_case.name }}"
+
+            - name: Every detection case got the expected verdict
+              ansible.builtin.assert:
+                that:
+                  - detect_verdicts | length == 5
+                  - detect_verdicts | dict2items | rejectattr('value') | list | length == 0
+                fail_msg: "{{ detect_verdicts | to_json }}"
+                quiet: true
+
+            # ------------------------------------------------------ 7. sudo -l output checks (verify)
+            # The text classic sudo printed for claude on ai-box (Integrator, 2026-10-26), and mutants of it.
+            - name: Run the sudo -l output cases
+              ansible.builtin.include_tasks: sudo_rules_case.yml
+              vars:
+                claude: { name: claude, sudo: full_logged, iolog_dir: /var/log/sudo-io/claude }
+                localai: { name: localai, sudo: none, iolog_dir: /var/log/sudo-io/localai }
+                real_text: |
+                  Matching Defaults entries for claude on probe:
+                      env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin, use_pty,
+                      log_input, log_output, iolog_dir=/var/log/sudo-io/claude, iolog_file=%{seq}, !requiretty
+
+                  User claude may run the following commands on probe:
+                      (ALL) NOPASSWD: ALL
+                localai_text: "User localai is not allowed to run sudo on probe.\n"
+              loop:
+                - name: real-ai-box-text
+                  results:
+                    - { item: "{{ claude }}", rc: 0, stdout: "{{ real_text }}", stderr: "" }
+                    - { item: "{{ localai }}", rc: 1, stdout: "{{ localai_text }}", stderr: "" }
+                  expect: pass
+                - name: no-log-input
+                  results: [{ item: "{{ claude }}", rc: 0, stdout: "{{ real_text | replace('log_input, ', '') }}", stderr: "" }]
+                  expect: fail
+                - name: negated-log-output
+                  results: [{ item: "{{ claude }}", rc: 0, stdout: "{{ real_text | replace(' log_output,', ' !log_output,') }}", stderr: "" }]
+                  expect: fail
+                - name: other-iolog-dir
+                  results: [{ item: "{{ claude }}", rc: 0, stdout: "{{ real_text | replace('sudo-io/claude,', 'sudo-io/claude2,') }}", stderr: "" }]
+                  expect: fail
+                - name: no-rule
+                  results: [{ item: "{{ claude }}", rc: 0, stdout: "{{ real_text | replace('(ALL) NOPASSWD: ALL', '') }}", stderr: "" }]
+                  expect: fail
+                - name: later-negated-log-output
+                  results: [{ item: "{{ claude }}", rc: 0, stdout: "{{ real_text | replace(', !requiretty', ', !requiretty, !log_output') }}", stderr: "" }]
+                  expect: fail
+                - name: nolog-tag-on-later-rule
+                  results: [{ item: "{{ claude }}", rc: 0, stdout: "{{ real_text ~ '    (root) NOPASSWD: NOLOG_OUTPUT: /usr/bin/id\\n' }}", stderr: "" }]
+                  expect: fail
+                - name: localai-granted
+                  results: [{ item: "{{ localai }}", rc: 0, stdout: "User localai may run the following commands on probe:\n    (ALL) ALL\n", stderr: "" }]
+                  expect: fail
+              loop_control:
+                loop_var: rules_case
+                label: "{{ rules_case.name }}"
+
+            - name: Every sudo -l output case got the expected verdict
+              ansible.builtin.assert:
+                that:
+                  - rules_verdicts | length == 8
+                  - rules_verdicts | dict2items | rejectattr('value') | list | length == 0
+                fail_msg: "{{ rules_verdicts | to_json }}"
+                quiet: true
+
+            # ------------------------------------------------------ 8. exec checks (verify_exec.yml)
+            # rs-blocked: a sudo-rs fake the kernel refuses to the current user (mode 0644: no x for the owner).
+            # rs-open: the same, executable. classic: prints classic sudo's banner. A `test` that always
+            # says yes (or always no) is first on PATH; the verdicts must not depend on it.
+            - name: Exec fixture directories
+              ansible.builtin.file:
+                path: "{{ t }}/exec/{{ item }}"
+                state: directory
+                mode: "0755"
+              loop: [liar-yes, liar-no]
+
+            - name: Exec fixtures
+              ansible.builtin.copy:
+                dest: "{{ t }}/exec/{{ item.path }}"
+                mode: "{{ item.mode }}"
+                content: "#!/bin/sh\n{{ item.body }}\n"
+              loop:
+                - { path: rs-blocked, mode: "0644", body: "echo sudo-rs 0.2.8" }
+                - { path: rs-open, mode: "0755", body: "echo sudo-rs 0.2.8" }
+                - { path: classic, mode: "0755", body: "echo Sudo version 1.9.17p2" }
+                - { path: classic-blocked, mode: "0644", body: "echo Sudo version 1.9.17p2" }
+                - { path: impostor, mode: "0755", body: "echo sudo-rs 0.2.8" }
+                - { path: liar-yes/test, mode: "0755", body: "exit 0" }
+                - { path: liar-no/test, mode: "0755", body: "exit 1" }
+              loop_control:
+                label: "{{ item.path }}"
+
+            - name: Run the exec cases
+              ansible.builtin.include_tasks: exec_case.yml
+              loop:
+                - { name: blocked-test-says-yes, deny: [rs-blocked], allow: [classic], test_says: "yes", expect: pass }
+                - { name: blocked-test-says-no, deny: [rs-blocked], allow: [classic], test_says: "no", expect: pass }
+                - { name: rs-executable, deny: [rs-open], allow: [classic], test_says: "no", expect: fail }
+                - { name: classic-not-executable, deny: [rs-blocked], allow: [classic-blocked], test_says: "yes", expect: fail }
+                - { name: classic-is-impostor, deny: [rs-blocked], allow: [impostor], test_says: "yes", expect: fail }
+              loop_control:
+                loop_var: exec_case
+                label: "{{ exec_case.name }}"
+
+            - name: Every exec case got the expected verdict
+              ansible.builtin.assert:
+                that:
+                  - exec_verdicts | length == 5
+                  - exec_verdicts | dict2items | rejectattr('value') | list | length == 0
+                fail_msg: "{{ exec_verdicts | to_json }}"
+                quiet: true
+
+            # ---------------------------------------------------------- 4. host-time checks
+            - name: Polkit fixture directory
+              ansible.builtin.file:
+                path: "{{ t }}/polkit"
+                state: directory
+                mode: "0755"
+
+            - name: Polkit fixture naming an admin group
+              ansible.builtin.copy:
+                dest: "{{ t }}/polkit/49-admin.rules"
+                mode: "0644"
+                content: |
+                  polkit.addAdminRule(function(action, subject) { return ["unix-group:opsadmins"]; });
+                  polkit.addRule(function(action, subject) { if (subject.isInGroup("labadmins")) { return polkit.Result.YES; } });
+
+            - name: Read the account database
+              ansible.builtin.getent:
+                database: passwd
+
+            - name: Run each host-check case
+              ansible.builtin.include_tasks: host_case.yml
+              loop:
+                - { name: fresh-system-accounts, accounts: [{ name: claude, groups: [] }, { name: localai, groups: [] }], expect: pass }
+                # The user running the test is a person (UID >= 1000), never created by the role.
+                - { name: takes-over-a-person, accounts: [{ name: "{{ ansible_facts.user_id }}", groups: [] }], expect: "UID >= 1000" }
+                - { name: polkit-admin-group, accounts: [{ name: claude, groups: [opsadmins] }], expect: "polkit rules grant admin" }
+                - { name: polkit-isingroup, accounts: [{ name: claude, groups: [labadmins] }], expect: "polkit rules grant admin" }
+              loop_control:
+                loop_var: host_case
+                label: "{{ host_case.name }}"
+
+            - name: Every host-check case got the expected verdict
+              ansible.builtin.assert:
+                that:
+                  - host_verdicts | length == 4
+                  - host_verdicts | dict2items | rejectattr('value') | list | length == 0
+                fail_msg: "{{ host_verdicts | to_json }}"
+                quiet: true
+      always:
+        - name: Remove the scratch directory
+          ansible.builtin.file:
+            path: "{{ op_tmp.path }}"
+            state: absent

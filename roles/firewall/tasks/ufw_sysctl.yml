@@ -1,0 +1,13 @@
+---
+# Imported by ufw.yml; also run on its own by tests/test_ufw_sysctl.yml (scratch path).
+# UFW applies its own sysctl file (IPT_SYSCTL in /etc/default/ufw) with `sysctl -p` on every start
+# (boot, enable, reload), after systemd-sysctl. The shipped file turns martian logging off, which
+# would undo role base's hardening at every boot and UFW start (docs/CONTRACTS.md §12.9). Only these
+# two keys change; no other key in UFW's file conflicts with base.
+- name: UFW's sysctl file keeps martian logging on (agrees with role base)
+  ansible.builtin.lineinfile:
+    path: "{{ firewall_ufw_sysctl_file }}"
+    regexp: "^\\s*#?\\s*net[/.]ipv4[/.]conf[/.]{{ item }}[/.]log_martians\\s*="
+    line: "net/ipv4/conf/{{ item }}/log_martians=1"
+  loop: "{{ firewall_martians_conf }}"
+  register: firewall_ufw_sysctl

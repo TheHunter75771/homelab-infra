@@ -1,0 +1,26 @@
+---
+# Shared setup of tests/test_sysctl_live*.yml: the directories of the scratch /proc/sys tree and the
+# "file applied" tree (every expected value; sysrq excluded, since the hardening file doesn't set it).
+# check_mode: false, so the check-mode test builds the same trees.
+- name: The live tree is the scratch one, never the real /proc/sys
+  ansible.builtin.include_tasks: live_guard.yml
+
+- name: Create the key directories
+  ansible.builtin.file:
+    path: "{{ live_test_tmp.path }}/{{ item.0 }}/{{ item.1 | dirname }}"
+    state: directory
+    mode: "0755"
+  loop: "{{ ['proc', 'applied'] | product(live_test_good | list) | list }}"
+  check_mode: false
+
+# Again, now that proc exists: it must be the directory just created, not a symlink planted meanwhile.
+- name: The created tree is still the scratch one
+  ansible.builtin.include_tasks: live_guard.yml
+
+- name: Write the "file applied" tree
+  ansible.builtin.copy:
+    dest: "{{ live_test_tmp.path }}/applied/{{ item.key }}"
+    content: "{{ item.value }}\n"
+    mode: "0644"
+  loop: "{{ base_sysctl_live_expected | dict2items }}"
+  check_mode: false

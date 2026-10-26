@@ -3,9 +3,9 @@
   ansible.builtin.assert:
     that:
       - lan_iface | default('') | length > 0
-      - wifi_iface | default('') | length > 0
+      - wifi_iface is not defined or wifi_iface | length > 0
       - docker_dns_ip | default('') | length > 0
-    fail_msg: Set lan_iface and wifi_iface (host_vars) and docker_dns_ip (group_vars).
+    fail_msg: Set lan_iface (host_vars) and docker_dns_ip (group_vars); wifi_iface, if defined, must not be empty.
     quiet: true
 
 - name: Systemd-resolved is installed

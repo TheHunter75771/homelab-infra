@@ -1,0 +1,495 @@
+---
+# Offline test: renders ollama.service into a scratch dir and runs `systemd-analyze verify` on it,
+# and checks the firewalld rich rules and the stale-rule selection. Documentation addresses only
+# (RFC 5737 / RFC 3849); nothing here is a real identifier. No root, nothing applied.
+#   .venv/bin/ansible-playbook -i localhost, -c local roles/ollama_rocm/tests/test_render.yml </dev/null 2>&1 | cat
+- name: Render and verify the ollama unit and the firewalld policy logic
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  vars:
+    render_test_packages:
+      mesa-vulkan-drivers: [{arch: x86_64}, {arch: i686}]
+      vulkan-loader: [{arch: x86_64}, {arch: i686}]
+      bash: [{arch: x86_64}]
+    gaming_pc_tailnet_ip: 192.0.2.20
+    ai_box_tailnet_ip: 192.0.2.10
+    ai_box_tailnet_ip6: "2001:db8::10"
+  tasks:
+    - name: Make a scratch directory
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: .ollama-render
+      register: render_test_tmp
+
+    - name: Run the checks
+      vars:
+        t: "{{ render_test_tmp.path }}"
+      block:
+        # verify checks that ExecStart's binary exists and is executable: give it a stand-in.
+        - name: Point the unit at a stand-in binary
+          ansible.builtin.set_fact:
+            ollama_rocm_prefix: "{{ t }}/prefix"
+
+        - name: Stand-in binary directory exists
+          ansible.builtin.file:
+            path: "{{ ollama_rocm_prefix }}/bin"
+            state: directory
+            mode: "0755"
+
+        - name: Stand-in binary exists
+          ansible.builtin.copy:
+            content: "#!/bin/sh\nexit 0\n"
+            dest: "{{ ollama_rocm_bin }}"
+            mode: "0755"
+
+        - name: Render the unit
+          ansible.builtin.template:
+            src: "{{ playbook_dir | dirname }}/templates/ollama.service.j2"
+            dest: "{{ t }}/ollama.service"
+            mode: "0644"
+          vars:
+            ollama_rocm_extra_env:
+              HSA_OVERRIDE_GFX_VERSION: "11.0.2"
+
+        - name: Verify the rendered unit
+          ansible.builtin.command:
+            argv: [systemd-analyze, verify, "{{ t }}/ollama.service"]
+          register: render_test_verify
+          changed_when: false
+          failed_when: render_test_verify.rc != 0 or render_test_verify.stderr | length > 0
+
+        - name: Read the rendered unit
+          ansible.builtin.slurp:
+            src: "{{ t }}/ollama.service"
+          register: render_test_unit
+
+        - name: The unit binds the tailnet IPv4, keeps the GPU and the contract settings
+          vars:
+            lines: "{{ (render_test_unit.content | b64decode).splitlines() }}"
+          ansible.builtin.assert:
+            that:
+              - "'Environment=OLLAMA_HOST=192.0.2.20:11434' in lines"
+              - "'Environment=OLLAMA_KEEP_ALIVE=5m' in lines"
+              - "'Environment=OLLAMA_MAX_LOADED_MODELS=1' in lines"
+              - "'Environment=OLLAMA_MODELS=/var/lib/ollama/models' in lines"
+              - "'Environment=HSA_OVERRIDE_GFX_VERSION=11.0.2' in lines"
+              - "'After=tailscaled.service network-online.target' in lines"
+              - "'User=ollama' in lines"
+              - "'SupplementaryGroups=render video' in lines"
+              - "'DevicePolicy=closed' in lines"
+              - "'DeviceAllow=/dev/kfd rw' in lines"
+              - "'DeviceAllow=char-drm rw' in lines"
+              - "'ProtectSystem=strict' in lines"
+              - "'ReadWritePaths=/var/lib/ollama' in lines"
+              - "'CapabilityBoundingSet=' in lines"
+              - "'Restart=on-failure' in lines"
+              - "'StartLimitIntervalSec=0' in lines"
+              - "'ExecStart=' ~ ollama_rocm_bin ~ ' serve' in lines"
+              # PrivateDevices would hide /dev/kfd and /dev/dri.
+              - lines | select('match', '^PrivateDevices=') | list | length == 0
+            fail_msg: "{{ lines }}"
+            quiet: true
+
+        - name: The default (vulkan) unit carries exactly the tested Vulkan environment
+          vars:
+            lines: "{{ (render_test_unit.content | b64decode).splitlines() }}"
+          ansible.builtin.assert:
+            that:
+              - ollama_backend == 'vulkan'
+              - "'Description=Ollama (vulkan), tailnet-only, for ai-box' in lines"
+              - lines | select('match', '^Environment=') | list == [
+                  'Environment=HOME=/var/lib/ollama',
+                  'Environment=OLLAMA_HOST=192.0.2.20:11434',
+                  'Environment=OLLAMA_KEEP_ALIVE=5m',
+                  'Environment=OLLAMA_MAX_LOADED_MODELS=1',
+                  'Environment=OLLAMA_MODELS=/var/lib/ollama/models',
+                  'Environment=HIP_VISIBLE_DEVICES=-1',
+                  'Environment=HSA_OVERRIDE_GFX_VERSION=11.0.2',
+                  'Environment=OLLAMA_VULKAN=1',
+                  'Environment=ROCR_VISIBLE_DEVICES=-1']
+            fail_msg: "{{ lines | select('match', '^Environment=') | list | to_json }}"
+            quiet: true
+
+        - name: Directories for the variant units exist
+          ansible.builtin.file:
+            path: "{{ t }}/{{ item }}"
+            state: directory
+            mode: "0755"
+          loop: [rocm, vulkan-override]
+
+        - name: Render the unit for rocm, and for vulkan with an extra_env override
+          ansible.builtin.template:
+            src: "{{ playbook_dir | dirname }}/templates/ollama.service.j2"
+            dest: "{{ t }}/{{ item.name }}/ollama.service"
+            mode: "0644"
+          vars:
+            ollama_backend: "{{ item.backend }}"
+            ollama_rocm_extra_env: "{{ item.extra }}"
+          loop:
+            - {name: rocm, backend: rocm, extra: {}}
+            - {name: vulkan-override, backend: vulkan, extra: {OLLAMA_VULKAN: "0"}}
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: Verify the rocm unit
+          ansible.builtin.command:
+            argv: [systemd-analyze, verify, "{{ t }}/rocm/ollama.service"]
+          register: render_test_verify_rocm
+          changed_when: false
+          failed_when: render_test_verify_rocm.rc != 0 or render_test_verify_rocm.stderr | length > 0
+
+        - name: Read the variant units
+          ansible.builtin.slurp:
+            src: "{{ t }}/{{ item }}/ollama.service"
+          loop: [rocm, vulkan-override]
+          register: render_test_variant_units
+
+        - name: The rocm unit has no backend variables; an extra_env key overrides the backend's
+          vars:
+            rocm: "{{ (render_test_variant_units.results[0].content | b64decode).splitlines() }}"
+            override: "{{ (render_test_variant_units.results[1].content | b64decode).splitlines() }}"
+          ansible.builtin.assert:
+            that:
+              - "'Description=Ollama (rocm), tailnet-only, for ai-box' in rocm"
+              - rocm | select('search', 'VULKAN|VISIBLE_DEVICES|HSA_') | list == []
+              - "'DeviceAllow=/dev/kfd rw' in rocm"
+              - "'DeviceAllow=char-drm rw' in rocm"
+              - override | select('match', '^Environment=OLLAMA_VULKAN=') | list == ['Environment=OLLAMA_VULKAN=0']
+            fail_msg: "{{ rocm | to_json }}"
+            quiet: true
+
+        - name: Scratch release trees for the backend library check
+          ansible.builtin.shell:
+            cmd: |
+              set -eu
+              mkdir -p "{{ t }}/lib-ok/vulkan" "{{ t }}/lib-novulkan/rocm_v7_2" "{{ t }}/lib-dir/vulkan/libggml-vulkan.so"
+              : > "{{ t }}/lib-ok/vulkan/libggml-vulkan.so"
+          changed_when: true
+
+        # --- input validation (tasks/validate.yml): "" = must pass, else the expected refusal
+        - name: Validate good and bad inputs
+          ansible.builtin.include_tasks: validate_case.yml
+          loop:
+            - {backend: vulkan, error: ""}
+            - {backend: rocm, error: ""}
+            - {backend: cuda, error: "ollama_backend must be one of rocm, vulkan, not 'cuda'"}
+            - {backend: VULKAN, error: "ollama_backend must be one of"}
+            - {backend: "", error: "ollama_backend must be one of"}
+            # only the i686 build of vulkan-loader is installed
+            - packages: "{{ render_test_packages | combine({'vulkan-loader': [{'arch': 'i686'}]}) }}"
+              error: needs the x86_64 package vulkan-loader
+            - packages: "{{ render_test_packages | dict2items | rejectattr('key', 'eq', 'mesa-vulkan-drivers') | items2dict }}"
+              error: needs the x86_64 package mesa-vulkan-drivers
+            - {backend: rocm, packages: {}, error: ""}
+            # ollama_rocm_extra_env: backend keys stay overridable; numbers and empty values are fine
+            - extra_env: {HSA_OVERRIDE_GFX_VERSION: "11.0.2", OLLAMA_VULKAN: "0", OLLAMA_NUM_PARALLEL: 2, _X: ""}
+              error: ""
+            - {extra_env: "OLLAMA_DEBUG=1", error: "ollama_rocm_extra_env must be a mapping"}
+            - {extra_env: [OLLAMA_DEBUG], error: "ollama_rocm_extra_env must be a mapping"}
+            - {extra_env: {OLLAMA_HOST: "0.0.0.0:11434"}, error: 'entry "OLLAMA_HOST"="0.0.0.0:11434" refused'}
+            - {extra_env: {HOME: /tmp}, error: 'entry "HOME"'}
+            - {extra_env: {OLLAMA_KEEP_ALIVE: "-1"}, error: 'entry "OLLAMA_KEEP_ALIVE"'}
+            - {extra_env: {OLLAMA_MAX_LOADED_MODELS: "3"}, error: 'entry "OLLAMA_MAX_LOADED_MODELS"'}
+            - {extra_env: {OLLAMA_MODELS: /tmp/m}, error: 'entry "OLLAMA_MODELS"'}
+            - {extra_env: {"1BAD": "x"}, error: 'entry "1BAD"'}
+            - {extra_env: {"BAD KEY": "x"}, error: 'entry "BAD KEY"'}
+            - {extra_env: {"BAD-KEY": "x"}, error: 'entry "BAD-KEY"'}
+            - {extra_env: {"A\nExecStartPre": "x"}, error: 'entry "A\nExecStartPre"'}
+            - {extra_env: {X: "1\nExecStartPre=/bin/sh -c id"}, error: 'entry "X"'}
+            - {extra_env: {X: "a b"}, error: 'entry "X"'}
+            # a tab, decoded from JSON so this file holds none
+            - {extra_env: {X: '{{ ''"a\tb"'' | from_json }}'}, error: 'entry "X"'}
+            - {extra_env: {X: "\"a\""}, error: 'entry "X"'}
+            - {extra_env: {X: "'a'"}, error: 'entry "X"'}
+            - {extra_env: {X: "a\\b"}, error: 'entry "X"'}
+            - {extra_env: {X: "%h"}, error: 'entry "X"'}
+            - {extra_env: {X: true}, error: 'entry "X"'}
+            # control characters: NUL ends the line for systemd (it injected ExecStartPre=), ESC, DEL;
+            # and a trailing newline in a key, which `$` would have let through
+            - {extra_env: {FOO: "a\0ExecStartPre=/nonexistent/evil"}, error: 'entry "FOO"'}
+            - {extra_env: {FOO: "a\x1bb"}, error: 'entry "FOO"'}
+            - {extra_env: {FOO: "a\x7f"}, error: 'entry "FOO"'}
+            - {extra_env: {FOO: "a\n"}, error: 'entry "FOO"'}
+            - {extra_env: {"FOO\n": "x"}, error: 'entry "FOO\n"'}
+            - {extra_env: {X: [1]}, error: 'entry "X"'}
+            # pull bounds
+            - {timeout: "7200", kill_after: 1, error: ""}
+            - {timeout: 0, error: "ollama_rocm_pull_timeout must be a positive whole number"}
+            - {timeout: -5, error: "ollama_rocm_pull_timeout must be"}
+            - {timeout: 1.5, error: "ollama_rocm_pull_timeout must be"}
+            - {timeout: "2h", error: "ollama_rocm_pull_timeout must be"}
+            - {timeout: true, error: "ollama_rocm_pull_timeout must be"}
+            - {kill_after: 0, error: "ollama_rocm_pull_kill_after must be a positive whole number"}
+            - {kill_after: "30\n", error: "ollama_rocm_pull_kill_after must be a positive whole number"}
+            - {timeout: "7200\n", error: "ollama_rocm_pull_timeout must be"}
+            # model names
+            - {model: "qwen3:8b", error: ""}
+            - {model: "registry.ollama.ai/library/qwen3:8b", error: ""}
+            - {model: "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF:Q4_K_M", error: ""}
+            - {model: "", error: ""}
+            - {model: "qwen3@sha256:0123abcd", error: "isn't a model name"}
+            - {model: "registry.local:5000/ns/m:1", error: "isn't a model name"}
+            - {model: "a b", error: "isn't a model name"}
+            - {model: "../x", error: "isn't a model name"}
+            # surrounding whitespace is trimmed before the check (and the pull uses the trimmed name)
+            - {model: " qwen3:8b\n", error: ""}
+            - {model: "qwen3\nx", error: "isn't a model name"}
+            # the backend's library in the installed tree (tasks/backend_installed.yml)
+            - {tasks: backend_installed.yml, lib: "{{ t }}/lib-ok", error: ""}
+            - {tasks: backend_installed.yml, lib: "{{ t }}/lib-novulkan", error: "Ollama would fall back to the CPU"}
+            - {tasks: backend_installed.yml, lib: "{{ t }}/lib-dir", error: "Ollama would fall back to the CPU"}
+            - {tasks: backend_installed.yml, backend: rocm, lib: "{{ t }}/lib-novulkan", error: ""}
+          loop_control:
+            loop_var: case
+            index_var: case_index
+            label: "{{ case_index }}: {{ case.error | default('') }}"
+
+        - name: Untagged, fully qualified and mixed-case names compare in the form /api/tags lists
+          vars:
+            ai_gpu_model: "{{ item.0 }}"
+          ansible.builtin.assert:
+            that:
+              - ollama_rocm_model_listed == item.1
+            fail_msg: "{{ item.0 }} -> {{ ollama_rocm_model_listed }}, expected {{ item.1 }}"
+            quiet: true
+          loop:
+            - [qwen3, "qwen3:latest"]
+            - [" Qwen3:8B ", "qwen3:8b"]
+            - [registry.ollama.ai/library/qwen3:8b, "qwen3:8b"]
+            - [library/qwen3, "qwen3:latest"]
+            - [registry.ollama.ai/someone/m, "someone/m:latest"]
+            - [hf.co/bartowski/x-GGUF:Q4_K_M, "hf.co/bartowski/x-gguf:q4_k_m"]
+
+        # --- tasks/pull.yml against a stub /api/tags: pull only what isn't listed
+        - name: Stub server, its model list and the recording client
+          ansible.builtin.copy:
+            content: "{{ item.content }}"
+            dest: "{{ t }}/{{ item.name }}"
+            mode: "{{ item.mode }}"
+          loop:
+            - name: tags.json
+              mode: "0644"
+              content: >-
+                {{ {'models': [{'name': 'qwen3:8b'}, {'name': 'someone/m:latest'},
+                               {'name': 'hf.co/bartowski/x-GGUF:Q4_K_M'}, {'name': 'llama3.2:latest'}]} | to_json }}
+            - name: pull-recorder
+              mode: "0755"
+              content: "#!/bin/bash\necho \"$*\" >> '{{ t }}/pull.log'\n"
+            - name: tags_server.py
+              mode: "0644"
+              content: |
+                import http.server, os, sys, time
+                body = open(sys.argv[1], "rb").read()
+                class H(http.server.BaseHTTPRequestHandler):
+                    def do_GET(self):
+                        if self.path != "/api/tags":
+                            self.send_error(404)
+                            return
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json; charset=utf-8")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                    def log_message(self, *a):
+                        pass
+                s = http.server.HTTPServer(("127.0.0.1", 0), H)
+                s.timeout = 1
+                with open(sys.argv[2] + ".tmp", "w") as f:
+                    f.write("%d %d" % (s.server_address[1], os.getpid()))
+                os.rename(sys.argv[2] + ".tmp", sys.argv[2])
+                end = time.time() + 120
+                while time.time() < end:
+                    s.handle_request()
+
+        - name: Start the stub server (it exits by itself after 2 min)
+          ansible.builtin.command:
+            argv: [/usr/bin/python3, "{{ t }}/tags_server.py", "{{ t }}/tags.json", "{{ t }}/tags.port"]
+          async: 150
+          poll: 0
+          changed_when: false
+
+        - name: Wait for the stub server
+          ansible.builtin.wait_for:
+            path: "{{ t }}/tags.port"
+            timeout: 20
+
+        - name: Read the stub server's port
+          ansible.builtin.slurp:
+            src: "{{ t }}/tags.port"
+          register: render_test_tags_server
+
+        - name: Pull only models the server doesn't list
+          ansible.builtin.include_tasks: pull_tags_case.yml
+          vars:
+            render_test_tags_port: "{{ (render_test_tags_server.content | b64decode).split()[0] }}"
+          loop:
+            - {model: "registry.ollama.ai/library/qwen3:8b", pulls: []}
+            - {model: llama3.2, pulls: []}
+            - {model: "HF.co/bartowski/x-GGUF:Q4_K_M", pulls: []}
+            - {model: library/qwen3:8b, pulls: []}
+            - {model: someone/m, pulls: []}
+            - {model: "qwen3:14b", pulls: ["pull qwen3:14b"]}
+            - {model: qwen3, pulls: ["pull qwen3"]}
+          loop_control:
+            loop_var: case
+            label: "{{ case.model }}"
+
+        # --- the bounded pull (tasks/pull_model.yml) with stand-in clients
+        - name: Pull with a client that succeeds, one that fails and one that hangs
+          ansible.builtin.include_tasks: pull_case.yml
+          loop:
+            - {name: ok, script: "echo pulled", timeout: 10, error: ""}
+            - {name: fails, script: "echo 'pull model manifest: file does not exist' >&2; exit 1",
+               timeout: 10, error: "failed (rc 1): pull model manifest: file does not exist"}
+            - {name: hangs, script: "exec sleep 30", timeout: 1, error: "was still running after 1 s and was stopped"}
+            # ignores TERM: timeout has to KILL it (rc -9, or 137)
+            - {name: ignores-term, script: "trap '' TERM; sleep 30 & wait; sleep 30", timeout: 1,
+               error: "was still running after 1 s and was stopped"}
+          loop_control:
+            loop_var: case
+            label: "{{ case.name }}"
+
+        - name: Rich rules reject both ports from everyone but ai-box, per family, in firewalld's own spelling
+          ansible.builtin.assert:
+            that:
+              - ollama_rocm_rich_rules == [
+                  'rule family="ipv4" source NOT address="192.0.2.10" port port="11434" protocol="tcp" reject',
+                  'rule family="ipv4" source NOT address="192.0.2.10" port port="11500" protocol="tcp" reject',
+                  'rule family="ipv6" source NOT address="2001:db8::10" port port="11434" protocol="tcp" reject',
+                  'rule family="ipv6" source NOT address="2001:db8::10" port port="11500" protocol="tcp" reject']
+            fail_msg: "{{ ollama_rocm_rich_rules }}"
+            quiet: true
+
+        - name: Policy ops for a new, a converged, a drifted and a runtime (no priority/target) policy
+          vars:
+            ollama_rocm_policy_current: "{{ item.current }}"
+            r: "{{ ollama_rocm_rich_rules }}"
+            stale: rule family="ipv4" source NOT address="192.0.2.99" port port="11500" protocol="tcp" reject
+            cases:
+              - current: {priority: "-1", target: CONTINUE, ingress: [], egress: [], rules: []}
+                ops: "{{ ['--set-priority=-100', '--add-ingress-zone=ANY', '--add-egress-zone=HOST']
+                         + (r | map('regex_replace', '^', '--add-rich-rule=') | list) }}"
+              - current: {priority: "-100", target: CONTINUE, ingress: [ANY], egress: [HOST], rules: "{{ r | reverse | list }}"}
+                ops: []
+              - current: {priority: "5", target: REJECT, ingress: [public, trusted], egress: [HOST], rules: "{{ [stale, r[0]] }}"}
+                # zones out before ANY goes in; rules added before the stale one is removed
+                ops: "{{ ['--set-priority=-100', '--set-target=CONTINUE', '--remove-ingress-zone=public',
+                          '--remove-ingress-zone=trusted', '--add-ingress-zone=ANY']
+                         + (r[1:] | map('regex_replace', '^', '--add-rich-rule=') | list)
+                         + ['--remove-rich-rule=' ~ stale] }}"
+              - current: {priority: null, target: null, ingress: [ANY], egress: [HOST], rules: "{{ r }}"}
+                ops: []
+              - current: {priority: null, target: null, ingress: [], egress: [], rules: "{{ r }}"}
+                ops: [--add-ingress-zone=ANY, --add-egress-zone=HOST]
+          ansible.builtin.assert:
+            that:
+              - item.ops == ollama_rocm_policy_ops
+            fail_msg: "{{ ollama_rocm_policy_ops | to_json }}"
+            quiet: true
+          loop: "{{ cases }}"
+          loop_control:
+            index_var: case
+            label: "case {{ case }}"
+
+        - name: Legacy zone rules on our tcp ports are found in every zone, nothing else
+          vars:
+            ollama_rocm_zone_rules:
+              results:
+                - item: trusted
+                  stdout_lines:
+                    - rule family="ipv4" source NOT address="192.0.2.10" port port="11434" protocol="tcp" reject
+                    - rule family="ipv6" source NOT address="2001:db8::99" port port="11500" protocol="tcp" reject
+                    - rule family="ipv4" source address="192.0.2.50" port port="22" protocol="tcp" accept
+                - item: public
+                  stdout_lines:
+                    - rule family="ipv4" source address="192.0.2.0/24" port port="11500" protocol="tcp" accept
+                    # lookalike port and other protocol: not ours
+                    - rule family="ipv4" source NOT address="192.0.2.10" port port="114340" protocol="tcp" reject
+                    - rule family="ipv4" source NOT address="192.0.2.10" port port="11434" protocol="udp" reject
+                - item: block
+                  skipped: true
+          ansible.builtin.assert:
+            that:
+              - ollama_rocm_zone_stale | map(attribute='0.item') | list == ['trusted', 'trusted', 'public']
+              - ollama_rocm_zone_stale | map(attribute='1') | list == [
+                  'rule family="ipv4" source NOT address="192.0.2.10" port port="11434" protocol="tcp" reject',
+                  'rule family="ipv6" source NOT address="2001:db8::99" port port="11500" protocol="tcp" reject',
+                  'rule family="ipv4" source address="192.0.2.0/24" port port="11500" protocol="tcp" accept']
+            fail_msg: "{{ ollama_rocm_zone_stale | to_json }}"
+            quiet: true
+
+        - name: The single-address assert rejects prefixes and ranges
+          vars:
+            ai_box_tailnet_ip: "{{ item.v4 }}"
+            ai_box_tailnet_ip6: "{{ item.v6 }}"
+          ansible.builtin.assert:
+            that:
+              - (ollama_rocm_ai_box_addrs_ok | bool) == item.ok
+            quiet: true
+          loop:
+            - {v4: 192.0.2.10, v6: "2001:db8::10", ok: true}
+            - {v4: 192.0.2.0/24, v6: "2001:db8::10", ok: false}
+            - {v4: 192.0.2.10, v6: "2001:db8::/64", ok: false}
+            - {v4: 192.0.2.10, v6: "192.0.2.11", ok: false}
+            - {v4: "", v6: "", ok: false}
+            - {v4: "192.0.2.10\n", v6: "2001:db8::10", ok: false}
+            - {v4: 192.0.2.10, v6: "2001:db8::10\n", ok: false}
+
+        # firewalld's own parser and policy validator (only where python3-firewall is installed):
+        # every rule prints back unchanged, the declared policy is valid, and the validator really
+        # rejects a reserved priority and ANY mixed with a named zone.
+        - name: The rules and the policy pass firewalld's own parser and validator
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - -c
+              - |
+                import json, sys
+                from firewall.core.rich import Rich_Rule
+                from firewall.core.io.policy import Policy
+                rules, priority = json.loads(sys.argv[1]), int(sys.argv[2])
+                for r in rules:
+                    assert str(Rich_Rule(rule_str=r)) == r, r
+                cfg = {"priority": priority, "target": "CONTINUE", "ingress_zones": ["ANY"],
+                       "egress_zones": ["HOST"], "rich_rules": rules}
+                known = {"zones": {"public": None, "trusted": None}, "policies": {}, "ipsets": {},
+                         "helpers": {}, "icmptypes": {}, "services": {}}
+                def load(c):
+                    p = Policy()
+                    p.name = "homelab-ai-only"
+                    p.import_config_dict(c, known)
+                    return p
+                p = load(cfg)
+                assert p.priority < 0 and p.ingress_zones == ["ANY"] and p.egress_zones == ["HOST"]
+                for bad in ({"priority": 0}, {"ingress_zones": ["ANY", "public"]}):
+                    try:
+                        load(dict(cfg, **bad))
+                    except Exception:
+                        continue
+                    raise AssertionError("accepted %r" % bad)
+              - "{{ ollama_rocm_rich_rules | to_json }}"
+              - "{{ ollama_rocm_policy_priority }}"
+          register: render_test_fw
+          changed_when: false
+          failed_when: render_test_fw.rc != 0 and "No module named 'firewall'" not in render_test_fw.stderr
+
+        - name: Say whether firewalld's own checks ran
+          ansible.builtin.debug:
+            msg: "firewalld checks: {{ 'ran' if render_test_fw.rc == 0 else 'skipped (no python3-firewall here)' }}"
+
+      always:
+        - name: Stop the stub server
+          ansible.builtin.command:
+            argv: [pkill, -f, "{{ render_test_tmp.path }}/tags_server.py"]
+          register: render_test_pkill
+          changed_when: render_test_pkill.rc == 0
+          failed_when: false
+
+        - name: Remove the scratch directory
+          ansible.builtin.file:
+            path: "{{ render_test_tmp.path }}"
+            state: absent

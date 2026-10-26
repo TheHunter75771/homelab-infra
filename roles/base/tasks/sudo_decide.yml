@@ -1,0 +1,14 @@
+---
+# Imported by sudo.yml after `update-alternatives --query sudo` (registered as base_sudo_alternatives);
+# also run on its own by tests/test_sudo_decide.yml with fixture outputs.
+# base_sudo_managed: the wanted alternative is registered for "sudo", so the role manages the choice.
+# base_sudo_switch: it isn't the current value yet, or the group is still in auto mode.
+- name: Work out whether to switch sudo to the classic implementation
+  ansible.builtin.set_fact:
+    base_sudo_managed: "{{ base_sudo_registered }}"
+    base_sudo_switch: "{{ base_sudo_registered and (base_sudo_value != base_sudo_alternative or base_sudo_status != 'manual') }}"
+  vars:
+    base_sudo_lines: "{{ base_sudo_alternatives.stdout_lines | default([]) if base_sudo_alternatives.rc | default(1) == 0 else [] }}"
+    base_sudo_registered: "{{ base_sudo_alternative | length > 0 and ('Alternative: ' ~ base_sudo_alternative) in base_sudo_lines }}"
+    base_sudo_value: "{{ base_sudo_lines | select('match', '^Value: ') | map('regex_replace', '^Value: ', '') | first | default('') }}"
+    base_sudo_status: "{{ base_sudo_lines | select('match', '^Status: ') | map('regex_replace', '^Status: ', '') | first | default('') }}"

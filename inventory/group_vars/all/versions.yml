@@ -9,8 +9,28 @@ images:
   prowlarr: "lscr.io/linuxserver/prowlarr:2.3.5.5327-ls147@sha256:c9fe528f34b1fd3715438b6f6d6991d64e2965f2c055db36398bc66a0e7eab01"
   sabnzbd: "lscr.io/linuxserver/sabnzbd:5.0.3-ls255@sha256:6b392fce45ed587ba7213259fbce6f9f725b157b746b36ec53d3f08ee415602e"
   jellyseerr: "fallenbagel/jellyseerr:2.7.3@sha256:4538137bc5af902dece165f2bf73776d9cf4eafb6dd714670724af8f3eb77764"
+  python_base: "python:3.14-slim@sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8"
+  ollama: "ollama/ollama:0.40.11@sha256:dea72d1e22270fe095b68fdf756d2b489d615643c5a2eaebbc5f569181e322d8"
+  open_webui: "ghcr.io/open-webui/open-webui:v0.12.4@sha256:a5b9e403d19154796850679c8c5d1295301cee954be8b84ddd62af92426558f7"
   node_base: "node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914"
 local_images:
   wol_relay: "homelab/wol-relay:2026.07"
+  gpu_broker: "homelab/gpu-broker:0.1.0"
 python_packages:
   pywebpush: "2.5.0"
+# Docker apt packages (role docker, docker_install: true). Exact Debian versions from download.docker.com
+# (resolute/stable). They matched the mediaserver's installed set on 2026-10-26; the mediaserver's own Docker is
+# not pinned or held, so a manual upgrade there breaks the match. ai-box installs name=version and holds them.
+apt_packages:
+  docker-ce: "5:29.5.2-1~ubuntu.26.04~resolute"
+  docker-ce-cli: "5:29.5.2-1~ubuntu.26.04~resolute"
+  containerd.io: "2.2.4-1~ubuntu.26.04~resolute"
+  docker-buildx-plugin: "0.34.0-1~ubuntu.26.04~resolute"
+  docker-compose-plugin: "5.1.4-1~ubuntu.26.04~resolute"
+  docker-ce-rootless-extras: "5:29.5.2-1~ubuntu.26.04~resolute"
+# Native Ollama on the gaming PC (role ollama_rocm, §12.10). sha256 from the release's sha256sum.txt.
+ollama_release:
+  version: "v0.40.11"
+  assets:
+    ollama-linux-amd64.tar.zst: "7bedab90dd122661be78798e9f0edf37fccf0cccf2699d2c58ea1a3afdc04b6d"
+    ollama-linux-amd64-rocm.tar.zst: "0e45493c905b781108cdce1986dfcdb629b29c829f326ded12fc4abde1299d8e"

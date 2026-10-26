@@ -1,0 +1,77 @@
+---
+# Validate the role's inputs before anything changes. Read-only; tests/test_render.yml runs it with
+# good and bad values. Input: ollama_rocm_installed_packages (package_facts' `packages`).
+- name: The Ollama backend is vulkan or rocm
+  ansible.builtin.assert:
+    that:
+      - ollama_backend is string
+      - ollama_backend in ollama_rocm_backends
+    fail_msg: "ollama_backend must be one of {{ ollama_rocm_backends | list | sort | join(', ') }}, not '{{ ollama_backend }}'."
+    quiet: true
+
+# Asserted, not installed: the Mesa Vulkan packages must match the installed Mesa exactly, so a
+# `dnf install` here could upgrade the desktop's whole graphics stack in the middle of a converge.
+# Fedora Workstation ships both; if one is missing, Noah installs it on purpose.
+- name: The backend's packages are installed
+  ansible.builtin.assert:
+    that:
+      - ollama_rocm_installed_packages[item] | default([]) | selectattr('arch', 'eq', 'x86_64') | list | length > 0
+    fail_msg: >-
+      ollama_backend={{ ollama_backend }} needs the x86_64 package {{ item }}.
+      Install it with: sudo dnf install {{ item }}
+    quiet: true
+  loop: "{{ ollama_rocm_backends[ollama_backend].packages }}"
+
+# ollama_rocm_extra_env is rendered as Environment=KEY=VALUE lines after the role's own. It may
+# override the backend's variables (on purpose), but never the role's fixed ones (OLLAMA_HOST is
+# the tailnet-only bind), and nothing in it may change the unit's syntax: no whitespace or newline
+# (a newline would start a new directive), no quotes or backslash (systemd unquoting), no %
+# (systemd specifiers).
+- name: The extra environment is a mapping
+  ansible.builtin.assert:
+    that:
+      - ollama_rocm_extra_env is mapping
+    fail_msg: ollama_rocm_extra_env must be a mapping of NAME to value.
+    quiet: true
+
+- name: The extra environment entries are safe
+  ansible.builtin.assert:
+    that:
+      - item.key is string
+      - item.key is match(ollama_rocm_env_key_re)
+      - item.key not in ollama_rocm_env_reserved
+      - (item.value is string or item.value is number) and item.value is not boolean
+      - item.value | string is not search(ollama_rocm_env_value_bad_re)
+    fail_msg: >-
+      ollama_rocm_extra_env entry {{ item.key | to_json }}={{ item.value | to_json }} refused: the name must match
+      [A-Za-z_][A-Za-z0-9_]* and not be one of {{ ollama_rocm_env_reserved | join(', ') }}; the value must be a
+      string or number with no whitespace, control characters, quotes, backslash or %.
+    quiet: true
+  loop: "{{ ollama_rocm_extra_env | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: The pull bounds are positive whole seconds
+  ansible.builtin.assert:
+    that:
+      - item.value is not boolean
+      - item.value | string is match(ollama_rocm_seconds_re)
+    fail_msg: "{{ item.key }} must be a positive whole number of seconds, not {{ item.value | to_json }}."
+    quiet: true
+  loop:
+    - {key: ollama_rocm_pull_timeout, value: "{{ ollama_rocm_pull_timeout }}"}
+    - {key: ollama_rocm_pull_kill_after, value: "{{ ollama_rocm_pull_kill_after }}"}
+  loop_control:
+    label: "{{ item.key }}"
+
+# A fully qualified name (registry.ollama.ai/library/...) is compared in the short form Ollama lists,
+# so it doesn't re-pull on every converge. Digests and registry ports aren't supported.
+- name: The GPU model name is a plain model name
+  ansible.builtin.assert:
+    that:
+      - ollama_rocm_model is match(ollama_rocm_model_re)
+    fail_msg: >-
+      ai_gpu_model {{ ollama_rocm_model | to_json }} isn't a model name of the form [host/][namespace/]model[:tag]
+      (letters, digits, . _ -; no digest, no port).
+    quiet: true
+  when: ollama_rocm_model | length > 0

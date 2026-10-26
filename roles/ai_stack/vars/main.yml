@@ -1,0 +1,43 @@
+---
+# Derived values (not meant to be overridden).
+
+# The broker's alias map: rendered only when both model variables are set (§12.10), else {}.
+ai_stack_aliases: >-
+  {{ {ai_stack_alias_name: {'gpu': ai_gpu_model, 'cpu': ai_cpu_model}}
+     if (ai_gpu_model is defined and ai_cpu_model is defined) else {} }}
+
+# /etc/homelab-ai/gpu-broker.json. Keys are the broker's own (apps/gpu-broker/gpu_broker/config.py); the
+# three URLs are its only required keys, everything else keeps the broker's defaults.
+ai_stack_broker_config:
+  gate_url: "http://{{ gaming_pc_tailnet_ip }}:{{ ai_stack_gate_port }}"
+  gpu_url: "http://{{ gaming_pc_tailnet_ip }}:{{ ai_stack_gpu_ollama_port }}"
+  cpu_url: http://ollama-cpu:11434
+  aliases: "{{ ai_stack_aliases }}"
+ai_stack_broker_config_content: "{{ ai_stack_broker_config | to_nice_json(indent=2) }}\n"
+# Stamped on the gpu-broker container as a label, so a config change recreates the container in the same
+# `compose up` (the broker reads its config only at start, and a replaced file is a new inode that an
+# existing bind mount would never see).
+ai_stack_broker_config_hash: "{{ ai_stack_broker_config_content | hash('sha256') }}"
+
+# What the build context holds: only the files the Dockerfile uses (rsync filter rules, first match wins).
+# --delete-excluded removes anything else from the host copy, so the source hash covers exactly these.
+ai_stack_broker_sync_filters:
+  - --exclude=__pycache__/
+  - --exclude=*.pyc
+  - --include=/Dockerfile
+  - --include=/.dockerignore
+  - --include=/requirements.lock
+  - --include=/gpu_broker/
+  - --include=/gpu_broker/**
+  - --exclude=*
+
+# The services published on tailnet_ip, as the boot helper checks them (<service>:<host port>:<container
+# port>; the container name is the service name). Must match the `ports:` in templates/compose.yaml.j2;
+# tests/test_render.yml compares the two.
+ai_stack_tailnet_publishes:
+  - spec: "gpu-broker:{{ ai_stack_broker_port }}:11434"
+  - spec: "open-webui:{{ ai_stack_webui_port }}:8080"
+
+# The helper prints "RECREATE <services>" ("WOULD-RECREATE" in a dry run) when it recreates (would
+# recreate) something; the playbook's heal step is changed exactly then.
+ai_stack_heal_changed_re: '^(WOULD-)?RECREATE '

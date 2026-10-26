@@ -1,0 +1,57 @@
+---
+- name: Validate operator_accounts
+  ansible.builtin.include_tasks: validate.yml
+
+- name: Find classic sudo and sudo-rs
+  ansible.builtin.include_tasks: sudo_detect.yml
+
+# sudo-rs has no I/O logging. If a full_logged account could run it, its root would be unlogged.
+- name: Deny full_logged accounts the sudo-rs binary
+  ansible.builtin.include_tasks: sudo_rs_guard.yml
+  when:
+    - operator_account_sudo_rs | length > 0
+    - operator_accounts_resolved | selectattr('sudo', 'equalto', 'full_logged') | list | length > 0
+
+- name: Read the account and group databases
+  ansible.builtin.getent:
+    database: "{{ item }}"
+  loop: [passwd, group]
+
+# In check mode a missing account (or group) isn't created, so nothing can be owned by it yet.
+- name: Note accounts and groups that don't exist yet
+  ansible.builtin.set_fact:
+    operator_account_created: "{{ operator_accounts_resolved | map(attribute='name') | reject('in', ansible_facts.getent_passwd) | list }}"
+    operator_account_deny_group_exists: "{{ operator_sudo_rs_deny_group in ansible_facts.getent_group }}"
+
+- name: Host-time checks (existing people's accounts, polkit admin groups)
+  ansible.builtin.include_tasks: host_checks.yml
+
+- name: Accounts exist
+  ansible.builtin.include_tasks: account.yml
+  loop: "{{ operator_accounts_resolved }}"
+  loop_control:
+    loop_var: operator_acct
+    label: "{{ operator_acct.name }}"
+
+- name: Per-account sudo, SSH and sshd files
+  ansible.builtin.include_tasks: files.yml
+  # In check mode a not-yet-created account has no home or primary group to own files.
+  when: not (ansible_check_mode and operator_acct.name in operator_account_created)
+  loop: "{{ operator_accounts_resolved }}"
+  loop_control:
+    loop_var: operator_acct
+    label: "{{ operator_acct.name }}"
+
+# Skipped in check mode while a drop-in (or its account) isn't on the host yet.
+- name: Check sshd in context
+  ansible.builtin.include_tasks: sshd_check.yml
+  when:
+    - operator_account_sshd_accounts | length > 0
+    - operator_account_sshd_pending | default([]) | length == 0
+    - not (ansible_check_mode and operator_account_sshd_accounts | map(attribute='name') | intersect(operator_account_created) | length > 0)
+  vars:
+    operator_account_sshd_accounts: "{{ operator_accounts_resolved | selectattr('sshd_mode', 'ne', 'none') | list }}"
+
+- name: Verify the effective sudo policy
+  ansible.builtin.include_tasks: verify.yml
+  when: not ansible_check_mode

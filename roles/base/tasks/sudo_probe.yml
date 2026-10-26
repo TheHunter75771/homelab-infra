@@ -1,0 +1,109 @@
+---
+# Imported by sudo.yml before the switch; also run on its own by tests/test_sudo_probe.yml against stubs.
+# Classic sudo must keep each user's root access as it is today. What that means depends on the account:
+# - no usable password (`passwd -S` status L or NP), and always automation_user: the only
+#   way into root is a passwordless rule. Probe it: as root, become the user with classic sudo and have them
+#   run classic `sudo -n id -u`. -n fails instead of prompting. Only a plain "0" passes.
+# - a usable password (the media server's admin, who types it): a password prompt is normal. Ask classic
+#   sudo itself whether the user may run commands as root: `sudo -n -l -U <user> -u root <cmd>` (run as root,
+#   no password involved) exits 0 only if sudoers, as classic sudo evaluates it (last match wins, negations),
+#   allows that command. /bin/sh stands for "everything": a shell as root is ALL.
+# Both are behavioural, so a text match of `sudo -l` (a NOPASSWD rule for one command next to a
+# password-asking ALL, or a later rule overriding an earlier one) can't fool them. Comparing with what
+# sudo-rs lists wasn't used: its `-l` output has another format, and sudo-rs isn't the spec of what's wanted.
+# The password state comes from `passwd -S` (shadow's passwd, Ubuntu 26.04: "<user> <L|NP|P> <date> ..."; L for
+# a field starting with ! or *, NP for an empty one, P otherwise). It never prints the hash, so the hash
+# never reaches the controller; no_log stays on anyway.
+- name: Read whether the probed users have a usable password
+  ansible.builtin.command:
+    argv: [passwd, -S, "{{ item }}"]
+  loop:
+    - "{{ admin_user }}"
+    - "{{ automation_user }}"
+  environment:
+    LC_ALL: C
+  register: base_sudo_pwstatus
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: The password status has the expected format
+  ansible.builtin.assert:
+    that:
+      - item.stdout is match('^' ~ (item.item | regex_escape) ~ ' (L|NP|P)( |$)')
+    fail_msg: "`passwd -S {{ item.item }}` printed an unexpected status (want \"<user> L|NP|P ...\"). Not switching."
+    quiet: true
+  loop: "{{ base_sudo_pwstatus.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Start the list of users to probe
+  ansible.builtin.set_fact:
+    base_sudo_probe_users: []
+
+# Only P is a usable password (NP, no password at all, needs a passwordless rule like a locked one).
+- name: Decide how to probe each user
+  ansible.builtin.set_fact:
+    base_sudo_probe_users: >-
+      {{ base_sudo_probe_users + [{'user': item.item, 'usable_password': base_sudo_usable,
+                                   'mode': 'listed' if base_sudo_usable and item.item != automation_user else 'nopasswd'}] }}
+  loop: "{{ base_sudo_pwstatus.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  vars:
+    base_sudo_usable: "{{ item.stdout.split()[1] == 'P' }}"
+
+- name: Show how each user is probed
+  ansible.builtin.debug:
+    msg: "{{ base_sudo_probe_users | map(attribute='user') | zip(base_sudo_probe_users | map(attribute='mode')) | map('join', ': ') | list }}"
+
+- name: Probe passwordless root through classic sudo
+  ansible.builtin.command:
+    argv: ["{{ base_sudo_alternative }}", -u, "{{ item.user }}", --, "{{ base_sudo_alternative }}", -n, /usr/bin/id, -u]
+  loop: "{{ base_sudo_probe_users | selectattr('mode', 'equalto', 'nopasswd') | list }}"
+  loop_control:
+    label: "{{ item.user }}"
+  environment:
+    LC_ALL: C
+  register: base_sudo_probe
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Ask classic sudo whether the users with a password may run commands as root
+  ansible.builtin.command:
+    argv: ["{{ base_sudo_alternative }}", -n, -l, -U, "{{ item.0.user }}", -u, root, "{{ item.1 }}"]
+  loop: "{{ base_sudo_probe_users | selectattr('mode', 'equalto', 'listed') | list | product(base_sudo_listed_commands) | list }}"
+  loop_control:
+    label: "{{ item.0.user }} {{ item.1 }}"
+  environment:
+    LC_ALL: C
+  register: base_sudo_listed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  vars:
+    base_sudo_listed_commands: [/usr/bin/id, /bin/sh]
+
+- name: Classic sudo keeps both users' root access
+  ansible.builtin.assert:
+    that:
+      - base_sudo_probe_bad | length == 0
+      - base_sudo_listed_bad | length == 0
+    fail_msg: >-
+      Classic sudo ({{ base_sudo_alternative }}) would change root access. Not switching; check /etc/sudoers.d.
+      {% for r in base_sudo_probe_bad %}
+      {{ r.item.user }} ({{ 'the automation user' if r.item.user == automation_user else 'no usable password' }},
+      so it needs a passwordless rule): `sudo -n id -u` as them gave rc {{ r.rc | default('?') }},
+      output "{{ (r.stdout | default('') ~ ' ' ~ r.stderr | default('')) | trim }}" (want "0").
+      {% endfor %}
+      {% for r in base_sudo_listed_bad %}
+      {{ r.item.0.user }} (has a usable password): classic sudo would not let them run {{ r.item.1 }} as root
+      (sudo -l rc {{ r.rc | default('?') }}{{ ': ' ~ (r.stderr | default('') | trim) if r.stderr | default('') | trim else '' }}).
+      {% endfor %}
+    quiet: true
+  vars:
+    base_sudo_probe_bad: >-
+      {{ base_sudo_probe.results | rejectattr('rc', 'equalto', 0) | list
+         + (base_sudo_probe.results | selectattr('rc', 'equalto', 0) | rejectattr('stdout', 'equalto', '0') | list) }}
+    base_sudo_listed_bad: "{{ base_sudo_listed.results | rejectattr('rc', 'equalto', 0) | list }}"

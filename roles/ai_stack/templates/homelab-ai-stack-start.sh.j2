@@ -1,0 +1,165 @@
+#!/bin/sh
+# {{ ansible_managed }}
+# Run by homelab-ai-stack-start.service after docker.service (role ai_stack, docs/CONTRACTS.md §12.9, §12.10).
+#
+# The ai stack publishes its ports on the tailnet address only. At boot Docker may start the containers
+# before tailscaled has put that address on the host. Docker 29 then runs them WITHOUT those port bindings:
+# no error, an empty `docker port`, no DNAT rule. `docker restart` doesn't bring them back; only recreating
+# the container does. So this script:
+#   1. waits (bounded) for the tailnet address;
+#   2. checks each tailnet-published service: it needs recreating when it should be up (running or
+#      restarting) but `docker port` doesn't show its tailnet binding, or when Docker refused its last start
+#      (down, with a start error in State.Error);
+#   3. recreates exactly those: docker compose up -d --force-recreate --no-deps <services>;
+#   4. checks the bindings again.
+#
+# Stopped on purpose = left alone. With `restart: unless-stopped`, Docker brings every container back up at
+# boot (and restarts any that exit) except one that was stopped by hand (`docker stop`, `docker compose
+# stop`, the dashboard's Stop). So a container that is down (exited/created) with NO start error was
+# stopped on purpose, and is not touched. A container that doesn't exist (`docker compose down`, `docker
+# rm`) is not touched either; the next playbook run recreates it.
+#
+# Modes:
+#   (no option)  boot, run by the unit: waits up to WAIT seconds for the tailnet address first.
+#   --heal       run by the playbook right after its `compose up` (role ai_stack, tasks/stack.yml): the
+#                address must already be there (no wait); otherwise the same check and recreate.
+#   --dry-run    with --heal, for check mode: report what would be recreated, change nothing, no lock.
+# Every recreate line is "RECREATE <services>" ("WOULD-RECREATE" in a dry run); the playbook reports
+# changed only when it sees one, so a healthy host stays changed=0.
+#
+# Lock: the check and the recreate run under flock on LOCK, the same lock the playbook holds around its own
+# `compose up`, so the two never recreate the same containers at once. The wait for it is bounded (LOCKWAIT);
+# on timeout the script exits 1 and says who might hold it.
+#
+# No `set -e`: every failure is reported, the remaining services are still checked, and the exit status
+# is 1 if anything failed (the address never appeared, a lookup, the recreate, or a binding still missing).
+set -u
+PATH={{ ai_stack_start_path }}
+
+ADDR={{ tailnet_ip | quote }}
+PROJECT={{ ai_stack_name | quote }}
+COMPOSE_FILE={{ (ai_stack_dir ~ '/compose.yaml') | quote }}
+WAIT={{ ai_stack_tailnet_wait_seconds | int }}
+LOCK={{ ai_stack_lock_file | quote }}
+LOCKWAIT={{ ai_stack_lock_wait | int }}
+# Tailnet-published services: <service>:<host port>:<container port>. The container name is the service name.
+SERVICES={{ ai_stack_tailnet_publishes | map(attribute='spec') | join(' ') | quote }}
+
+MODE=boot
+DRY=0
+for arg in "$@"; do
+	case $arg in
+		--heal) MODE=heal ;;
+		--dry-run) DRY=1 ;;
+		*)
+			echo "usage: $0 [--heal [--dry-run]]" >&2
+			exit 2
+			;;
+	esac
+done
+if [ "$DRY" = 1 ] && [ "$MODE" != heal ]; then
+	echo "--dry-run needs --heal" >&2
+	exit 2
+fi
+
+[ "$MODE" = heal ] && WAIT=0
+waited=0
+until ip -4 -o addr show | grep -q -F "inet $ADDR/"; do
+	if [ "$waited" -ge "$WAIT" ]; then
+		echo "tailnet address $ADDR is not on this host after ${WAIT}s; is tailscaled up?" >&2
+		exit 1
+	fi
+	sleep 2
+	waited=$((waited + 2))
+done
+
+# Held until the script exits (fd 9 closes). A dry run changes nothing and doesn't need it.
+if [ "$DRY" = 0 ]; then
+	exec 9>"$LOCK"
+	if ! flock --exclusive --wait "$LOCKWAIT" 9; then
+		echo "could not take the stack lock $LOCK within ${LOCKWAIT}s; a playbook run (unit homelab-ai-stack-lock-*) or another helper holds it" >&2
+		exit 1
+	fi
+fi
+
+# has_binding SERVICE HOSTPORT CONTAINERPORT: `docker port` lists ADDR:HOSTPORT for the container port.
+has_binding() {
+	docker port "$1" "$3/tcp" 2>/dev/null | grep -q -x -F "$ADDR:$2"
+}
+
+rc=0
+if ! names=$(docker ps --all --filter "label=com.docker.compose.project=$PROJECT" --format '{% raw %}{{.Names}}{% endraw %}'); then
+	echo "could not list the $PROJECT containers" >&2
+	exit 1
+fi
+
+todo=
+for spec in $SERVICES; do
+	svc=${spec%%:*}
+	ports=${spec#*:}
+	hport=${ports%%:*}
+	cport=${ports#*:}
+	if ! printf '%s\n' "$names" | grep -q -x -F "$svc"; then
+		echo "$svc: no container (removed on purpose?), left alone"
+		continue
+	fi
+	if ! state=$(docker inspect --format '{% raw %}{{.State.Status}}|{{.State.Error}}{% endraw %}' "$svc"); then
+		echo "$svc: could not inspect" >&2
+		rc=1
+		continue
+	fi
+	status=${state%%|*}
+	err=${state#*|}
+	case $status in
+		running | restarting)
+			if has_binding "$svc" "$hport" "$cport"; then
+				echo "$svc: $status, $ADDR:$hport bound"
+			else
+				echo "$svc: $status but $ADDR:$hport is not bound; recreating"
+				todo="$todo $svc"
+			fi
+			;;
+		*)
+			if [ -n "$err" ]; then
+				echo "$svc: $status, Docker refused its last start ($err); recreating"
+				todo="$todo $svc"
+			else
+				echo "$svc: $status with no start error (stopped on purpose), left alone"
+			fi
+			;;
+	esac
+done
+
+if [ -z "$todo" ]; then
+	exit "$rc"
+fi
+if [ "$DRY" = 1 ]; then
+	echo "WOULD-RECREATE$todo"
+	exit "$rc"
+fi
+echo "RECREATE$todo"
+
+# Never pull or build at boot: the images are already on the host (the playbook put them there).
+# shellcheck disable=SC2086
+if ! docker compose -f "$COMPOSE_FILE" up --detach --pull never --force-recreate --no-deps $todo; then
+	echo "docker compose up --force-recreate failed for:$todo" >&2
+	exit 1
+fi
+
+for spec in $SERVICES; do
+	svc=${spec%%:*}
+	ports=${spec#*:}
+	hport=${ports%%:*}
+	cport=${ports#*:}
+	case " $todo " in
+		*" $svc "*) ;;
+		*) continue ;;
+	esac
+	if has_binding "$svc" "$hport" "$cport"; then
+		echo "$svc: recreated, $ADDR:$hport bound"
+	else
+		echo "$svc: recreated but $ADDR:$hport is still not bound" >&2
+		rc=1
+	fi
+done
+exit "$rc"

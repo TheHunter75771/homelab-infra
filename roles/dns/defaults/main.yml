@@ -12,10 +12,9 @@ dns_fallback:
 # plaintext fallback (and the firewall blocks 53/udp+tcp out anyway).
 dns_over_tls: "yes"
 dns_dnssec: allow-downgrade
-# Interfaces whose DHCP/RA-learned DNS servers are ignored (only the declared upstreams are used).
-dns_ignore_link_dns:
-  - "{{ lan_iface }}"
-  - "{{ wifi_iface }}"
+# Interfaces whose DHCP/RA-learned DNS servers are ignored (only the declared upstreams are used):
+# the LAN link, plus the Wi-Fi uplink on hosts that have one (wifi_iface is undefined elsewhere).
+dns_ignore_link_dns: "{{ [lan_iface] + ([wifi_iface] if wifi_iface is defined else []) }}"
 # Hand-made resolved drop-ins this role replaces.
 dns_stale_dropins:
   - /etc/systemd/resolved.conf.d/custom-dns.conf

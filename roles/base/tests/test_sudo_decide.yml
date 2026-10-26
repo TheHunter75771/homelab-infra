@@ -1,0 +1,19 @@
+---
+# Test for tasks/sudo_decide.yml against `update-alternatives --query sudo` fixture outputs
+# (tests/fixtures/sudo-alternatives.yml). Nothing on this machine is queried or changed.
+#   .venv/bin/ansible-playbook -i localhost, -c local roles/base/tests/test_sudo_decide.yml </dev/null 2>&1 | cat
+- name: The sudo switch is decided from the alternatives query
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+  vars:
+    sudo_test_cases: "{{ lookup('ansible.builtin.file', 'fixtures/sudo-alternatives.yml') | from_yaml }}"
+  tasks:
+    - name: Run each case
+      ansible.builtin.include_tasks: sudo_case.yml
+      loop: "{{ sudo_test_cases }}"
+      loop_control:
+        loop_var: sudo_case
+        label: "{{ sudo_case.name }}"

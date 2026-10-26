@@ -1,0 +1,125 @@
+---
+- name: Ollama inputs are set
+  ansible.builtin.assert:
+    that:
+      - gaming_pc_tailnet_ip | default('') is match(ollama_rocm_ipv4_re)
+      - ai_box_tailnet_ip | default('') | length > 0
+      - ai_box_tailnet_ip6 | default('') | length > 0
+    fail_msg: >-
+      Needs gaming_pc_tailnet_ip, ai_box_tailnet_ip and ai_box_tailnet_ip6 in
+      inventory/host_vars/{{ inventory_hostname }}.yml.
+    quiet: true
+
+# The Fedora package would ship its own /usr/bin/ollama, unit and user; two installs would fight.
+- name: Read the installed packages
+  ansible.builtin.package_facts:
+    manager: auto
+
+- name: No distro ollama package is installed
+  ansible.builtin.assert:
+    that:
+      - "'ollama' not in ansible_facts.packages"
+    fail_msg: The distro 'ollama' package is installed; remove it first (this role installs the pinned upstream release).
+    quiet: true
+
+- name: Check the role's inputs (backend, extra env, pull bounds, model name)
+  ansible.builtin.include_tasks: validate.yml
+
+- name: Extraction tools are installed
+  ansible.builtin.package:
+    name:
+      - zstd
+      - tar
+    state: present
+
+- name: Install the pinned Ollama release
+  ansible.builtin.include_tasks: install.yml
+
+# In check mode a release that would be installed isn't there yet.
+- name: Check the backend's library in the installed release
+  ansible.builtin.include_tasks: backend_installed.yml
+  when: not (ansible_check_mode and ollama_rocm_install_needed | bool)
+
+# The tree is staged under <prefix>/lib (lib_t) and the binary is written by an atomic rename that
+# applies the default context (bin_t); this only repairs drift. The tree is passed by its real path:
+# restorecon doesn't follow the lib/ollama symlink.
+- name: SELinux labels of the install are the policy defaults
+  ansible.builtin.command:
+    argv: [restorecon, -R, -v, "{{ ollama_rocm_bin }}", "{{ ollama_rocm_lib }}", "{{ ollama_rocm_tree }}"]
+  register: ollama_rocm_restorecon
+  changed_when: ollama_rocm_restorecon.stdout | length > 0
+  when:
+    - ansible_facts.selinux.status | default('disabled') == 'enabled'
+    - not ansible_check_mode
+
+# --- Account: render + video for /dev/kfd and /dev/dri/renderD*
+- name: GPU device groups exist
+  ansible.builtin.getent:
+    database: group
+    key: "{{ item }}"
+  loop:
+    - render
+    - video
+
+- name: Ollama system group exists
+  ansible.builtin.group:
+    name: ollama
+    system: true
+    state: present
+
+- name: Ollama system user exists (only in render and video besides its own group)
+  ansible.builtin.user:
+    name: ollama
+    group: ollama
+    groups:
+      - render
+      - video
+    append: false
+    system: true
+    home: "{{ ollama_rocm_home }}"
+    create_home: false
+    shell: /usr/sbin/nologin
+  notify: Restart ollama
+
+- name: Ollama state directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: ollama
+    group: ollama
+    mode: "0750"
+  loop:
+    - "{{ ollama_rocm_home }}"
+    - "{{ ollama_rocm_models_dir }}"
+
+# --- Firewall before the service, so the ports are never reachable by anyone but ai-box
+- name: Only ai-box may reach the Ollama and gpu-gate ports (firewalld policy)
+  ansible.builtin.include_tasks: firewall.yml
+
+# --- Service
+- name: Ollama unit is installed
+  ansible.builtin.template:
+    src: ollama.service.j2
+    dest: "{{ ollama_rocm_unit }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd for ollama
+    - Restart ollama
+
+- name: Load a changed unit before enabling it
+  ansible.builtin.meta: flush_handlers
+
+- name: Ollama is enabled and running
+  ansible.builtin.systemd_service:
+    name: ollama.service
+    enabled: true
+    state: started
+
+# --- Model (Noah's choice; no default, so an unset, null or empty ai_gpu_model pulls nothing)
+- name: Pull the GPU model
+  ansible.builtin.include_tasks: pull.yml
+  when:
+    - ollama_rocm_model | length > 0
+    - not ansible_check_mode
