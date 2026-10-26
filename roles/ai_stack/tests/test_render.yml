@@ -1,0 +1,558 @@
+---
+# Role ai_stack, rendered on the control node into a temp dir (no Docker, no root, no real host):
+#   1. compose.yaml: three services, tailnet-only publishes, labels, limits, Open WebUI settings.
+#   2. gpu-broker.json for every model combination, each validated by the broker's own `--check`.
+#   3. the boot helper script against fake `ip` and `docker` commands (tests/boot_case.yml, one per case).
+# Needs the broker's dev venv (apps/gpu-broker/README.md, "Run"); override with -e ai_stack_test_python=...
+#   .venv/bin/ansible-playbook -i localhost, -c local roles/ai_stack/tests/test_render.yml </dev/null 2>&1 | cat
+- name: Role ai_stack renders a valid stack, broker config and boot helper
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../../../inventory/group_vars/all/main.yml
+    - ../../../inventory/group_vars/all/versions.yml
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  vars:
+    # Documentation-only addresses: 100.64.0.0/10 is the tailnet range, 192.0.2.0/24 is TEST-NET-1.
+    tailnet_ip: 100.64.0.10
+    gaming_pc_tailnet_ip: 100.64.0.20
+    lan_ip: 192.0.2.10
+    ai_stack_test_role: "{{ playbook_dir | dirname }}"
+    ai_stack_test_repo: "{{ playbook_dir }}/../../.."
+    ai_stack_test_broker_dir: "{{ ai_stack_test_repo }}/apps/gpu-broker"
+    ai_stack_test_python: "{{ ai_stack_test_broker_dir }}/.venv/bin/python"
+  tasks:
+    - name: Make a scratch directory
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: .ai-stack
+      register: ai_stack_test_tmp
+
+    - name: The broker's dev venv exists (it validates the configs)
+      ansible.builtin.stat:
+        path: "{{ ai_stack_test_python }}"
+      register: ai_stack_test_python_stat
+
+    - name: Stop if there is no broker venv
+      ansible.builtin.assert:
+        that: ai_stack_test_python_stat.stat.exists
+        fail_msg: >-
+          {{ ai_stack_test_python }} is missing. Create it as apps/gpu-broker/README.md says
+          (python3 -m venv .venv && .venv/bin/pip install --require-hashes --only-binary=:all: -r requirements.lock).
+        quiet: true
+
+    - name: Stack lock defaults (root-only path; the holder outlives lock wait + compose wait)
+      ansible.builtin.assert:
+        that:
+          - ai_stack_lock_file == '/run/homelab-ai-stack.lock'
+          - not ai_stack_lock_file.startswith('/run/lock/')
+          - ai_stack_lock_hold_max | int == 1020
+          - ai_stack_lock_hold_max | int > ai_stack_lock_wait | int + ai_stack_compose_wait_timeout | int
+        fail_msg: "{{ ai_stack_lock_file }} {{ ai_stack_lock_hold_max }}"
+        quiet: true
+
+    # ---- 1. compose.yaml ------------------------------------------------------------------------------
+    - name: Render compose.yaml (both models set, sign-ups on by default)
+      ansible.builtin.template:
+        src: "{{ ai_stack_test_role }}/templates/compose.yaml.j2"
+        dest: "{{ ai_stack_test_tmp.path }}/compose.yaml"
+        mode: "0644"
+      vars:
+        ai_cpu_model: qwen3:1.7b
+        ai_gpu_model: qwen3:8b
+
+    - name: Read compose.yaml back
+      ansible.builtin.slurp:
+        src: "{{ ai_stack_test_tmp.path }}/compose.yaml"
+      register: ai_stack_test_compose_raw
+
+    - name: Compose file has the declared shape
+      vars:
+        ai_cpu_model: qwen3:1.7b
+        ai_gpu_model: qwen3:8b
+        compose: "{{ ai_stack_test_compose_raw.content | b64decode | from_yaml }}"
+        svc: "{{ compose.services }}"
+        all_ports: "{{ svc.values() | map(attribute='ports') | select('defined') | flatten }}"
+        webui_env: "{{ svc['open-webui'].environment }}"
+      ansible.builtin.assert:
+        that:
+          - compose.name == 'ai'
+          - svc.keys() | sort == ['gpu-broker', 'ollama-cpu', 'open-webui']
+          # Every service: restart policy, watch label, memory limit, private network.
+          - svc.values() | map(attribute='restart') | unique | list == ['unless-stopped']
+          - svc['ollama-cpu'].labels['homelab.watch'] == 'true'
+          - svc['gpu-broker'].labels['homelab.watch'] == 'true'
+          - svc['open-webui'].labels['homelab.watch'] == 'true'
+          - svc.values() | map(attribute='networks') | unique | list == [['ai']]
+          - svc['ollama-cpu'].mem_limit == '5g'
+          - svc['gpu-broker'].mem_limit == '256m'
+          - svc['open-webui'].mem_limit == '1536m'
+          # No swap: memswap_limit equals mem_limit on every service.
+          - svc.values() | map(attribute='memswap_limit') | list == svc.values() | map(attribute='mem_limit') | list
+          # Images only from versions.yml.
+          - svc['ollama-cpu'].image == images.ollama
+          - svc['gpu-broker'].image == local_images.gpu_broker
+          - svc['open-webui'].image == images.open_webui
+          - svc['gpu-broker'].pull_policy == 'never'
+          # Publishing: exactly two ports, both on the tailnet address; ollama-cpu publishes nothing.
+          - svc['ollama-cpu'].ports is not defined
+          - svc['gpu-broker'].ports == ['100.64.0.10:11434:11434']
+          - svc['open-webui'].ports == ['100.64.0.10:8080:8080']
+          - all_ports | length == 2
+          - all_ports | select('match', '^100\.64\.0\.10:') | list | length == 2
+          - all_ports | select('search', '0\.0\.0\.0|192\.0\.2\.10|^\d+:\d+$|^\d+$') | list | length == 0
+          # Ollama on CPU.
+          - svc['ollama-cpu'].environment.OLLAMA_KEEP_ALIVE == '10m'
+          - svc['ollama-cpu'].volumes == ['ollama-models:/root/.ollama']
+          - svc['ollama-cpu'].healthcheck.test == ['CMD', 'ollama', 'list']
+          # Broker: config via env and a read-only bind that is never auto-created; config hash label.
+          - svc['gpu-broker'].environment.GPU_BROKER_CONFIG == '/etc/gpu-broker/config.json'
+          - svc['gpu-broker'].volumes | length == 1
+          - svc['gpu-broker'].volumes[0].source == '/etc/homelab-ai/gpu-broker.json'
+          - svc['gpu-broker'].volumes[0].target == '/etc/gpu-broker/config.json'
+          - svc['gpu-broker'].volumes[0].read_only
+          - not svc['gpu-broker'].volumes[0].bind.create_host_path
+          - svc['gpu-broker'].labels['homelab.config-hash'] == ai_stack_broker_config_hash
+          - svc['gpu-broker'].labels['homelab.config-hash'] | length == 64
+          - svc['gpu-broker'].read_only
+          - svc['gpu-broker'].cap_drop == ['ALL']
+          # Open WebUI: broker only, auth on, telemetry off, secret from .env, data on a named volume.
+          - webui_env.OLLAMA_BASE_URL == 'http://gpu-broker:11434'
+          - webui_env.WEBUI_AUTH == 'true'
+          - webui_env.ENABLE_SIGNUP == 'true'
+          - webui_env.DEFAULT_USER_ROLE == 'pending'
+          - webui_env.SCARF_NO_ANALYTICS == 'true'
+          - webui_env.DO_NOT_TRACK == 'true'
+          - webui_env.ANONYMIZED_TELEMETRY == 'false'
+          - webui_env.WEBUI_SECRET_KEY is not defined
+          - svc['open-webui'].env_file == ['.env']
+          - svc['open-webui'].volumes == ['open-webui-data:/app/backend/data']
+          - compose.volumes.keys() | sort == ['ollama-models', 'open-webui-data']
+          - compose.networks.keys() | list == ['ai']
+        fail_msg: "{{ compose | to_nice_yaml }}"
+        quiet: true
+
+    - name: Render compose.yaml with sign-ups turned off
+      ansible.builtin.template:
+        src: "{{ ai_stack_test_role }}/templates/compose.yaml.j2"
+        dest: "{{ ai_stack_test_tmp.path }}/compose-nosignup.yaml"
+        mode: "0644"
+      vars:
+        ai_webui_enable_signup: false
+
+    - name: Sign-ups off reaches Open WebUI
+      ansible.builtin.assert:
+        that:
+          - (lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/compose-nosignup.yaml') | from_yaml)
+            .services['open-webui'].environment.ENABLE_SIGNUP == 'false'
+        quiet: true
+
+    # ---- 2. gpu-broker.json ---------------------------------------------------------------------------
+    - name: Broker config, no models set
+      ansible.builtin.copy:
+        content: "{{ ai_stack_broker_config_content }}"
+        dest: "{{ ai_stack_test_tmp.path }}/none.json"
+        mode: "0644"
+
+    - name: Broker config, only the CPU model set
+      ansible.builtin.copy:
+        content: "{{ ai_stack_broker_config_content }}"
+        dest: "{{ ai_stack_test_tmp.path }}/cpu-only.json"
+        mode: "0644"
+      vars:
+        ai_cpu_model: qwen3:1.7b
+
+    - name: Broker config, only the GPU model set
+      ansible.builtin.copy:
+        content: "{{ ai_stack_broker_config_content }}"
+        dest: "{{ ai_stack_test_tmp.path }}/gpu-only.json"
+        mode: "0644"
+      vars:
+        ai_gpu_model: qwen3:8b
+
+    - name: Broker config, both models set
+      ansible.builtin.copy:
+        content: "{{ ai_stack_broker_config_content }}"
+        dest: "{{ ai_stack_test_tmp.path }}/both.json"
+        mode: "0644"
+      vars:
+        ai_cpu_model: qwen3:1.7b
+        ai_gpu_model: qwen3:8b
+
+    - name: The broker's own --check accepts every config
+      ansible.builtin.command:
+        argv: ["{{ ai_stack_test_python }}", -m, gpu_broker, --config, "{{ ai_stack_test_tmp.path }}/{{ item }}.json", --check]
+        chdir: "{{ ai_stack_test_broker_dir }}"
+      environment:
+        PYTHONDONTWRITEBYTECODE: "1"
+      register: ai_stack_test_check
+      changed_when: false
+      loop: [none, cpu-only, gpu-only, both]
+
+    - name: The broker's --check really rejects a bad config (the check is not a no-op)
+      ansible.builtin.copy:
+        content: '{"gate_url": "http://100.64.0.20:11500", "gpu_url": "http://100.64.0.20:11434", "cpu_url": "x", "nope": 1}'
+        dest: "{{ ai_stack_test_tmp.path }}/bad.json"
+        mode: "0644"
+
+    - name: Run --check on the bad config
+      ansible.builtin.command:
+        argv: ["{{ ai_stack_test_python }}", -m, gpu_broker, --config, "{{ ai_stack_test_tmp.path }}/bad.json", --check]
+        chdir: "{{ ai_stack_test_broker_dir }}"
+      environment:
+        PYTHONDONTWRITEBYTECODE: "1"
+      register: ai_stack_test_bad
+      changed_when: false
+      failed_when: ai_stack_test_bad.rc != 2
+
+    - name: Configs have the right URLs and aliases only when both models are set
+      vars:
+        cfg_none: "{{ lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/none.json') | from_json }}"
+        cpu_only: "{{ lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/cpu-only.json') | from_json }}"
+        gpu_only: "{{ lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/gpu-only.json') | from_json }}"
+        both: "{{ lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/both.json') | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - ai_stack_test_check.results | map(attribute='stdout') | select('search', ' OK ') | list | length == 4
+          - >-
+            cfg_none == {'gate_url': 'http://100.64.0.20:11500', 'gpu_url': 'http://100.64.0.20:11434',
+                         'cpu_url': 'http://ollama-cpu:11434', 'aliases': {}}
+          - cpu_only.aliases == {}
+          - gpu_only.aliases == {}
+          - >-
+            both.aliases == {'assistant': {'gpu': 'qwen3:8b', 'cpu': 'qwen3:1.7b'}}
+          - both.gate_url == cfg_none.gate_url and both.cpu_url == cfg_none.cpu_url
+          - ai_stack_test_check.results[3].stdout is search('\(1 aliases\)')
+        fail_msg: "{{ [cfg_none, cpu_only, gpu_only, both, ai_stack_test_check.results | map(attribute='stdout') | list] | to_json }}"
+        quiet: true
+
+    - name: The config hash follows the config content
+      vars:
+        hash_none: "{{ ai_stack_broker_config_hash }}"
+      ansible.builtin.assert:
+        that:
+          - hash_none == (lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/none.json') ~ '\n') | hash('sha256')
+          - hash_none != ((lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/both.json') ~ '\n') | hash('sha256'))
+        quiet: true
+
+    # ---- 3. boot helper -------------------------------------------------------------------------------
+    - name: The boot helper checks exactly the services compose publishes
+      vars:
+        compose: "{{ ai_stack_test_compose_raw.content | b64decode | from_yaml }}"
+        from_compose: >-
+          {{ compose.services | dict2items | selectattr('value.ports', 'defined')
+             | map(attribute='value') | map(attribute='ports') | flatten
+             | map('replace', tailnet_ip ~ ':', '') | list }}
+        from_compose_names: >-
+          {{ compose.services | dict2items | selectattr('value.ports', 'defined') | map(attribute='key') | list }}
+        from_vars: "{{ ai_stack_tailnet_publishes | map(attribute='spec') | list }}"
+      ansible.builtin.assert:
+        that:
+          - from_vars | length == 2
+          - from_vars | map('regex_replace', '^[^:]+:', '') | list == from_compose
+          - from_vars | map('regex_replace', ':.*$', '') | list == from_compose_names
+          # The helper addresses containers by service name.
+          - from_compose_names | map('extract', compose.services) | map(attribute='container_name') | list
+            == from_compose_names
+        fail_msg: "{{ [from_vars, from_compose, from_compose_names] | to_json }}"
+        quiet: true
+
+    - name: Fake bin directory
+      ansible.builtin.file:
+        path: "{{ ai_stack_test_tmp.path }}/bin"
+        state: directory
+        mode: "0755"
+
+    # ip: prints the tailnet address only when FAKE_IP_HAS_ADDR=1.
+    # docker: logs every call and plays the containers described in FAKE_STATE_DIR:
+    #   names              the project's containers (`docker ps`)
+    #   <name>.inspect     "<status>|<start error>" (`docker inspect`)
+    #   <name>.port        `docker port` output; absent = no binding (exit 1, like Docker)
+    #   <name>.port.fixed  what a recreate binds (`docker compose ... up`), unless FAKE_COMPOSE_NOFIX=1
+    # FAKE_COMPOSE_FAIL=1 makes `docker compose` fail. `docker compose` also logs "UNLOCKED compose" if the
+    # stack lock (FAKE_LOCK) is free while it runs.
+    - name: Fake ip and docker
+      ansible.builtin.copy:
+        dest: "{{ ai_stack_test_tmp.path }}/bin/{{ item.name }}"
+        mode: "0755"
+        content: "{{ item.content }}"
+      loop:
+        - name: ip
+          content: |
+            #!/bin/sh
+            echo "1: lo    inet 127.0.0.1/8 scope host lo"
+            echo "2: eno1    inet 192.0.2.10/24 brd 192.0.2.255 scope global eno1"
+            if [ "${FAKE_IP_HAS_ADDR:-0}" = 1 ]; then
+              echo "3: tailscale0    inet 100.64.0.10/32 scope global tailscale0"
+            fi
+        - name: docker
+          content: |
+            #!/bin/sh
+            echo "$*" >> "$FAKE_DOCKER_LOG"
+            D=$FAKE_STATE_DIR
+            case "$1" in
+              ps) cat "$D/names" ;;
+              inspect)
+                for last; do :; done
+                cat "$D/$last.inspect" ;;
+              port)
+                if [ ! -f "$D/$2.port" ]; then
+                  echo "Error: No public port '$3' published for $2" >&2
+                  exit 1
+                fi
+                cat "$D/$2.port" ;;
+              compose)
+                # The helper must hold the stack lock while it recreates.
+                if flock --nonblock "$FAKE_LOCK" true; then echo "UNLOCKED compose" >> "$FAKE_DOCKER_LOG"; fi
+                if [ "${FAKE_COMPOSE_FAIL:-0}" = 1 ]; then
+                  echo "compose: simulated failure" >&2
+                  exit 1
+                fi
+                svcs=0
+                for a; do
+                  if [ "$svcs" = 1 ] && [ "${FAKE_COMPOSE_NOFIX:-0}" != 1 ]; then
+                    cp "$D/$a.port.fixed" "$D/$a.port"
+                  fi
+                  if [ "$a" = --no-deps ]; then svcs=1; fi
+                done ;;
+              *) exit 99 ;;
+            esac
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Render the boot helper with the fake PATH
+      ansible.builtin.template:
+        src: "{{ ai_stack_test_role }}/templates/homelab-ai-stack-start.sh.j2"
+        dest: "{{ ai_stack_test_tmp.path }}/start.sh"
+        mode: "0755"
+      vars:
+        ai_stack_start_path: "{{ ai_stack_test_tmp.path }}/bin:/usr/bin:/bin"
+        ai_stack_tailnet_wait_seconds: 2
+        ai_stack_lock_file: "{{ ai_stack_test_tmp.path }}/stack.lock"
+        ai_stack_lock_wait: 1
+
+    - name: The rendered helper is valid sh
+      ansible.builtin.command:
+        argv: [sh, -n, "{{ ai_stack_test_tmp.path }}/start.sh"]
+      changed_when: false
+
+    # Each case: the containers' states, the expected exit status, the expected compose call (or none).
+    - name: Boot helper cases
+      ansible.builtin.include_tasks: boot_case.yml
+      loop:
+        - name: broker-up-without-binding
+          containers:
+            gpu-broker: { status: running, port: false }
+            open-webui: { status: running, port: true }
+          rc: 0
+          compose: [gpu-broker]
+        - name: both-up-without-binding
+          containers:
+            gpu-broker: { status: running, port: false }
+            open-webui: { status: running, port: false }
+          rc: 0
+          compose: [gpu-broker, open-webui]
+        - name: restarting-without-binding
+          containers:
+            gpu-broker: { status: running, port: true }
+            open-webui: { status: restarting, port: false }
+          rc: 0
+          compose: [open-webui]
+        - name: all-bound
+          containers:
+            gpu-broker: { status: running, port: true }
+            open-webui: { status: running, port: true }
+          rc: 0
+          compose: []
+        - name: stopped-on-purpose
+          containers:
+            gpu-broker: { status: exited, port: false }
+            open-webui: { status: exited, port: false }
+          rc: 0
+          compose: []
+        - name: one-stopped-one-unbound
+          containers:
+            gpu-broker: { status: exited, port: false }
+            open-webui: { status: running, port: false }
+          rc: 0
+          compose: [open-webui]
+        - name: refused-start
+          containers:
+            gpu-broker: { status: exited, port: false, error: "cannot assign requested address" }
+            open-webui: { status: running, port: true }
+          rc: 0
+          compose: [gpu-broker]
+        - name: removed
+          containers:
+            open-webui: { status: running, port: true }
+          rc: 0
+          compose: []
+        - name: compose-fails
+          containers:
+            gpu-broker: { status: running, port: false }
+            open-webui: { status: running, port: true }
+          env: { FAKE_COMPOSE_FAIL: "1" }
+          rc: 1
+          compose: [gpu-broker]
+          stderr: "docker compose up --force-recreate failed for: gpu-broker"
+        - name: recreate-does-not-bind
+          containers:
+            gpu-broker: { status: running, port: false }
+            open-webui: { status: running, port: true }
+          env: { FAKE_COMPOSE_NOFIX: "1" }
+          rc: 1
+          compose: [gpu-broker]
+          stderr: "gpu-broker: recreated but 100.64.0.10:11434 is still not bound"
+        - name: wrong-address-bound
+          containers:
+            gpu-broker: { status: running, port: true, port_text: "0.0.0.0:11434" }
+            open-webui: { status: running, port: true }
+          rc: 0
+          compose: [gpu-broker]
+        # --heal (the playbook's step): the same decisions, no address wait.
+        - name: heal-recreates
+          args: [--heal]
+          containers:
+            gpu-broker: { status: running, port: false }
+            open-webui: { status: running, port: true }
+          rc: 0
+          compose: [gpu-broker]
+        - name: heal-healthy-host
+          args: [--heal]
+          containers:
+            gpu-broker: { status: running, port: true }
+            open-webui: { status: running, port: true }
+          rc: 0
+          compose: []
+        - name: heal-compose-fails
+          args: [--heal]
+          containers:
+            gpu-broker: { status: running, port: true }
+            open-webui: { status: running, port: false }
+          env: { FAKE_COMPOSE_FAIL: "1" }
+          rc: 1
+          compose: [open-webui]
+          stderr: "docker compose up --force-recreate failed for: open-webui"
+        - name: heal-dry-run
+          args: [--heal, --dry-run]
+          dry: true
+          containers:
+            gpu-broker: { status: running, port: false }
+            open-webui: { status: running, port: false }
+          rc: 0
+          compose: [gpu-broker, open-webui]
+        - name: heal-no-address
+          args: [--heal]
+          env: { FAKE_IP_HAS_ADDR: "0" }
+          containers:
+            gpu-broker: { status: running, port: false }
+          rc: 1
+          compose: []
+          no_docker: true
+          stderr: "is not on this host after 0s"
+        - name: bad-option
+          args: [--dry-run]
+          containers:
+            gpu-broker: { status: running, port: false }
+          rc: 2
+          compose: []
+          no_docker: true
+          stderr: "--dry-run needs --heal"
+      loop_control:
+        loop_var: ai_stack_case
+        label: "{{ ai_stack_case.name }}"
+      vars:
+        ai_stack_case_dir: "{{ ai_stack_test_tmp.path }}/case-{{ ai_stack_case.name }}"
+        ai_stack_case_lock: "{{ ai_stack_test_tmp.path }}/stack.lock"
+        ai_stack_case_ports: { gpu-broker: 11434, open-webui: 8080 }
+
+    # The lock: while something else holds it, the helper gives up after the bounded wait (ai_stack_lock_wait,
+    # 1 s here) and calls no Docker command; a dry run doesn't need the lock.
+    - name: Lock case | state directory
+      ansible.builtin.file:
+        path: "{{ ai_stack_test_tmp.path }}/lock-case"
+        state: directory
+        mode: "0755"
+
+    - name: Lock case | containers for the lock tests
+      ansible.builtin.copy:
+        dest: "{{ ai_stack_test_tmp.path }}/lock-case/{{ item.name }}"
+        content: "{{ item.content }}"
+        mode: "0644"
+      loop:
+        - { name: names, content: "gpu-broker\nopen-webui\n" }
+        - { name: gpu-broker.inspect, content: "running|\n" }
+        - { name: open-webui.inspect, content: "running|\n" }
+        - { name: open-webui.port, content: "100.64.0.10:8080\n" }
+        - { name: gpu-broker.port.fixed, content: "100.64.0.10:11434\n" }
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Lock case | helper while another process holds the lock
+      ansible.builtin.command:
+        argv: [flock, "{{ ai_stack_test_tmp.path }}/stack.lock", "{{ ai_stack_test_tmp.path }}/start.sh", --heal]
+      environment:
+        FAKE_IP_HAS_ADDR: "1"
+        FAKE_STATE_DIR: "{{ ai_stack_test_tmp.path }}/lock-case"
+        FAKE_LOCK: "{{ ai_stack_test_tmp.path }}/stack.lock"
+        FAKE_DOCKER_LOG: "{{ ai_stack_test_tmp.path }}/lock-case/docker-heal.log"
+      register: ai_stack_test_locked
+      changed_when: false
+      failed_when: ai_stack_test_locked.rc != 1
+
+    - name: Lock case | a dry run while the lock is held
+      ansible.builtin.command:
+        argv: [flock, "{{ ai_stack_test_tmp.path }}/stack.lock", "{{ ai_stack_test_tmp.path }}/start.sh", --heal, --dry-run]
+      environment:
+        FAKE_IP_HAS_ADDR: "1"
+        FAKE_STATE_DIR: "{{ ai_stack_test_tmp.path }}/lock-case"
+        FAKE_LOCK: "{{ ai_stack_test_tmp.path }}/stack.lock"
+        FAKE_DOCKER_LOG: "{{ ai_stack_test_tmp.path }}/lock-case/docker-dry.log"
+      register: ai_stack_test_locked_dry
+      changed_when: false
+
+    - name: Lock case | look for Docker calls from the timed-out run
+      ansible.builtin.stat:
+        path: "{{ ai_stack_test_tmp.path }}/lock-case/docker-heal.log"
+      register: ai_stack_test_locked_log
+
+    - name: Lock case | a held lock times out cleanly; a dry run doesn't wait for it
+      ansible.builtin.assert:
+        that:
+          - ai_stack_test_locked.stderr is search('could not take the stack lock .* within 1s')
+          - not ai_stack_test_locked_log.stat.exists
+          - ai_stack_test_locked_dry.rc == 0
+          - ai_stack_test_locked_dry.stdout is search(ai_stack_heal_changed_re, multiline=True)
+          - ai_stack_test_locked_dry.stdout is search('^WOULD-RECREATE gpu-broker$', multiline=True)
+        fail_msg: "{{ [ai_stack_test_locked.stderr, ai_stack_test_locked_dry.stdout] | to_json }}"
+        quiet: true
+
+    - name: Boot helper, address never appears
+      ansible.builtin.command:
+        argv: ["{{ ai_stack_test_tmp.path }}/start.sh"]
+      environment:
+        FAKE_IP_HAS_ADDR: "0"
+        FAKE_STATE_DIR: "{{ ai_stack_test_tmp.path }}"
+        FAKE_DOCKER_LOG: "{{ ai_stack_test_tmp.path }}/docker-absent.log"
+      register: ai_stack_test_start_noaddr
+      changed_when: false
+      failed_when: ai_stack_test_start_noaddr.rc != 1
+
+    - name: Look for a docker log from the no-address run
+      ansible.builtin.stat:
+        path: "{{ ai_stack_test_tmp.path }}/docker-absent.log"
+      register: ai_stack_test_absent_log
+
+    - name: Without the address the helper gives up after the bounded wait and never calls Docker
+      ansible.builtin.assert:
+        that:
+          - ai_stack_test_start_noaddr.stderr is search('not on this host after 2s')
+          - not ai_stack_test_absent_log.stat.exists
+        quiet: true
+
+    - name: Remove the scratch directory
+      ansible.builtin.file:
+        path: "{{ ai_stack_test_tmp.path }}"
+        state: absent

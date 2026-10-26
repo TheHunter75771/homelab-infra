@@ -1,0 +1,87 @@
+---
+# Role ai_stack (docs/CONTRACTS.md §12.10): the ai-box compose project `ai`.
+# Order: checks -> layout and the Open WebUI secret -> broker image (built only when its source changed) ->
+# broker config (validated by the image's own --check) -> compose file -> boot helper script ->
+# [stack lock] up --wait [unlock] -> heal missing tailnet bindings (the helper, under the same lock) ->
+# assert the bindings -> boot helper unit -> model.
+# A re-run reports changed=0: the build is gated on a source hash, the secret is created once, and
+# community.docker.docker_compose_v2 (state present) only acts on a real difference.
+
+- name: Preflight checks
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Stack directory (root only)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ homelab_root }}"
+    - "{{ homelab_stacks_dir }}"
+    - "{{ ai_stack_dir }}"
+    - "{{ ai_stack_config_dir }}"
+
+# Open WebUI signs its sessions with WEBUI_SECRET_KEY. Generated once on the host, never in the repo or
+# the vault, never printed: .env (root 0600, docs/CONTRACTS.md §2) holds only this key. O_EXCL plus
+# `creates` means an existing key is never replaced. Losing the file only signs everyone out.
+- name: Open WebUI secret key is generated once (.env, root only)
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import os, secrets, sys
+        fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.write(fd, ("WEBUI_SECRET_KEY=" + secrets.token_hex(32) + "\n").encode())
+        os.close(fd)
+      - "{{ ai_stack_dir }}/.env"
+    creates: "{{ ai_stack_dir }}/.env"
+  register: ai_stack_secret_created
+
+# Owner and mode only, never content. Skipped in a check run that would have created the file.
+- name: Open WebUI secret key file stays root 0600
+  ansible.builtin.file:
+    path: "{{ ai_stack_dir }}/.env"
+    state: file
+    owner: root
+    group: root
+    mode: "0600"
+  when: not (ansible_check_mode and ai_stack_secret_created is changed)
+
+- name: Broker image (gpu-broker)
+  ansible.builtin.import_tasks: broker_image.yml
+
+# Validated with the image itself (`python -m gpu_broker --check`): unknown keys, bad URLs or a malformed
+# alias fail here, before the running broker is touched. root inside a throwaway container with no
+# network, only so it can read Ansible's 0600 temp file.
+- name: Broker config
+  ansible.builtin.copy:
+    content: "{{ ai_stack_broker_config_content }}"
+    dest: "{{ ai_stack_broker_config_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: >-
+      docker run --rm --network none --user 0:0
+      --mount type=bind,source=%s,target=/etc/gpu-broker/config.json,readonly
+      {{ local_images.gpu_broker }} --check
+
+- name: Compose definition
+  ansible.builtin.template:
+    src: compose.yaml.j2
+    dest: "{{ ai_stack_dir }}/compose.yaml"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: docker compose --project-directory {{ ai_stack_dir }} -f %s config --quiet
+
+- name: Boot helper (script and unit; the playbook's heal step uses the same script)
+  ansible.builtin.import_tasks: boot_helper.yml
+
+- name: Stack up, bindings healed, under the stack lock
+  ansible.builtin.import_tasks: stack.yml
+
+- name: Models
+  ansible.builtin.import_tasks: models.yml

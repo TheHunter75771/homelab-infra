@@ -1,0 +1,45 @@
+---
+- name: Preflight | identifiers are set in host_vars
+  ansible.builtin.assert:
+    that:
+      - tailnet_ip | default('') is match('^([0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - gaming_pc_tailnet_ip | default('') is match('^([0-9]{1,3}\.){3}[0-9]{1,3}$')
+    fail_msg: tailnet_ip and gaming_pc_tailnet_ip (IPv4) must be set in inventory/host_vars for this host.
+    quiet: true
+
+# Model names go into the broker config and `ollama pull`. Unset is fine (no pull, no alias); set means a
+# real name.
+- name: Preflight | model variables are unset or plain model names
+  ansible.builtin.assert:
+    that:
+      - ai_cpu_model is undefined or (ai_cpu_model is string and ai_cpu_model is match(ai_stack_model_re))
+      - ai_gpu_model is undefined or (ai_gpu_model is string and ai_gpu_model is match(ai_stack_model_re))
+    fail_msg: ai_cpu_model and ai_gpu_model must each be unset or a model name such as qwen3:4b (no spaces or quotes).
+    quiet: true
+  vars:
+    ai_stack_model_re: '^[A-Za-z0-9][A-Za-z0-9._:/-]*$'
+
+- name: Preflight | the broker alias name is a plain name
+  ansible.builtin.assert:
+    that:
+      - ai_stack_alias_name is string
+      - ai_stack_alias_name is match('^[A-Za-z0-9][A-Za-z0-9._:-]*$')
+    fail_msg: ai_stack_alias_name must be a plain model-like name.
+    quiet: true
+
+# Both published ports bind tailnet_ip. Catch a host_vars typo (or tailscale down) before compose tries.
+- name: Preflight | IPv4 addresses on this host
+  ansible.builtin.command:
+    argv: [ip, -4, -o, addr, show]
+  register: ai_stack_host_ipv4
+  changed_when: false
+  check_mode: false
+
+- name: Preflight | the tailnet address is on this host (tailscale up)
+  ansible.builtin.assert:
+    that:
+      - ai_stack_host_ipv4.stdout is search('inet ' ~ (tailnet_ip | regex_escape) ~ '/')
+    fail_msg: >-
+      {{ tailnet_ip }} (tailnet_ip) is not on this host. Is tailscale up, and does host_vars tailnet_ip match
+      `tailscale ip -4`?
+    quiet: true

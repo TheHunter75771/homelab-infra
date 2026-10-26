@@ -1,0 +1,115 @@
+---
+# The stack's `compose up`, then the heal step, both under the stack lock that the boot helper also takes
+# (ai_stack_lock_file), so the playbook and the helper never recreate the same containers at once.
+#
+# Ansible tasks are separate processes, so the playbook can't keep an flock open itself. A transient unit
+# holds it instead: `flock --wait` on the lock file, then sleep. Its RuntimeDirectory (a "held" marker
+# inside) exists only while it runs, the play waits for that marker, and the unit is stopped right after
+# `compose up`, whatever happened (always). RuntimeMaxSec bounds how long a dead play can keep the lock.
+# Check mode changes nothing here (compose dry run, heal --dry-run), so it takes no lock.
+
+- name: Stack | compose up under the stack lock
+  block:
+    - name: Stack | name this run's lock holder
+      ansible.builtin.set_fact:
+        ai_stack_lock_unit: "homelab-ai-stack-lock-{{ 4294967295 | random }}"
+      when: not ansible_check_mode
+
+    - name: Stack | start the lock holder (waits for the lock in the background)
+      ansible.builtin.command:
+        argv:
+          - systemd-run
+          - --unit={{ ai_stack_lock_unit }}
+          - --description=Homelab ai stack lock, held by a playbook run
+          - --collect
+          - --quiet
+          - --property=RuntimeMaxSec={{ ai_stack_lock_hold_max }}
+          - --property=RuntimeDirectory={{ ai_stack_lock_unit }}
+          - flock
+          - --exclusive
+          - --wait
+          - "{{ ai_stack_lock_wait }}"
+          - "{{ ai_stack_lock_file }}"
+          - sh
+          - -c
+          - touch "$RUNTIME_DIRECTORY/held" && exec sleep infinity
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Stack | wait until the lock is held
+      ansible.builtin.wait_for:
+        path: /run/{{ ai_stack_lock_unit }}/held
+        timeout: "{{ ai_stack_lock_wait | int + 10 }}"
+        msg: >-
+          Could not take the stack lock {{ ai_stack_lock_file }} within {{ ai_stack_lock_wait }}s. The boot
+          helper (journalctl -u homelab-ai-stack-start) or another playbook run (systemctl list-units
+          'homelab-ai-stack-lock-*') holds it. Nothing in the stack was changed.
+      when: not ansible_check_mode
+
+    # The broker is never pulled (local image, built above); pull missing only fetches the two pinned
+    # images the first time. A broker config change recreates the broker here (its config-hash label).
+    - name: Stack is up and healthy
+      community.docker.docker_compose_v2:
+        project_src: "{{ ai_stack_dir }}"
+        state: present
+        pull: missing
+        build: never
+        remove_orphans: true
+        wait: true
+        wait_timeout: "{{ ai_stack_compose_wait_timeout }}"
+  always:
+    # rc 5: the unit is already gone (flock gave up, or RuntimeMaxSec ended it).
+    - name: Stack | release the stack lock
+      ansible.builtin.command:
+        argv: [systemctl, stop, "{{ ai_stack_lock_unit }}.service"]
+      register: ai_stack_lock_release
+      changed_when: false
+      failed_when: ai_stack_lock_release.rc not in [0, 5]
+      when:
+        - not ansible_check_mode
+        - ai_stack_lock_unit is defined
+
+# Docker 29 can run a container without its tailnet port binding (docs/CONTRACTS.md §12.9, finding 2); a
+# recreate is the only cure. Same check and recreate as at boot (the helper's --heal mode: no address wait,
+# its own flock on the same lock). changed only when it recreated something. In check mode it reports what
+# it would recreate (--dry-run); on a first check run the script isn't installed yet, so it's skipped.
+- name: Stack | recreate tailnet services that are up without their binding
+  ansible.builtin.command:
+    argv: "{{ [ai_stack_start_script, '--heal'] + (['--dry-run'] if ansible_check_mode else []) }}"
+  register: ai_stack_heal
+  check_mode: false
+  changed_when: ai_stack_heal.stdout is search(ai_stack_heal_changed_re, multiline=True)
+  when: not (ansible_check_mode and ai_stack_start_script_file is changed)
+
+- name: Stack | read the tailnet bindings
+  ansible.builtin.command:
+    argv: [docker, port, "{{ item.spec.split(':')[0] }}", "{{ item.spec.split(':')[2] }}/tcp"]
+  loop: "{{ ai_stack_tailnet_publishes }}"
+  loop_control:
+    label: "{{ item.spec }}"
+  register: ai_stack_bindings
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Stack | every tailnet-published service has its binding
+  ansible.builtin.assert:
+    that:
+      - item.stdout_lines is contains(tailnet_ip ~ ':' ~ item.item.spec.split(':')[1])
+    fail_msg: >-
+      {{ item.item.spec.split(':')[0] }} is not published on {{ tailnet_ip }}:{{ item.item.spec.split(':')[1] }}
+      (docker port: {{ item.stdout | default('') }}{{ item.stderr | default('') }}).
+    quiet: true
+  loop: "{{ ai_stack_bindings.results }}"
+  loop_control:
+    label: "{{ item.item.spec }}"
+  when: not ansible_check_mode
+
+# Started now as well: the stack is up and healed, so this run finds every binding in place; it only
+# leaves the unit active, so a later docker restart (PartOf) runs it again.
+- name: Stack | boot helper runs whenever docker.service starts
+  ansible.builtin.systemd_service:
+    name: homelab-ai-stack-start.service
+    enabled: true
+    state: started
+    daemon_reload: "{{ ai_stack_start_unit is changed }}"
