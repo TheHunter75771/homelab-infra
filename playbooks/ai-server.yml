@@ -1,0 +1,16 @@
+---
+# Converge the AI host (docs/CONTRACTS.md §12). Phase 3a: the host baseline only.
+# Later phases append gpu/ai roles here; the gaming-PC side lives in playbooks/gaming-pc.yml.
+- name: Converge AI servers
+  hosts: ai_servers
+  become: true
+  roles:
+    - role: base
+    - role: users
+    - role: ssh_hardening
+    - role: tailscale
+    - role: dns
+    # firewall before docker, same reason as site.yml (review L1)
+    - role: firewall
+    - role: docker
+    - role: ai_stack

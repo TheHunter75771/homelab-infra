@@ -5,9 +5,15 @@ all:
     media_servers:
       hosts:
         mediaserver:
+    ai_servers:
+      hosts:
+        ai-box:
     workstations:
       hosts:
         gaming-pc:
+    workstations_root:
+      hosts:
+        gaming-pc-root:
     edge:
       hosts:
         edge-vps:

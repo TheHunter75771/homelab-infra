@@ -1,0 +1,23 @@
+---
+# ai-box: the AI host (docs/CONTRACTS.md §12). Public-safe; identifiers live in host_vars/ai-box.yml.
+# Ubuntu 26.04 defaults to sudo-rs; Ansible's sudo plugin needs classic sudo (same as media_servers).
+ansible_become_exe: /usr/bin/sudo.ws
+# §12.2: no media or backup-pull accounts on this host.
+users_media_accounts: false
+ssh_hardening_allow_users:
+  - "{{ admin_user }}"
+  - "{{ automation_user }}"
+  - "{{ operator_user }}"
+# §12.2: declared inbound rules. Default deny everything else.
+firewall_allow_rules:
+  - { port: 22, proto: tcp, iface: tailscale0, comment: "ssh over tailnet" }
+  - { port: 22, proto: tcp, iface: "{{ lan_iface }}", from: "{{ gaming_pc_lan_ip }}", comment: "ssh gaming-pc lan" }
+  - { port: 22, proto: tcp, iface: "{{ lan_iface }}", from: "{{ mediaserver_lan_ip }}", comment: "ssh mediaserver recovery" }
+  # §12.10: documents intent. Docker-published ports are DNAT and bypass UFW INPUT; the tailnet bind + DOCKER-USER guard enforce.
+  - { port: 8080, proto: tcp, iface: tailscale0, comment: "open-webui over tailnet" }
+  - { port: 11434, proto: tcp, iface: tailscale0, from: "{{ mediaserver_tailnet_ip }}", comment: "gpu-broker from mediaserver" }
+  - { port: 11434, proto: tcp, iface: tailscale0, from: "{{ gaming_pc_tailnet_ip }}", comment: "gpu-broker from gaming-pc" }
+# §12.8: install Docker from Docker's apt repo (pinned in versions.yml -> apt_packages, held).
+docker_install: true
+operator_key_from: ["{{ gaming_pc_tailnet_ip }}", "{{ gaming_pc_lan_ip }}"]
+operator_key_from_extra: ["{{ gaming_pc_tailnet_ip6 }}"]
