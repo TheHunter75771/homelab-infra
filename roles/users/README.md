@@ -16,6 +16,15 @@ Accounts and groups (docs/CONTRACTS.md §7, module A).
   `restrict,from="{{ gaming_pc_lan_ip }}",command="/usr/bin/rrsync -ro {{ homelab_backups_dir }}"`.
   The role fails if rrsync is missing. Role `backups` owns `homelab_backups_dir` and its permissions.
 
+## Hosts without media (docs/CONTRACTS.md §12.2)
+Everything from the media groups through the backup pull key runs only when `users_media_accounts`
+is true (the default, so the media server is unchanged). With `users_media_accounts: false` (group
+`ai_servers`) the role only asserts `automation_user`, removes the stale sudoers drop-ins, and adds
+`admin_user` to `docker` **if that group already exists**. This role never creates the group there:
+Docker is installed later in the play, and role `docker`'s install path (`roles/docker/tasks/install.yml`)
+creates the group and adds `admin_user` in that same run. So the next run finds the membership in place
+and is `changed=0`; this role's docker step only matters if the membership is ever removed.
+
 Variables: `admin_user`, `automation_user`, `backup_pull_user`, `mediasvc_*`, `media_*`,
 `homelab_backups_dir` (group_vars); `gaming_pc_lan_ip`, `backup_pull_pubkey` (host_vars);
-`users_backup_pull_home`, `users_rrsync_path`, `users_stale_sudoers` (defaults).
+`users_media_accounts`, `users_backup_pull_home`, `users_rrsync_path`, `users_stale_sudoers` (defaults).

@@ -1,0 +1,73 @@
+---
+# Test for tasks/sudo_switch.yml (with tasks/sudo_decide.yml in front of it, as in the role), against a stub
+# update-alternatives first on PATH that only records its arguments. Each fixture case
+# (tests/fixtures/sudo-alternatives.yml) must call `--set sudo /usr/bin/sudo.ws` exactly when it needs a
+# switch, including auto mode already on the classic path. Run it normally and with --check (then nothing
+# may be called, and the would-be switch is reported as changed):
+#   .venv/bin/ansible-playbook -i localhost, -c local roles/base/tests/test_sudo_switch.yml </dev/null 2>&1 | cat
+#   .venv/bin/ansible-playbook --check -i localhost, -c local roles/base/tests/test_sudo_switch.yml </dev/null 2>&1 | cat
+- name: The sudo switch runs update-alternatives --set exactly when needed
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+  vars:
+    sudo_test_cases: "{{ lookup('ansible.builtin.file', 'fixtures/sudo-alternatives.yml') | from_yaml }}"
+  tasks:
+    - name: Make a scratch directory
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: .sudo-switch
+      register: sudo_test_tmp
+      check_mode: false
+
+    - name: Every case
+      vars:
+        sudo_test_env:
+          PATH: "{{ sudo_test_tmp.path }}/bin:{{ ansible_env.PATH | default(lookup('ansible.builtin.env', 'PATH')) }}"
+      block:
+        - name: Create the stub's directory
+          ansible.builtin.file:
+            path: "{{ sudo_test_tmp.path }}/bin"
+            state: directory
+            mode: "0755"
+          check_mode: false
+
+        - name: Install the stub update-alternatives (records its arguments, changes nothing)
+          ansible.builtin.copy:
+            dest: "{{ sudo_test_tmp.path }}/bin/update-alternatives"
+            mode: "0755"
+            content: |
+              #!/bin/sh
+              printf '%s\n' "$*" >> "{{ sudo_test_tmp.path }}/calls"
+          check_mode: false
+
+        # Never let the switch reach the real update-alternatives.
+        - name: Which update-alternatives the switch would run
+          ansible.builtin.command:
+            argv: [sh, -c, command -v update-alternatives]
+          environment: "{{ sudo_test_env }}"
+          register: sudo_test_which
+          changed_when: false
+          check_mode: false
+
+        - name: The stub comes first on PATH
+          ansible.builtin.assert:
+            that:
+              - sudo_test_which.stdout == sudo_test_tmp.path ~ '/bin/update-alternatives'
+            quiet: true
+
+        - name: Run each case
+          ansible.builtin.include_tasks: sudo_switch_case.yml
+          loop: "{{ sudo_test_cases }}"
+          loop_control:
+            loop_var: sudo_case
+            label: "{{ sudo_case.name }}"
+
+      always:
+        - name: Remove the scratch directory
+          ansible.builtin.file:
+            path: "{{ sudo_test_tmp.path }}"
+            state: absent
+          check_mode: false

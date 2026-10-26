@@ -1,6 +1,6 @@
 # {{ ansible_managed }}
 [Unit]
-Description=Homelab DOCKER-USER guard (Wi-Fi uplink and tailnet-range drops)
+Description=Homelab DOCKER-USER guard ({{ 'Wi-Fi uplink and tailnet-range drops' if wifi_iface is defined else 'tailnet-range and forwarded-DNS drops' }})
 Documentation=file://{{ firewall_docker_user_script }}
 After=docker.service
 PartOf=docker.service

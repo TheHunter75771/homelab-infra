@@ -1,16 +1,41 @@
 ---
-- name: Interface variables are set and the Wi-Fi uplink is a separate interface
+- name: Interface and Docker DNS variables are set
   ansible.builtin.assert:
     that:
       - lan_iface | default('') | length > 0
-      - wifi_iface | default('') | length > 0
-      - lan_cidr | default('') | length > 0
-      - gaming_pc_lan_ip | default('') | length > 0
       - docker_dns_ip | default('') | length > 0
+    fail_msg: Set lan_iface (host_vars) and docker_dns_ip (group_vars).
+    quiet: true
+
+# Only hosts with a Wi-Fi uplink define wifi_iface (the media server); everything about it is skipped elsewhere.
+- name: The Wi-Fi uplink is a separate interface
+  ansible.builtin.assert:
+    that:
+      - wifi_iface | length > 0
       - wifi_iface not in [lan_iface, firewall_tailnet_iface]
+    fail_msg: wifi_iface must be set to an interface other than lan_iface and tailscale0 (or left undefined).
+    quiet: true
+  when: wifi_iface is defined
+
+# The DOCKER-USER guard drops forwarded NEW connections to these addresses unless they arrive on tailscale0
+# (docs/CONTRACTS.md §12.10); they're written into a shell script, so they must be plain addresses.
+- name: The host's tailnet addresses, when set, are plain addresses
+  ansible.builtin.assert:
+    that:
+      - tailnet_ip is not defined or tailnet_ip is match('^([0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - tailnet_ip6 is not defined or tailnet_ip6 is match('^[0-9a-fA-F:]+$')
+    fail_msg: "tailnet_ip must be an IPv4 address and tailnet_ip6 an IPv6 address (no prefix): {{ tailnet_ip | default('') }} {{ tailnet_ip6 | default('') }}"
+    quiet: true
+
+# Rendering the list also validates every item (filter_plugins/homelab_ufw.py).
+- name: Declared allow rules keep SSH over the tailnet and stay off the Wi-Fi uplink
+  ansible.builtin.assert:
+    that:
+      - firewall_allow_rule_lines | select('match', firewall_lockout_guard_regex) | list | length > 0
+      - wifi_iface is not defined or wifi_iface not in (firewall_allow_rules | map(attribute='iface') | map('string') | map('trim') | list)
     fail_msg: >-
-      Set lan_iface, wifi_iface, lan_cidr, gaming_pc_lan_ip (host_vars) and docker_dns_ip (group_vars);
-      wifi_iface must differ from lan_iface and tailscale0.
+      firewall_allow_rules must include { port: 22, proto: tcp, iface: {{ firewall_tailnet_iface }}, comment: ... }
+      and no rule on wifi_iface. Declared: {{ firewall_allow_rule_lines }}
     quiet: true
 
 - name: UFW declared state

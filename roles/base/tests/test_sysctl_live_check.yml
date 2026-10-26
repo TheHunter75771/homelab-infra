@@ -1,0 +1,72 @@
+---
+# Check-mode half of test_sysctl_live.yml (docs/CONTRACTS.md §12.9): a drifted host is reported as a
+# would-be re-apply (changed), isn't re-applied and doesn't fail the run; sysrq=0 still fails.
+# The scratch trees are written with check_mode: false. Run it with --check:
+#   .venv/bin/ansible-playbook --check -i localhost, -c local roles/base/tests/test_sysctl_live_check.yml </dev/null 2>&1 | cat
+- name: In check mode, live drift is a would-be change, not a failure
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  vars:
+    lan_iface: lan0
+    live_test_good: "{{ base_sysctl_live_expected | combine({'kernel/sysrq': '176'}) }}"
+    live_test_apply: [cp, -R, "{{ live_test_tmp.path }}/applied/.", "{{ live_test_tmp.path }}/proc/"]
+  tasks:
+    - name: Running with --check
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode
+        fail_msg: Run this test with --check.
+        quiet: true
+
+    - name: Make a scratch directory
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: .sysctl-live-check
+      register: live_test_tmp
+      check_mode: false
+
+    - name: Every case
+      # Block vars beat the role defaults loaded through vars_files (play vars wouldn't).
+      vars:
+        base_sysctl_proc_dir: "{{ live_test_tmp.path }}/proc"
+      block:
+        - name: Set up the trees
+          ansible.builtin.include_tasks: live_setup.yml
+
+        - name: Run each case
+          ansible.builtin.include_tasks: live_case.yml
+          loop:
+            - name: converged (check mode)
+              fail: false
+              reapplied: false
+            - name: drifted (check mode) is reported, not applied, and passes
+              live: {net/ipv4/conf/all/log_martians: "0", kernel/kptr_restrict: "1"}
+              fail: false
+              reapplied: true
+              after: {net/ipv4/conf/all/log_martians: "0", kernel/kptr_restrict: "1"}
+            - name: sysrq is 0 (check mode) still fails
+              live: {kernel/sysrq: "0"}
+              fail: true
+              reapplied: false
+              msg_has: ["kernel.sysrq is 0"]
+              msg_lacks: ["UFW"]
+          loop_control:
+            loop_var: live_case
+            label: "{{ live_case.name }}"
+
+      always:
+        # Deletes recursively, so only what the guard accepts (it fails the cleanup otherwise).
+        - name: The scratch directory is safe to delete
+          ansible.builtin.include_tasks: live_guard.yml
+          when: live_test_tmp is defined
+
+        - name: Remove the scratch directory
+          ansible.builtin.file:
+            path: "{{ live_test_tmp.path }}"
+            state: absent
+          check_mode: false
+          when: live_test_tmp is defined

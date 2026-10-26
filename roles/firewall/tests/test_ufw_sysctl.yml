@@ -1,0 +1,90 @@
+---
+# Test for tasks/ufw_sysctl.yml against the setting lines UFW ships (tests/fixtures/ufw-sysctl.conf),
+# in a temp dir. No root and no live sysctl changes.
+#   .venv/bin/ansible-playbook -i localhost, -c local roles/firewall/tests/test_ufw_sysctl.yml </dev/null 2>&1 | cat
+- name: UFW's sysctl file gets martian logging on, changes nothing else, and a re-run is a no-op
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../vars/main.yml
+  tasks:
+    - name: Make a scratch directory
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: .ufw-sysctl
+      register: ufw_sysctl_test_tmp
+
+    - name: Edit a copy of the shipped file twice
+      vars:
+        firewall_ufw_sysctl_file: "{{ ufw_sysctl_test_tmp.path }}/sysctl.conf"
+        ufw_sysctl_test_shipped: "{{ lookup('ansible.builtin.file', 'fixtures/ufw-sysctl.conf') }}"
+      block:
+        - name: Start from the shipped settings
+          ansible.builtin.copy:
+            dest: "{{ firewall_ufw_sysctl_file }}"
+            content: "{{ ufw_sysctl_test_shipped }}\n"
+            mode: "0644"
+
+        - name: Run 1 of the role's task
+          ansible.builtin.include_tasks: ../tasks/ufw_sysctl.yml
+
+        - name: Keep run 1's result
+          ansible.builtin.set_fact:
+            ufw_sysctl_test_run1: "{{ firewall_ufw_sysctl }}"
+
+        - name: Run 2 of the role's task
+          ansible.builtin.include_tasks: ../tasks/ufw_sysctl.yml
+
+        - name: Read the edited file
+          ansible.builtin.slurp:
+            src: "{{ firewall_ufw_sysctl_file }}"
+          register: ufw_sysctl_test_after
+
+        - name: Only the two log_martians lines changed, to 1, in place; run 2 changed nothing
+          ansible.builtin.assert:
+            that:
+              - ufw_sysctl_test_run1.results | selectattr('changed') | list | length == 2
+              - firewall_ufw_sysctl.results | selectattr('changed') | list | length == 0
+              - ufw_sysctl_test_lines | length == ufw_sysctl_test_shipped_lines | length
+              - ufw_sysctl_test_lines | select('search', 'log_martians') | list
+                == ['net/ipv4/conf/all/log_martians=1', 'net/ipv4/conf/default/log_martians=1']
+              - ufw_sysctl_test_lines | reject('search', 'log_martians') | list
+                == ufw_sysctl_test_shipped_lines | reject('search', 'log_martians') | list
+              # The same position: each replaced line sits where the shipped one was.
+              - ufw_sysctl_test_lines.index('net/ipv4/conf/all/log_martians=1')
+                == ufw_sysctl_test_shipped_lines.index('net/ipv4/conf/all/log_martians=0')
+            fail_msg: "{{ ufw_sysctl_test_lines }}"
+            quiet: true
+          vars:
+            ufw_sysctl_test_lines: "{{ (ufw_sysctl_test_after.content | b64decode).splitlines() }}"
+            ufw_sysctl_test_shipped_lines: "{{ ufw_sysctl_test_shipped.splitlines() }}"
+
+        - name: Start from a file whose martian lines are commented out or spelled with dots
+          ansible.builtin.copy:
+            dest: "{{ firewall_ufw_sysctl_file }}"
+            content: |
+              #net/ipv4/conf/all/log_martians=0
+              net.ipv4.conf.default.log_martians = 0
+            mode: "0644"
+
+        - name: Run the role's task on it
+          ansible.builtin.include_tasks: ../tasks/ufw_sysctl.yml
+
+        - name: Read that file
+          ansible.builtin.slurp:
+            src: "{{ firewall_ufw_sysctl_file }}"
+          register: ufw_sysctl_test_variant
+
+        - name: Both lines were rewritten in place, none appended
+          ansible.builtin.assert:
+            that:
+              - (ufw_sysctl_test_variant.content | b64decode).splitlines()
+                == ['net/ipv4/conf/all/log_martians=1', 'net/ipv4/conf/default/log_martians=1']
+            fail_msg: "{{ (ufw_sysctl_test_variant.content | b64decode).splitlines() }}"
+            quiet: true
+      always:
+        - name: Remove the scratch directory
+          ansible.builtin.file:
+            path: "{{ ufw_sysctl_test_tmp.path }}"
+            state: absent

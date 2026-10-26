@@ -168,5 +168,34 @@ class FileOrder(unittest.TestCase):
         self.assertIn("kernel.kptr_restrict", problems[0])
 
 
+class LiveExpectedMatchesTheFile(unittest.TestCase):
+    """vars/main.yml's live values (tasks/sysctl_live.yml) must be exactly what the hardening file sets."""
+
+    def setUp(self):
+        with open(os.path.join(ROLES, "base", "vars", "main.yml"), encoding="utf-8") as handle:
+            self.role_vars = yaml.safe_load(handle)
+        self.file_settings = {}
+        for line in HARD.splitlines():
+            line = line.strip()
+            if not line or line.startswith(("#", ";")):
+                continue
+            key, value = (part.strip() for part in line.split("=", 1))
+            self.file_settings[key.replace(".", "/")] = value
+
+    def test_fixed_keys_and_values_match_the_template(self):
+        explicit = {k: v for k, v in self.file_settings.items() if "*" not in k}
+        self.assertEqual(self.role_vars["base_sysctl_live_expected_fixed"], explicit)
+
+    def test_the_lan_interface_entry_matches_the_glob(self):
+        globs = {k: v for k, v in self.file_settings.items() if "*" in k}
+        self.assertEqual(globs, {"net/ipv4/conf/*/send_redirects": "0"})
+        expression = self.role_vars["base_sysctl_live_expected"]
+        self.assertIn("'net/ipv4/conf/' ~ lan_iface ~ '/send_redirects': '0'", expression)
+
+    def test_sysrq_is_read_but_not_expected(self):
+        self.assertNotIn("kernel/sysrq", self.role_vars["base_sysctl_live_expected_fixed"])
+        self.assertIn("'kernel/sysrq'", self.role_vars["base_sysctl_live_keys"])
+
+
 if __name__ == "__main__":
     unittest.main()

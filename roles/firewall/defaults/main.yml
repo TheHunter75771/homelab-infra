@@ -1,0 +1,10 @@
+---
+# Declared inbound allow rules (docs/CONTRACTS.md §12.2), set per host group in group_vars:
+#   - { port: 22, proto: tcp, iface: tailscale0, comment: "ssh over tailnet" }
+#   - { port: 22, proto: tcp, iface: "{{ lan_iface }}", from: "{{ gaming_pc_lan_ip }}", comment: "ssh from workstation" }
+# port 1-65535; proto tcp or udp; iface one interface; from (optional) one address or network,
+# given as UFW stores it (a network address such as x.y.z.0/24: UFW rewrites host bits, and the role
+# then refuses to prune); comment plain text, which the role prefixes with "homelab: ".
+# The list must hold the SSH-over-tailnet rule (22/tcp on tailscale0, no from), and no rule may use
+# wifi_iface. Empty here on purpose: the role fails until the host's group declares its rules.
+firewall_allow_rules: []

@@ -1,0 +1,62 @@
+---
+# One case of tests/test_sudo_probe.yml. probe_case.admin / .auto: status (`passwd -S` field 2), probe
+# ([output, rc] of the NOPASSWD probe), allow (commands `sudo -l -U` allows as root).
+- name: Set the stubs' answers (case {{ probe_case.name }})
+  ansible.builtin.copy:
+    dest: "{{ probe_test_tmp.path }}/{{ item.0 }}-{{ item.1.user }}"
+    content: >-
+      {{- {'status': item.1.user ~ ' ' ~ item.1.spec.status ~ ' 2026-10-23 0 99999 7 -1\n',
+           'reply': (item.1.spec.probe | default(['', 1]))[0],
+           'rc': (item.1.spec.probe | default(['', 1]))[1] | string,
+           'allow': item.1.spec.allow | default([]) | map('regex_replace', '$', '\n') | join}[item.0] -}}
+    mode: "0644"
+  loop: >-
+    {{ ['status', 'reply', 'rc', 'allow']
+       | product([{'user': admin_user, 'spec': probe_case.admin}, {'user': automation_user, 'spec': probe_case.auto}]) | list }}
+  loop_control:
+    label: "{{ item.0 }}-{{ item.1.user }}"
+
+- name: Forget earlier calls (case {{ probe_case.name }})
+  ansible.builtin.file:
+    path: "{{ probe_test_tmp.path }}/calls"
+    state: absent
+
+- name: Run the probe (case {{ probe_case.name }})
+  block:
+    - name: The role's probe, with the stub passwd on PATH (case {{ probe_case.name }})
+      ansible.builtin.include_tasks:
+        file: ../tasks/sudo_probe.yml
+        apply:
+          environment: "{{ probe_test_env }}"
+
+    - name: Note a pass (case {{ probe_case.name }})
+      ansible.builtin.set_fact:
+        probe_case_passed: true
+  rescue:
+    - name: Note a failure (case {{ probe_case.name }})
+      ansible.builtin.set_fact:
+        probe_case_passed: false
+
+- name: Read the stub's calls (case {{ probe_case.name }})
+  ansible.builtin.slurp:
+    src: "{{ probe_test_tmp.path }}/calls"
+  register: probe_case_calls
+  failed_when: false
+
+# Each user gets the probe that its password state calls for: the NOPASSWD probe when locked (and always
+# for the automation user), else the two `sudo -l` checks.
+- name: Record the verdict (case {{ probe_case.name }})
+  ansible.builtin.set_fact:
+    probe_test_verdicts: >-
+      {{ probe_test_verdicts | default({}) | combine({probe_case.name:
+           probe_case_passed == (probe_case.expect == 'pass')
+           and (probe_case_calls.content | default('') | b64decode).splitlines() | sort == probe_case_expected_calls | sort}) }}
+  vars:
+    probe_case_nopasswd: "-- {{ base_sudo_alternative }} -n /usr/bin/id -u"
+    probe_case_admin_usable: "{{ probe_case.admin.status == 'P' }}"
+    probe_case_admin_calls: >-
+      {{ ['-n -l -U ' ~ admin_user ~ ' -u root /usr/bin/id', '-n -l -U ' ~ admin_user ~ ' -u root /bin/sh']
+         if probe_case_admin_usable else ['-u ' ~ admin_user ~ ' ' ~ probe_case_nopasswd] }}
+    # A malformed `passwd -S` stops the probe before classic sudo is asked anything.
+    probe_case_expected_calls: >-
+      {{ (probe_case_admin_calls + ['-u ' ~ automation_user ~ ' ' ~ probe_case_nopasswd]) if probe_case.calls | default(true) else [] }}

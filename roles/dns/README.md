@@ -17,8 +17,9 @@ systemd-resolved with encrypted-only DNS (docs/CONTRACTS.md §7, §9d; module A)
 - The hand-made `custom-dns.conf` is removed, so a rebuild reproduces the box from the repo.
 - DHCP- and RA-learned DNS servers are ignored on the LAN and Wi-Fi links:
   `/etc/systemd/network/10-netplan-<iface>.network.d/zz-homelab.conf` sets `UseDNS=no` under `[DHCPv4]`,
-  `[DHCPv6]` and `[IPv6AcceptRA]` for `lan_iface` and `wifi_iface` (`dns_ignore_link_dns`). These are
-  drop-ins for netplan's generated `.network` files; netplan isn't edited.
+  `[DHCPv6]` and `[IPv6AcceptRA]` for `lan_iface` and `wifi_iface` (`dns_ignore_link_dns`; `wifi_iface`
+  only on hosts that define it, e.g. not ai-box). These are drop-ins for netplan's generated `.network`
+  files; netplan isn't edited.
 - `/etc/resolv.conf` is a symlink to `../run/systemd/resolve/stub-resolv.conf`.
 
 ## Applying the link settings without bouncing the LAN
@@ -60,4 +61,4 @@ After the handlers run, the role checks:
 `meta: flush_handlers` runs here, so earlier roles' queued handlers run at this point too.
 
 Variables: `dns_upstreams`, `dns_fallback`, `dns_over_tls`, `dns_dnssec`, `dns_ignore_link_dns`,
-`dns_stale_dropins` (defaults); `docker_dns_ip` (group_vars); `lan_iface`, `wifi_iface` (host_vars).
+`dns_stale_dropins` (defaults); `docker_dns_ip` (group_vars); `lan_iface`, `wifi_iface` (host_vars; `wifi_iface` optional).
