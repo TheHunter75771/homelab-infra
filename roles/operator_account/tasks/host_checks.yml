@@ -1,0 +1,56 @@
+---
+# Host-time checks that the static validation can't do. Needs ansible_facts.getent_passwd (main.yml).
+
+# The role creates system accounts (UID < operator_account_uid_min). An entry that names an existing
+# person's account (UID >= that) would hand it sudo or replace its keys: refuse.
+- name: Note entries that name an existing regular account
+  ansible.builtin.set_fact:
+    operator_account_taken: >-
+      {%- set t = [] -%}
+      {%- for n in operator_accounts_resolved | map(attribute='name') if n in ansible_facts.getent_passwd -%}
+      {%-   if ansible_facts.getent_passwd[n][1] | int >= operator_account_uid_min -%}{%- set _ = t.append(n) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ t | join(',') }}
+
+- name: No entry takes over an existing regular account
+  ansible.builtin.assert:
+    that:
+      - operator_account_taken | length == 0
+    fail_msg: >-
+      operator_accounts names existing account(s) with UID >= {{ operator_account_uid_min }} (people, not created by
+      this role): {{ operator_account_taken }}. Rename the entry.
+    quiet: true
+
+- name: Find the polkit rule directories
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ operator_account_polkit_rule_dirs }}"
+  register: operator_account_polkit_dirs
+
+# Any group a polkit rule names ("unix-group:wheel" admin identities, or subject.isInGroup("wheel")) can
+# get admin through polkit,
+# which never goes through sudo's I/O log.
+- name: Read the groups polkit rules name
+  ansible.builtin.command:
+    argv: "{{ ['grep', '-rhoE', 'unix-group:[A-Za-z0-9_.-]+|isInGroup\\(\"[^\"]+\"\\)'] + dirs }}"
+  vars:
+    dirs: "{{ operator_account_polkit_dirs.results | selectattr('stat.exists') | map(attribute='item') | list }}"
+  register: operator_account_polkit_grep
+  changed_when: false
+  failed_when: operator_account_polkit_grep.rc not in [0, 1]
+  check_mode: false
+  when: operator_account_polkit_dirs.results | selectattr('stat.exists') | list | length > 0
+
+- name: Note the polkit admin groups
+  ansible.builtin.set_fact:
+    operator_account_polkit_groups: >-
+      {{ operator_account_polkit_grep.stdout_lines | default([])
+         | map('regex_replace', '^unix-group:', '') | map('regex_replace', '^isInGroup[(]"([^"]+)"[)]$', '\1')
+         | unique | sort }}
+
+- name: No entry asks for a polkit admin group
+  ansible.builtin.assert:
+    that:
+      - operator_accounts_resolved | map(attribute='groups') | flatten | intersect(operator_account_polkit_groups) | length == 0
+    fail_msg: "polkit rules grant admin to {{ operator_account_polkit_groups }}; an operator account may not join one."
+    quiet: true

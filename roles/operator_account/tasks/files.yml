@@ -1,0 +1,118 @@
+---
+# Per-account config files for one resolved account (operator_acct). Every path is prefixed with
+# operator_account_render_root ('' on a host); the offline test renders into a scratch dir with it.
+- name: "Sudo policy for {{ operator_acct.name }}"
+  vars:
+    sudoers_path: "{{ operator_account_render_root }}/etc/sudoers.d/{{ operator_acct.sudoers_name }}"
+  block:
+    - name: "I/O log root exists ({{ operator_acct.name }})"
+      ansible.builtin.file:
+        path: "{{ operator_account_render_root }}{{ operator_account_iolog_root }}"
+        state: directory
+        owner: "{{ omit if operator_account_render_root else 'root' }}"
+        group: "{{ omit if operator_account_render_root else 'root' }}"
+        mode: "0700"
+      when: operator_acct.sudo == 'full_logged'
+
+    - name: "I/O log directory is root-only ({{ operator_acct.name }})"
+      ansible.builtin.file:
+        path: "{{ operator_account_render_root }}{{ operator_acct.iolog_dir }}"
+        state: directory
+        owner: "{{ omit if operator_account_render_root else 'root' }}"
+        group: "{{ omit if operator_account_render_root else 'root' }}"
+        mode: "0700"
+      when: operator_acct.sudo == 'full_logged'
+
+    - name: "I/O logs age out ({{ operator_acct.name }})"
+      ansible.builtin.template:
+        src: "{{ operator_account_template_dir }}/operator-tmpfiles.conf.j2"
+        dest: "{{ operator_account_render_root }}/etc/tmpfiles.d/{{ operator_acct.tmpfiles_name }}"
+        owner: "{{ omit if operator_account_render_root else 'root' }}"
+        group: "{{ omit if operator_account_render_root else 'root' }}"
+        mode: "0644"
+      when: operator_acct.sudo == 'full_logged'
+
+    # Checked by classic visudo (sudo-rs's visudo rejects the I/O-log Defaults it doesn't implement).
+    - name: "Sudoers rule with I/O logging ({{ operator_acct.name }})"
+      ansible.builtin.template:
+        src: "{{ operator_account_template_dir }}/operator-sudoers.j2"
+        dest: "{{ sudoers_path }}"
+        owner: "{{ omit if operator_account_render_root else 'root' }}"
+        group: "{{ omit if operator_account_render_root else 'root' }}"
+        mode: "0440"
+        validate: "{{ operator_account_visudo }} -c -f %s"
+      when: operator_acct.sudo == 'full_logged'
+
+    # sudo: none means no rule at all. Logs already written stay (evidence), and so does their aging rule.
+    - name: "No sudoers rule ({{ operator_acct.name }})"
+      ansible.builtin.file:
+        path: "{{ sudoers_path }}"
+        state: absent
+      when: operator_acct.sudo == 'none'
+
+# Root-owned, so the account can't swap its own key without a (logged) sudo. sshd's StrictModes accepts
+# root-owned .ssh and key files. (The account still owns its home; see README, residual risks.)
+- name: "Authorized key ({{ operator_acct.name }})"
+  vars:
+    ssh_dir: "{{ operator_account_render_root }}{{ operator_acct.home }}/.ssh"
+  block:
+    - name: "SSH directory exists, root-owned ({{ operator_acct.name }})"
+      ansible.builtin.file:
+        path: "{{ ssh_dir }}"
+        state: directory
+        owner: "{{ omit if operator_account_render_root else 'root' }}"
+        group: "{{ omit if operator_account_render_root else 'root' }}"
+        mode: "0755"
+      when: operator_acct.ssh_login
+
+    # The whole file is rendered, so it holds exactly this one key (exclusive).
+    - name: "Authorized keys hold exactly the operator key, source-restricted ({{ operator_acct.name }})"
+      ansible.builtin.template:
+        src: "{{ operator_account_template_dir }}/operator-authorized_keys.j2"
+        dest: "{{ ssh_dir }}/authorized_keys"
+        owner: "{{ omit if operator_account_render_root else 'root' }}"
+        group: "{{ omit if operator_account_render_root else 'root' }}"
+        mode: "0644"
+      when: operator_acct.ssh_login
+
+    - name: "No authorized keys ({{ operator_acct.name }})"
+      ansible.builtin.file:
+        path: "{{ ssh_dir }}/authorized_keys"
+        state: absent
+      when: not operator_acct.ssh_login
+
+    # sshd reads authorized_keys2 by default too; never let a second key file exist.
+    - name: "No authorized_keys2 ({{ operator_acct.name }})"
+      ansible.builtin.file:
+        path: "{{ ssh_dir }}/authorized_keys2"
+        state: absent
+
+# loopback: refused except from 127.0.0.1/::1, key-only. deny: refused from everywhere. Gaming PC only.
+- name: "Operator sshd drop-in ({{ operator_acct.name }})"
+  ansible.builtin.template:
+    src: "{{ operator_account_template_dir }}/operator-sshd.conf.j2"
+    dest: "{{ operator_account_render_root }}{{ operator_account_sshd_dropin_dir }}/{{ operator_acct.sshd_dropin_name }}"
+    owner: "{{ omit if operator_account_render_root else 'root' }}"
+    group: "{{ omit if operator_account_render_root else 'root' }}"
+    mode: "0600"
+    validate: "{{ operator_account_sshd_validate }}"
+  register: operator_account_sshd_dropin
+  when: operator_acct.sshd_mode != 'none'
+  notify: Operator account sshd changed
+
+# Only drop-ins this run changed are rolled back if the in-context check fails (sshd_check.yml).
+- name: "Note a drop-in this run changed ({{ operator_acct.name }})"
+  ansible.builtin.set_fact:
+    operator_account_sshd_changed: "{{ operator_account_sshd_changed | default([]) + [operator_acct.name] }}"
+    # In check mode a changed drop-in isn't on disk yet, so the in-context check can't see it.
+    operator_account_sshd_pending: "{{ operator_account_sshd_pending | default([]) + ([operator_acct.name] if ansible_check_mode else []) }}"
+  when:
+    - operator_acct.sshd_mode != 'none'
+    - operator_account_sshd_dropin is changed
+
+- name: "No sshd drop-in ({{ operator_acct.name }})"
+  ansible.builtin.file:
+    path: "{{ operator_account_render_root }}{{ operator_account_sshd_dropin_dir }}/{{ operator_acct.sshd_dropin_name }}"
+    state: absent
+  when: operator_acct.sshd_mode == 'none'
+  notify: Operator account sshd changed

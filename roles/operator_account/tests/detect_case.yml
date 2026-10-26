@@ -1,0 +1,74 @@
+---
+# One sudo-detection case with fake binaries (detect_case: {name, files: [{path, out?, err?}], links: [{path, src}],
+# expect: {sudo, visudo, rs_by_path} | <substring of the error>}). Paths are relative to a per-case root d.
+# The fakes print the real banners: classic visudo prints its own name, as getprogname() does.
+- name: "Detection case {{ detect_case.name }}"
+  vars:
+    d: "{{ t }}/detect/{{ detect_case.name }}"
+  block:
+    - name: "Fake directories ({{ detect_case.name }})"
+      ansible.builtin.file:
+        path: "{{ d }}/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: [usr/bin, usr/sbin, usr/lib/cargo/bin, etc/alternatives]
+
+    - name: "Fake binaries ({{ detect_case.name }})"
+      ansible.builtin.copy:
+        dest: "{{ d }}/{{ item.path }}"
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          n=$(basename "$0")
+          {% if item.out is defined %}printf '%s\n' "{{ item.out }}"
+          {% endif %}{% if item.err is defined %}printf '%s\n' "{{ item.err }}" >&2
+          {% endif %}
+      loop: "{{ detect_case.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: "Fake symlinks ({{ detect_case.name }})"
+      ansible.builtin.file:
+        src: "{{ d }}/{{ item.src }}"
+        dest: "{{ d }}/{{ item.path }}"
+        state: link
+      loop: "{{ detect_case.links | default([]) }}"
+      loop_control:
+        label: "{{ item.path }} -> {{ item.src }}"
+
+    - name: "Point detection at the fakes ({{ detect_case.name }})"
+      ansible.builtin.set_fact:
+        operator_account_os_family: Fake
+        operator_account_sudo_candidates: ["{{ d }}/usr/bin/sudo.ws", "{{ d }}/usr/bin/sudo"]
+        operator_account_visudo_candidates: ["{{ d }}/usr/sbin/visudo.ws", "{{ d }}/usr/sbin/visudo"]
+        operator_account_sudo_rs_candidates: ["{{ d }}/usr/lib/cargo/bin/sudo", "{{ d }}/usr/bin/sudo-rs", "{{ d }}/usr/bin/sudo"]
+
+    - name: "Detect ({{ detect_case.name }})"
+      ansible.builtin.include_tasks: ../tasks/sudo_detect.yml
+
+    - name: "Detected the right binaries ({{ detect_case.name }})"
+      ansible.builtin.assert:
+        that:
+          - detect_case.expect is mapping
+          - operator_account_sudo_classic == d ~ '/' ~ detect_case.expect.sudo
+          - operator_account_visudo == d ~ '/' ~ detect_case.expect.visudo
+          - operator_account_sudo_rs == detect_case.expect.rs_by_path | map('regex_replace', '^', d ~ '/') | list
+        fail_msg: "{{ operator_account_sudo_classic }} / {{ operator_account_visudo }} / {{ operator_account_sudo_rs | to_json }}"
+        quiet: true
+
+    - name: "Record a pass ({{ detect_case.name }})"
+      ansible.builtin.set_fact:
+        detect_verdicts: "{{ detect_verdicts | default({}) | combine({detect_case.name: detect_case.expect is mapping}) }}"
+  rescue:
+    - name: "Record a failure ({{ detect_case.name }})"
+      ansible.builtin.set_fact:
+        detect_verdicts: >-
+          {{ detect_verdicts | default({}) | combine({detect_case.name: detect_case.expect is string
+             and detect_case.expect in (ansible_failed_result.msg | default(''))}) }}
+  always:
+    - name: "Back to the real host's detection inputs ({{ detect_case.name }})"
+      ansible.builtin.set_fact:
+        operator_account_os_family: "{{ ansible_facts.os_family }}"
+        operator_account_sudo_candidates: [/usr/bin/sudo.ws, /usr/bin/sudo]
+        operator_account_visudo_candidates: [/usr/sbin/visudo.ws, /usr/sbin/visudo]
+        operator_account_sudo_rs_candidates: [/usr/lib/cargo/bin/sudo, /usr/bin/sudo-rs, /usr/bin/sudo]

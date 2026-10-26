@@ -1,0 +1,17 @@
+# {{ ansible_managed }}
+# Operator account {{ operator_acct.name }} (docs/CONTRACTS.md §12.13).
+# Only Match blocks, so nothing outside this account changes; a Match block ends at the end of this file.
+{% if operator_acct.sshd_mode == 'loopback' %}
+# Loopback only, key only. The positive "*" is required: a list of only negations never matches.
+Match User {{ operator_acct.name }} Address *,{{ operator_account_loopback | map('regex_replace', '^', '!') | join(',') }}
+    DenyUsers {{ operator_acct.name }}
+Match User {{ operator_acct.name }}
+    PubkeyAuthentication yes
+    AuthenticationMethods publickey
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+{% else %}
+# No SSH login at all, from anywhere.
+Match User {{ operator_acct.name }}
+    DenyUsers {{ operator_acct.name }}
+{% endif %}

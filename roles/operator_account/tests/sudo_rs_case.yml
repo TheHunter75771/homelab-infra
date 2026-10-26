@@ -1,0 +1,57 @@
+---
+# One guarded-set case (rs_case: {name, status, setuid, expect: pass | <substring of the error>}).
+# status: what the fake dpkg-query -W prints ("" = package unknown).
+- name: "Guarded-set case {{ rs_case.name }}"
+  environment:
+    PATH: "{{ t }}/bin:{{ ansible_env.PATH }}"
+  vars:
+    present: "{{ rs_case.status not in ['', 'not-installed', 'config-files'] }}"
+    bin: "{{ t }}/pkg/usr/lib/cargo/bin"
+  block:
+    - name: "Package state ({{ rs_case.name }})"
+      ansible.builtin.copy:
+        dest: "{{ t }}/pkg-installed"
+        content: "{{ rs_case.status }}"
+        mode: "0644"
+      when: rs_case.status | length > 0
+
+    - name: "No package ({{ rs_case.name }})"
+      ansible.builtin.file:
+        path: "{{ t }}/pkg-installed"
+        state: absent
+      when: rs_case.status | length == 0
+
+    - name: "Setuid bits ({{ rs_case.name }})"
+      ansible.builtin.file:
+        path: "{{ bin }}/{{ item }}"
+        mode: "{{ '04755' if rs_case.setuid else '0755' }}"
+      loop: [sudo, sudo.distrib, su]
+
+    - name: "Pretend to be Debian ({{ rs_case.name }})"
+      ansible.builtin.set_fact:
+        operator_account_os_family: Debian
+
+    - name: "Detect ({{ rs_case.name }})"
+      ansible.builtin.include_tasks: ../tasks/sudo_detect.yml
+
+    - name: "Guarded set and the sudo-rs sudo subset ({{ rs_case.name }})"
+      ansible.builtin.assert:
+        that:
+          - operator_account_sudo_rs == ([bin ~ '/su', bin ~ '/sudo', bin ~ '/sudo.distrib'] if present | bool else [])
+          - operator_account_sudo_rs_sudo == ([bin ~ '/sudo', bin ~ '/sudo.distrib'] if present | bool else [])
+        fail_msg: "{{ operator_account_sudo_rs | to_json }} / {{ operator_account_sudo_rs_sudo | to_json }}"
+        quiet: true
+
+    - name: "Record a pass ({{ rs_case.name }})"
+      ansible.builtin.set_fact:
+        rs_verdicts: "{{ rs_verdicts | default({}) | combine({rs_case.name: rs_case.expect == 'pass'}) }}"
+  rescue:
+    - name: "Record a failure ({{ rs_case.name }})"
+      ansible.builtin.set_fact:
+        rs_verdicts: >-
+          {{ rs_verdicts | default({}) | combine({rs_case.name: rs_case.expect != 'pass'
+             and rs_case.expect in (ansible_failed_result.msg | default(''))}) }}
+  always:
+    - name: "Back to this host's OS family ({{ rs_case.name }})"
+      ansible.builtin.set_fact:
+        operator_account_os_family: "{{ ansible_facts.os_family }}"

@@ -1,0 +1,52 @@
+---
+# Execute checks, as the account itself, by really executing (never `test -x`/`test -r`: uutils' test on
+# Ubuntu 26.04 checks the primary group only, so it calls a file executable that the kernel refuses).
+# In:  operator_account_exec_deny   [[account, file]]  the exec must be refused by the kernel
+#      operator_account_exec_allow  [[account, file]]  must run and print classic sudo's banner
+#      operator_account_runas_prefix argv prefix, '%u' = account (runuser on a host; the offline test uses env)
+# Running a sudo-rs binary with --version only prints its version, so a failed block is harmless and loud.
+- name: Try to execute the blocked files as the account
+  ansible.builtin.command:
+    argv: "{{ (operator_account_runas_prefix | map('replace', '%u', item.0) | list) + [item.1, '--version'] }}"
+  loop: "{{ operator_account_exec_deny }}"
+  loop_control:
+    label: "{{ item.0 }} -> {{ item.1 }}"
+  register: operator_account_exec_deny_run
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: The kernel refuses the blocked files
+  ansible.builtin.assert:
+    that:
+      - item.rc != 0
+      - item.rc == 126 or 'Permission denied' in (item.stderr | default(''))
+    fail_msg: >-
+      {{ item.item.0 }} CAN execute {{ item.item.1 }} (rc {{ item.rc }}): {{ item.stdout | default('') }} {{ item.stderr | default('') }}.
+      Its root through it would not be I/O-logged.
+    quiet: true
+  loop: "{{ operator_account_exec_deny_run.results }}"
+  loop_control:
+    label: "{{ item.item.0 }} -> {{ item.item.1 }}"
+
+- name: Execute the allowed files as the account
+  ansible.builtin.command:
+    argv: "{{ (operator_account_runas_prefix | map('replace', '%u', item.0) | list) + [item.1, '--version'] }}"
+  loop: "{{ operator_account_exec_allow }}"
+  loop_control:
+    label: "{{ item.0 }} -> {{ item.1 }}"
+  register: operator_account_exec_allow_run
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: The allowed files run and are classic sudo
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+      - item.stdout is match(operator_account_sudo_classic_re)
+    fail_msg: "{{ item.item.0 }} can't run classic sudo {{ item.item.1 }} (rc {{ item.rc }}): {{ item.stdout | default('') }} {{ item.stderr | default('') }}"
+    quiet: true
+  loop: "{{ operator_account_exec_allow_run.results }}"
+  loop_control:
+    label: "{{ item.item.0 }} -> {{ item.item.1 }}"
