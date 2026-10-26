@@ -1,0 +1,32 @@
+---
+# Helper for test_render.yml: run ../tasks/<case.tasks> (default validate.yml) with the case's
+# inputs (defaults: a valid set). case.error '' = must pass; otherwise it must fail with a message
+# containing case.error.
+- name: Run the checks
+  block:
+    - name: Run {{ case.tasks | default('validate.yml') }}
+      ansible.builtin.include_tasks: "../tasks/{{ case.tasks | default('validate.yml') }}"
+      vars:
+        ollama_backend: "{{ case.backend | default('vulkan') }}"
+        ollama_rocm_installed_packages: "{{ case.packages | default(render_test_packages) }}"
+        ollama_rocm_extra_env: "{{ case.extra_env | default({}) }}"
+        ollama_rocm_pull_timeout: "{{ case.timeout | default(7200) }}"
+        ollama_rocm_pull_kill_after: "{{ case.kill_after | default(30) }}"
+        ai_gpu_model: "{{ case.model | default(none) }}"
+        ollama_rocm_lib: "{{ case.lib | default(t ~ '/no-lib') }}"
+
+    - name: Passed
+      ansible.builtin.set_fact:
+        validate_case_msg: ""
+  rescue:
+    - name: Keep the failure message
+      ansible.builtin.set_fact:
+        validate_case_msg: "{{ ansible_failed_result.results | default([ansible_failed_result])
+                                  | map(attribute='msg', default='') | join(' ') }}"
+
+- name: The outcome matches
+  ansible.builtin.assert:
+    that:
+      - (case.error == '' and validate_case_msg == '') or (case.error != '' and case.error in validate_case_msg)
+    fail_msg: "expected {{ case.error | to_json }}, got {{ validate_case_msg | to_json }}"
+    quiet: true

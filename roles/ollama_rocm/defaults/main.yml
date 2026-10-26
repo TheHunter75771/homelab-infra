@@ -1,0 +1,34 @@
+---
+# Role ollama_rocm (docs/CONTRACTS.md §12.10): native Ollama (ROCm) on the gaming PC, listening on
+# its tailnet IPv4 only, reachable (firewalld policy) only from ai-box's tailnet addresses.
+# Host vars (inventory/host_vars/<gaming PC>.yml, git-ignored): gaming_pc_tailnet_ip,
+# ai_box_tailnet_ip, ai_box_tailnet_ip6. Version + sha256: versions.yml -> ollama_release.
+# ai_gpu_model (Noah's choice) has NO default: unset means nothing is pulled.
+
+# Install layout: <prefix>/bin/ollama and <prefix>/lib/ollama (what the upstream installer uses).
+ollama_rocm_prefix: /usr/local
+ollama_rocm_download_base: https://github.com/ollama/ollama/releases/download
+# Tarballs land here (sha256-verified) and are deleted again after a successful install.
+ollama_rocm_cache_dir: /var/cache/homelab-ollama
+# Owner of the directories this role creates (the tests run unprivileged and override it).
+ollama_rocm_owner: root
+
+ollama_rocm_home: /var/lib/ollama
+ollama_rocm_models_dir: "{{ ollama_rocm_home }}/models"
+ollama_rocm_port: 11434
+# gpu-gate's port (role gpu_gate). Restricted by this role's firewalld rules too.
+ollama_rocm_gate_port: 11500
+ollama_rocm_keep_alive: 5m
+ollama_rocm_max_loaded_models: 1
+# GPU backend (docs/CONTRACTS.md §12.9, "§12.7 risk CONFIRMED live"): vulkan | rocm. Noah chose vulkan:
+# ROCm compute runs on /dev/kfd user queues, which DRM fdinfo never accounts, so gpu-gate's
+# ollama_share stayed 0; under Vulkan (Mesa RADV) drm-engine-compute advances. rocm is ~9% faster.
+ollama_backend: vulkan
+# Extra Environment= lines for ollama.service, e.g. {HSA_OVERRIDE_GFX_VERSION: "11.0.2"}. Empty by default.
+# Merged over the backend's own variables (a key here wins).
+ollama_rocm_extra_env: {}
+# Upper bound for one `ollama pull` of ai_gpu_model (seconds). A pull that runs longer is killed and
+# fails the run; the partial download is resumed by the next run.
+ollama_rocm_pull_timeout: 7200
+# Grace after the TERM at the limit before the client is KILLed (seconds).
+ollama_rocm_pull_kill_after: 30

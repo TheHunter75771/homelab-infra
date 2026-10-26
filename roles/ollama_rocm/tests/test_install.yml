@@ -1,0 +1,229 @@
+---
+# Offline test of tasks/install.yml: fixture tarballs (same member layout as the real release:
+# bin/ollama, lib/ollama/...) served from a file:// URL, installed into a scratch prefix. No root,
+# no network, nothing outside the scratch dir. Covers: migration from a plain lib/ollama directory,
+# the member restriction, the CUDA prune, the staged tree + symlink layout, a no-op re-run, repair of
+# an edited binary, an upgrade, removal of a leftover staging tree, and a bad checksum.
+#   .venv/bin/ansible-playbook -i localhost, -c local roles/ollama_rocm/tests/test_install.yml </dev/null 2>&1 | cat
+- name: Pinned install is checksum-verified, member-restricted, staged, swapped and marker-guarded
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  handlers:
+    - name: Restart ollama
+      ansible.builtin.debug:
+        msg: restart requested
+  tasks:
+    - name: Make a scratch directory
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: .ollama-install
+      register: install_test_tmp
+
+    - name: Run the cases
+      vars:
+        t: "{{ install_test_tmp.path }}"
+        install_test_assets: [ollama-linux-amd64.tar.zst, ollama-linux-amd64-rocm.tar.zst]
+        # What every good install leaves (the live tree's name shown as <tree>).
+        install_test_expected_dirs: [bin, lib, lib/<tree>, lib/<tree>/bin, lib/<tree>/lib, lib/<tree>/lib/ollama,
+                                     lib/<tree>/lib/ollama/rocm]
+      block:
+        - name: Point the role at the scratch dir
+          ansible.builtin.set_fact:
+            ollama_rocm_prefix: "{{ t }}/prefix"
+            ollama_rocm_tree_parent: "{{ t }}/prefix/lib"
+            ollama_rocm_cache_dir: "{{ t }}/cache"
+            ollama_rocm_download_base: "file://{{ t }}/dl"
+            ollama_rocm_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+
+        # The base tarball also carries share/ and CUDA backends, the ROCm one etc/: none may land.
+        - name: Build fixture releases v1, v2 (another library) and v3
+          ansible.builtin.shell:
+            cmd: |
+              set -eu
+              mk() {  # mk <version> <libname>
+                src="{{ t }}/src-$1"; out="{{ t }}/dl/$1"
+                mkdir -p "$src/base/bin" "$src/base/lib/ollama/cuda_v12" "$src/base/lib/ollama/cuda_v13" \
+                         "$src/base/share" "$src/rocm/lib/ollama/rocm" "$src/rocm/etc" "$out"
+                printf '#!/bin/sh\necho %s\n' "$1" > "$src/base/bin/ollama"
+                chmod 0755 "$src/base/bin/ollama"
+                echo base > "$src/base/lib/ollama/$2"
+                echo cuda > "$src/base/lib/ollama/cuda_v12/libggml-cuda.so"
+                echo cuda > "$src/base/lib/ollama/cuda_v13/libggml-cuda.so"
+                echo stray > "$src/base/share/stray"
+                echo rocm > "$src/rocm/lib/ollama/rocm/libggml-hip.so"
+                echo stray > "$src/rocm/etc/stray"
+                tar -C "$src/base" --zstd -cf "$out/ollama-linux-amd64.tar.zst" bin lib share
+                tar -C "$src/rocm" --zstd -cf "$out/ollama-linux-amd64-rocm.tar.zst" lib etc
+              }
+              mk v1 libggml-old.so
+              mk v2 libggml-new.so
+              mk v3 libggml-v3.so
+              # A plain install as the upstream installer leaves it.
+              mkdir -p "{{ t }}/prefix/bin" "{{ t }}/prefix/lib/ollama"
+              printf '#!/bin/sh\necho upstream\n' > "{{ t }}/prefix/bin/ollama"
+              chmod 0755 "{{ t }}/prefix/bin/ollama"
+              echo old > "{{ t }}/prefix/lib/ollama/libggml-upstream.so"
+          changed_when: true
+
+        - name: Hash the fixtures
+          ansible.builtin.stat:
+            path: "{{ t }}/dl/{{ item[0] }}/{{ item[1] }}"
+            checksum_algorithm: sha256
+          loop: "{{ ['v1', 'v2'] | product(install_test_assets) | list }}"
+          register: install_test_sums
+
+        # --- v1 over the plain upstream layout
+        - name: Pin v1
+          ansible.builtin.set_fact:
+            ollama_release:
+              version: v1
+              assets: "{{ dict(install_test_assets | zip(install_test_sums.results[0:2] | map(attribute='stat.checksum'))) }}"
+
+        - name: Install v1
+          ansible.builtin.include_tasks: ../tasks/install.yml
+
+        - name: Inspect v1
+          ansible.builtin.include_tasks: inspect.yml
+
+        - name: Install of v1 staged one tree (no CUDA, nothing stray), linked it and copied the binary
+          ansible.builtin.assert:
+            that:
+              - ollama_rocm_install_needed | bool
+              - install_test_marker == 'v1'
+              - install_test_bin_out == 'v1'
+              - install_test_tree_name is match('^\.ollama-v1-')
+              - install_test_link == install_test_tree_name ~ '/lib/ollama'
+              - install_test_tree == ['bin/ollama', 'lib/<tree>/bin/ollama', 'lib/<tree>/lib/ollama/.homelab-release',
+                                      'lib/<tree>/lib/ollama/libggml-old.so', 'lib/<tree>/lib/ollama/rocm/libggml-hip.so',
+                                      'lib/ollama']
+              - install_test_dirs == install_test_expected_dirs
+              - install_test_cache == []
+            fail_msg: "{{ install_test_tree }} / {{ install_test_dirs }} / link {{ install_test_link }} / cache {{ install_test_cache }}"
+            quiet: true
+
+        # --- v1 again: nothing to do
+        - name: Re-run v1
+          ansible.builtin.include_tasks: ../tasks/install.yml
+
+        - name: The re-run decided there is nothing to install
+          ansible.builtin.assert:
+            that:
+              - not (ollama_rocm_install_needed | bool)
+            quiet: true
+
+        # --- An edited binary is detected and replaced; the old tree is removed
+        - name: Edit the installed binary
+          ansible.builtin.copy:
+            content: "#!/bin/sh\necho tampered\n"
+            dest: "{{ ollama_rocm_bin }}"
+            mode: "0755"
+
+        - name: Repair v1
+          ansible.builtin.include_tasks: ../tasks/install.yml
+
+        - name: Inspect the repair
+          ansible.builtin.include_tasks: inspect.yml
+
+        - name: The repair reinstalled v1 into a single new tree
+          ansible.builtin.assert:
+            that:
+              - ollama_rocm_install_needed | bool
+              - install_test_bin_out == 'v1'
+              - install_test_tree | select('search', 'libggml-old.so') | list | length == 1
+              - install_test_dirs == install_test_expected_dirs
+            fail_msg: "{{ install_test_tree }} / {{ install_test_dirs }}"
+            quiet: true
+
+        # --- v2: the upgrade swaps both and leaves no v1 tree
+        - name: Pin v2
+          ansible.builtin.set_fact:
+            ollama_release:
+              version: v2
+              assets: "{{ dict(install_test_assets | zip(install_test_sums.results[2:4] | map(attribute='stat.checksum'))) }}"
+
+        - name: Install v2
+          ansible.builtin.include_tasks: ../tasks/install.yml
+
+        - name: Inspect v2
+          ansible.builtin.include_tasks: inspect.yml
+
+        - name: Upgrade to v2 replaced v1 completely
+          ansible.builtin.assert:
+            that:
+              - ollama_rocm_install_needed | bool
+              - install_test_marker == 'v2'
+              - install_test_bin_out == 'v2'
+              - install_test_tree_name is match('^\.ollama-v2-')
+              - install_test_tree == ['bin/ollama', 'lib/<tree>/bin/ollama', 'lib/<tree>/lib/ollama/.homelab-release',
+                                      'lib/<tree>/lib/ollama/libggml-new.so', 'lib/<tree>/lib/ollama/rocm/libggml-hip.so',
+                                      'lib/ollama']
+              - install_test_dirs == install_test_expected_dirs
+            fail_msg: "{{ install_test_tree }} / {{ install_test_dirs }}"
+            quiet: true
+
+        # --- A staging tree left by an interrupted run is removed by the next (no-op) run
+        - name: Leave an interrupted staging tree behind
+          ansible.builtin.file:
+            path: "{{ ollama_rocm_tree_parent }}/.ollama-v2-interrupted/lib/ollama"
+            state: directory
+            mode: "0755"
+
+        - name: Re-run v2
+          ansible.builtin.include_tasks: ../tasks/install.yml
+
+        - name: Inspect the re-run
+          ansible.builtin.include_tasks: inspect.yml
+
+        - name: The re-run installed nothing and removed the leftover
+          ansible.builtin.assert:
+            that:
+              - not (ollama_rocm_install_needed | bool)
+              - install_test_dirs == install_test_expected_dirs
+            fail_msg: "{{ install_test_dirs }}"
+            quiet: true
+
+        # --- v3 pinned with a wrong sha256: the download fails before anything is touched
+        - name: Pin v3 with a wrong checksum
+          ansible.builtin.set_fact:
+            ollama_release:
+              version: v3
+              assets: "{{ dict(install_test_assets | zip(['0' * 64, '0' * 64])) }}"
+
+        - name: Try to install v3
+          block:
+            - name: Install v3
+              ansible.builtin.include_tasks: ../tasks/install.yml
+
+            - name: Not reached
+              ansible.builtin.set_fact:
+                install_test_v3_failed: false
+          rescue:
+            - name: Note the failure
+              ansible.builtin.set_fact:
+                install_test_v3_failed: true
+                install_test_v3_msg: "{{ ansible_failed_result.results | default([ansible_failed_result])
+                                        | map(attribute='msg', default='') | join(' ') }}"
+
+        - name: Inspect after v3
+          ansible.builtin.include_tasks: inspect.yml
+
+        - name: The bad checksum failed the run and left v2 in place
+          ansible.builtin.assert:
+            that:
+              - install_test_v3_failed
+              - install_test_v3_msg is search('checksum')
+              - install_test_marker == 'v2'
+              - install_test_bin_out == 'v2'
+              - install_test_tree_name is match('^\.ollama-v2-')
+              - install_test_dirs == install_test_expected_dirs
+            fail_msg: "{{ install_test_v3_msg | default('') }} / {{ install_test_tree }} / {{ install_test_dirs }}"
+            quiet: true
+      always:
+        - name: Remove the scratch directory
+          ansible.builtin.file:
+            path: "{{ install_test_tmp.path }}"
+            state: absent

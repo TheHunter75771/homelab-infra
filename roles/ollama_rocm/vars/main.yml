@@ -1,0 +1,127 @@
+---
+# The two release assets, in install order, and the only archive members each may write.
+# Members are listed explicitly so nothing else in a tarball can land in the install tree.
+ollama_rocm_assets:
+  - name: ollama-linux-amd64.tar.zst
+    members:
+      - bin/ollama
+      - lib/ollama
+  - name: ollama-linux-amd64-rocm.tar.zst
+    members:
+      - lib/ollama
+# Backends that are never used on this AMD GPU; removed from the staged tree before the swap.
+ollama_rocm_prune_backends:
+  - cuda_*
+
+# Layout (see README "Install"):
+#   <prefix>/bin/ollama            real file (bin_t), replaced by an atomic rename
+#   <prefix>/lib/ollama            symlink -> .ollama-<version>-<random>/lib/ollama, replaced atomically
+#   <prefix>/lib/.ollama-<v>-<r>/  one staged release tree (lib_t): bin/ollama (the reference copy),
+#                                  lib/ollama/ (backends + .homelab-release marker)
+ollama_rocm_bin: "{{ ollama_rocm_prefix }}/bin/ollama"
+ollama_rocm_lib: "{{ ollama_rocm_prefix }}/lib/ollama"
+ollama_rocm_tree_parent: "{{ ollama_rocm_prefix }}/lib"
+ollama_rocm_tree_prefix: .ollama-
+# Records the installed release, inside the tree the symlink points to.
+ollama_rocm_marker: "{{ ollama_rocm_lib }}/.homelab-release"
+ollama_rocm_unit: /etc/systemd/system/ollama.service
+
+# Environment= per backend, rendered into the unit before ollama_rocm_extra_env. Vulkan: the tested
+# set from §12.9 (the Vulkan backend ships in lib/ollama/vulkan; hiding the HIP/ROCr devices keeps the
+# ROCm backend from claiming the GPU). rocm: nothing extra.
+ollama_rocm_backends:
+  vulkan:
+    env:
+      OLLAMA_VULKAN: "1"
+      HIP_VISIBLE_DEVICES: "-1"
+      ROCR_VISIBLE_DEVICES: "-1"
+    # x86_64 packages that must be installed (asserted from package_facts, never installed here).
+    packages:
+      - mesa-vulkan-drivers
+      - vulkan-loader
+    # Checked after the install (tasks/backend_installed.yml): without it Ollama falls back to the CPU.
+    library: vulkan/libggml-vulkan.so
+  rocm:
+    env: {}
+    packages: []
+    library: ""
+ollama_rocm_env: "{{ ollama_rocm_backends[ollama_backend].env | combine(ollama_rocm_extra_env) }}"
+# Input checks (tasks/validate.yml). Anchored with \Z, not $: `$` also matches before a trailing
+# newline, so "FOO\n" or "30\n" would pass. Kept here, YAML single-quoted, so no Jinja or YAML
+# unescaping touches them.
+ollama_rocm_env_key_re: '^[A-Za-z_][A-Za-z0-9_]*\Z'
+# Anything that could change how systemd parses an Environment= line: whitespace, quotes, backslash,
+# % (specifiers) and every control character (NUL ends the line for systemd: it injected a directive).
+ollama_rocm_env_value_bad_re: '[\s"''\\%\x00-\x1f\x7f]'
+ollama_rocm_seconds_re: '^[1-9][0-9]*\Z'
+# The role's own Environment= lines; ollama_rocm_extra_env may not set these (asserted).
+ollama_rocm_env_reserved: [HOME, OLLAMA_HOST, OLLAMA_KEEP_ALIVE, OLLAMA_MAX_LOADED_MODELS, OLLAMA_MODELS]
+
+# ai_gpu_model as written (null/empty = none), and the form Ollama's /api/tags lists it in:
+# lower case, without the default registry and namespace, with a tag (latest when none is given).
+ollama_rocm_model: "{{ ai_gpu_model | default('', true) | string | trim }}"
+ollama_rocm_model_re: '^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*){0,2}(:[A-Za-z0-9_][A-Za-z0-9._-]*)?\Z'
+ollama_rocm_model_short: >-
+  {{ ollama_rocm_model | lower | regex_replace('^registry[.]ollama[.]ai/', '') | regex_replace('^library/', '') }}
+ollama_rocm_model_listed: "{{ ollama_rocm_model_short if ':' in ollama_rocm_model_short else ollama_rocm_model_short ~ ':latest' }}"
+# package_facts' result; the tests override it.
+ollama_rocm_installed_packages: "{{ ansible_facts.packages | default({}) }}"
+ollama_rocm_listen: "{{ gaming_pc_tailnet_ip }}:{{ ollama_rocm_port }}"
+
+# --- Firewall (docs/CONTRACTS.md §12.9 "Module G review decisions", M1)
+# A firewalld policy from ANY ingress zone to HOST with a negative priority. It is dispatched before
+# every zone's own rules and target, so it covers tailscale0 (zone trusted, target ACCEPT) and a LAN
+# host that routes the tailnet IP via the LAN (zone public). See README "Firewall" for the source.
+ollama_rocm_policy: homelab-ai-only
+# ai-box's tailnet addresses must be single hosts (no prefix length, no range): asserted.
+ollama_rocm_ipv4_re: '^[0-9]{1,3}([.][0-9]{1,3}){3}\Z'
+ollama_rocm_ipv6_re: '^[0-9a-fA-F:]+\Z'
+ollama_rocm_ai_box_addrs_ok: >-
+  {{ ai_box_tailnet_ip | default('') is match(ollama_rocm_ipv4_re)
+     and ai_box_tailnet_ip6 | default('') is match(ollama_rocm_ipv6_re)
+     and ':' in ai_box_tailnet_ip6 | default('') }}
+ollama_rocm_policy_priority: -100
+ollama_rocm_firewall_ports:
+  - "{{ ollama_rocm_port }}"
+  - "{{ ollama_rocm_gate_port }}"
+# One REJECT per port and family for every source except ai-box. Each matches only its own tcp port.
+# Spelled exactly as firewalld prints them (--list-rich-rules), so they compare as strings.
+ollama_rocm_rich_rules: >-
+  {{
+    (ollama_rocm_firewall_ports | map('string')
+      | map('regex_replace', '^(.*)$', 'rule family="ipv4" source NOT address="' ~ ai_box_tailnet_ip
+        ~ '" port port="\1" protocol="tcp" reject') | list)
+    + (ollama_rocm_firewall_ports | map('string')
+      | map('regex_replace', '^(.*)$', 'rule family="ipv6" source NOT address="' ~ ai_box_tailnet_ip6
+        ~ '" port port="\1" protocol="tcp" reject') | list)
+  }}
+# Matches any rich rule on one of this role's ports (legacy zone rules are found with it).
+ollama_rocm_rich_rule_port_re: ' port port="({{ ollama_rocm_firewall_ports | join("|") }})" protocol="tcp" '
+
+# firewall-cmd arguments that turn ollama_rocm_policy_current into the declared policy, in a safe
+# order: ANY/HOST can't be combined with named zones, so other zones go first; rules are added
+# before stale ones are removed. Input: ollama_rocm_policy_current =
+#   {priority: str|none, target: str|none, ingress: [..], egress: [..], rules: [..]}
+# (priority/target none = unknown, e.g. at runtime where firewall-cmd can't read them).
+ollama_rocm_policy_ops: >-
+  {{
+    (['--set-priority=' ~ ollama_rocm_policy_priority]
+      if ollama_rocm_policy_current.priority is not none
+         and ollama_rocm_policy_current.priority | string != ollama_rocm_policy_priority | string else [])
+    + (['--set-target=CONTINUE']
+      if ollama_rocm_policy_current.target is not none and ollama_rocm_policy_current.target != 'CONTINUE' else [])
+    + (ollama_rocm_policy_current.ingress | reject('eq', 'ANY') | map('regex_replace', '^', '--remove-ingress-zone=') | list)
+    + ([] if 'ANY' in ollama_rocm_policy_current.ingress else ['--add-ingress-zone=ANY'])
+    + (ollama_rocm_policy_current.egress | reject('eq', 'HOST') | map('regex_replace', '^', '--remove-egress-zone=') | list)
+    + ([] if 'HOST' in ollama_rocm_policy_current.egress else ['--add-egress-zone=HOST'])
+    + (ollama_rocm_rich_rules | reject('in', ollama_rocm_policy_current.rules)
+       | map('regex_replace', '^', '--add-rich-rule=') | list)
+    + (ollama_rocm_policy_current.rules | reject('in', ollama_rocm_rich_rules)
+       | map('regex_replace', '^', '--remove-rich-rule=') | list)
+  }}
+# Legacy rules on our ports in any zone. Input: ollama_rocm_zone_rules, the registered loop of
+# `firewall-cmd [--permanent] --zone=<z> --list-rich-rules` over the zones. Output: [result, rule]
+# pairs (result.item is the zone).
+ollama_rocm_zone_stale: >-
+  {{ ollama_rocm_zone_rules.results | default([]) | subelements('stdout_lines', skip_missing=true)
+     | selectattr('1', 'search', ollama_rocm_rich_rule_port_re) | list }}

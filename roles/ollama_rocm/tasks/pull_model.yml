@@ -1,0 +1,40 @@
+---
+# One `ollama pull`, bounded by ollama_rocm_pull_timeout (coreutils timeout: TERM at the limit, KILL
+# ollama_rocm_pull_kill_after s later). The client talks to the server on the tailnet address; when it's killed the server
+# drops the request and the next run resumes the partial download. tests/test_render.yml runs this
+# with stand-in binaries. Input: ollama_rocm_model.
+- name: Pull the model, bounded by ollama_rocm_pull_timeout
+  ansible.builtin.command:
+    argv:
+      - timeout
+      - "--kill-after={{ ollama_rocm_pull_kill_after }}"
+      - "{{ ollama_rocm_pull_timeout }}"
+      - "{{ ollama_rocm_bin }}"
+      - pull
+      - "{{ ollama_rocm_model }}"
+  environment:
+    OLLAMA_HOST: "{{ ollama_rocm_listen }}"
+  register: ollama_rocm_pull
+  changed_when: ollama_rocm_pull.rc == 0
+  failed_when: false
+
+# timeout(1): 124 = the limit was hit and TERM ended the client. If the KILL was needed, timeout
+# signals its whole process group, itself included, so Ansible sees rc -9 (137 if it exits instead).
+- name: The pull finished in time
+  ansible.builtin.assert:
+    that:
+      - ollama_rocm_pull.rc not in [124, 137, -9]
+    fail_msg: >-
+      `ollama pull {{ ollama_rocm_model }}` was still running after {{ ollama_rocm_pull_timeout }} s and was
+      stopped. Check the gaming PC's connection, or raise ollama_rocm_pull_timeout; the next run resumes
+      the download.
+    quiet: true
+
+- name: The pull succeeded
+  ansible.builtin.assert:
+    that:
+      - ollama_rocm_pull.rc == 0
+    fail_msg: >-
+      `ollama pull {{ ollama_rocm_model }}` failed (rc {{ ollama_rocm_pull.rc }}):
+      {{ ollama_rocm_pull.stderr | default('') | trim | truncate(500) }}
+    quiet: true

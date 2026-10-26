@@ -1,0 +1,29 @@
+---
+# Helper for test_render.yml: run ../tasks/pull.yml for case.model against the stub /api/tags server,
+# with a stand-in client that only records its arguments. case.pulls: the expected pull arguments.
+- name: Clear the pull record
+  ansible.builtin.copy:
+    content: ""
+    dest: "{{ t }}/pull.log"
+    mode: "0644"
+
+- name: Run pull.yml for {{ case.model }}
+  ansible.builtin.include_tasks: ../tasks/pull.yml
+  vars:
+    ai_gpu_model: "{{ case.model }}"
+    ollama_rocm_listen: "127.0.0.1:{{ render_test_tags_port }}"
+    ollama_rocm_bin: "{{ t }}/pull-recorder"
+    ollama_rocm_pull_timeout: 10
+    ollama_rocm_pull_kill_after: 1
+
+- name: Read the pull record
+  ansible.builtin.slurp:
+    src: "{{ t }}/pull.log"
+  register: pull_tags_record
+
+- name: The client was run exactly as expected
+  ansible.builtin.assert:
+    that:
+      - (pull_tags_record.content | b64decode).splitlines() == case.pulls
+    fail_msg: "{{ case.model }}: expected {{ case.pulls | to_json }}, got {{ (pull_tags_record.content | b64decode).splitlines() | to_json }}"
+    quiet: true

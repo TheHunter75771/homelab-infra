@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  author: homelab-infra
+  description: gpu-gate on the gaming PC (may ai-box borrow the GPU now?), the reviewed unit, tailnet binds.
+  license: MIT
+  min_ansible_version: "2.17"
+  platforms:
+    - name: Fedora
+      versions:
+        - all
+dependencies: []

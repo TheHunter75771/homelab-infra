@@ -1,0 +1,10 @@
+#!/usr/bin/python3
+"""Launcher that works under `python3 -I` (no script dir on sys.path): adds its own directory."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from gpu_gate.__main__ import main  # noqa: E402
+
+sys.exit(main())

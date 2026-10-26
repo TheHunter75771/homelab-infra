@@ -1,0 +1,84 @@
+# {{ ansible_managed }}
+# Native Ollama (GPU via ollama_backend) for ai-box's gpu-broker (docs/CONTRACTS.md §12.10). Listens on the gaming
+# PC's tailnet IPv4 only; the firewalld policy homelab-ai-only (ANY -> HOST, negative priority)
+# admits only ai-box's tailnet addresses, from every interface.
+#
+# Binding at boot: Ollama has no IP_FREEBIND, so listening on the tailnet address fails ("cannot
+# assign requested address") until tailscaled has configured it. After= only orders the start; it
+# doesn't wait for the address. Instead a failed start is retried with a growing delay
+# (2 s -> 60 s), forever: StartLimitIntervalSec=0 means it never gives up, so it also comes back
+# after a long tailscale outage at boot. Usually that's one or two failed starts in the journal.
+#
+# SELinux (Fedora, enforcing): /usr/local/bin/ollama is bin_t, so systemd (init_t) starts it as
+# unconfined_service_t. No custom policy, port label or boolean is needed.
+#
+# Backend: {{ ollama_backend }} (ollama_backend). Vulkan (Mesa RADV) needs only the DRM nodes; /dev/kfd
+# stays allowed so switching back to rocm is a variable change.
+[Unit]
+Description=Ollama ({{ ollama_backend }}), tailnet-only, for ai-box
+Documentation=https://github.com/ollama/ollama
+After=tailscaled.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=ollama
+Group=ollama
+# /dev/kfd (group render) and /dev/dri/renderD* (render) + card* (video).
+SupplementaryGroups=render video
+Environment=HOME={{ ollama_rocm_home }}
+Environment=OLLAMA_HOST={{ ollama_rocm_listen }}
+Environment=OLLAMA_KEEP_ALIVE={{ ollama_rocm_keep_alive }}
+Environment=OLLAMA_MAX_LOADED_MODELS={{ ollama_rocm_max_loaded_models }}
+Environment=OLLAMA_MODELS={{ ollama_rocm_models_dir }}
+{% for key, value in ollama_rocm_env | dictsort %}
+Environment={{ key }}={{ value }}
+{% endfor %}
+WorkingDirectory={{ ollama_rocm_home }}
+ExecStart={{ ollama_rocm_bin }} serve
+SyslogIdentifier=ollama
+Restart=on-failure
+RestartSec=2s
+RestartSteps=8
+RestartMaxDelaySec=60s
+TimeoutStopSec=30s
+UMask=0077
+
+# --- Sandbox. Writable: the state dir only.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ReadWritePaths={{ ollama_rocm_home }}
+ProtectHome=yes
+PrivateTmp=yes
+PrivateIPC=yes
+RemoveIPC=yes
+# Not PrivateDevices= (it would hide the GPU). A closed device policy with exactly the GPU nodes
+# instead: /dev/kfd (ROCm compute) and every DRM node (/dev/dri/card*, renderD*).
+DevicePolicy=closed
+DeviceAllow=/dev/kfd rw
+DeviceAllow=char-drm rw
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+# Other users' processes are hidden from Ollama. Not ProcSubset=pid: it reads /proc/meminfo, cpuinfo.
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# AF_NETLINK: Go's net package enumerates interfaces. Outbound IP stays open: `ollama pull` downloads.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+# Not MemoryDenyWriteExecute=: unproven with the GPU runtimes (Vulkan/RADV, ROCm); left out until tested on the host.
+
+[Install]
+WantedBy=multi-user.target

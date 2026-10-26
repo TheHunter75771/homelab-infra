@@ -1,0 +1,13 @@
+---
+# Gaming PC AI services (docs/CONTRACTS.md §12.10): native Ollama (Vulkan by default, ollama_backend; §12.9) + gpu-gate, tailnet-only to ai-box.
+# Root-level, separate from the user-level gaming-pc.yml. Run only with Noah present (it changes this PC).
+- name: Gaming PC AI services (native Ollama + gpu-gate)
+  hosts: workstations_root
+  become: true
+  gather_facts: true
+  gather_subset:
+    - "!all"
+    - min
+  roles:
+    - role: ollama_rocm
+    - role: gpu_gate

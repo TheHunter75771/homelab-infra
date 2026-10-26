@@ -1,0 +1,181 @@
+---
+# Offline test for role gpu_gate: installs the code into a scratch dir (twice, with stray files
+# planted in between), renders config.json and validates it with the app's own loader, and runs
+# `systemd-analyze verify` on the unit the role installs. Documentation addresses only (RFC 5737 /
+# RFC 3849). No root, nothing applied.
+#   .venv/bin/ansible-playbook -i localhost, -c local roles/gpu_gate/tests/test_gpu_gate.yml </dev/null 2>&1 | cat
+- name: Role gpu_gate installs the code, config and unit
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  vars:
+    gaming_pc_tailnet_ip: 192.0.2.20
+    gaming_pc_tailnet_ip6: "2001:db8::20"
+  handlers:
+    - name: Restart gpu-gate
+      ansible.builtin.debug:
+        msg: restart requested
+  tasks:
+    - name: Make a scratch directory
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: .gpu-gate
+      register: gate_test_tmp
+
+    - name: Run the checks
+      vars:
+        t: "{{ gate_test_tmp.path }}"
+      block:
+        - name: Point the role at the repo's app and the scratch dir
+          ansible.builtin.set_fact:
+            gpu_gate_src_dir: "{{ playbook_dir }}/../../../apps/gpu-gate"
+            gpu_gate_install_dir: "{{ t }}/gpu-gate"
+            gpu_gate_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+
+        - name: Install 1
+          ansible.builtin.include_tasks: ../tasks/install.yml
+
+        - name: Plant a stale module, a bytecode cache and a stray file
+          ansible.builtin.shell:
+            cmd: |
+              set -eu
+              echo old > "{{ gpu_gate_install_dir }}/gpu_gate/removed.py"
+              mkdir -p "{{ gpu_gate_install_dir }}/gpu_gate/__pycache__"
+              echo x > "{{ gpu_gate_install_dir }}/gpu_gate/__pycache__/gate.cpython-314.pyc"
+              echo x > "{{ gpu_gate_install_dir }}/README.md"
+          changed_when: true
+
+        - name: Install 2
+          ansible.builtin.include_tasks: ../tasks/install.yml
+
+        - name: List what was installed
+          ansible.builtin.find:
+            paths: "{{ gpu_gate_install_dir }}"
+            recurse: true
+            hidden: true
+            file_type: any
+          register: gate_test_find
+
+        - name: Exactly the launcher and the package modules, with the right modes, strays removed
+          vars:
+            tree: >-
+              {{ gate_test_find.files | map(attribute='path')
+                 | map('regex_replace', '^' ~ (gpu_gate_install_dir | regex_escape) ~ '/', '') | sort }}
+            modes: "{{ dict(gate_test_find.files | map(attribute='path') | zip(gate_test_find.files | map(attribute='mode'))) }}"
+            src_modules: "{{ query('ansible.builtin.fileglob', gpu_gate_src_dir ~ '/gpu_gate/*.py') | map('basename') | sort }}"
+          ansible.builtin.assert:
+            that:
+              - tree == (['gpu-gate', 'gpu_gate'] + (src_modules | map('regex_replace', '^', 'gpu_gate/') | list)) | sort
+              - "'gpu_gate/__main__.py' in tree"
+              - tree | select('search', 'test|pycache|README|removed') | list == []
+              - modes[gpu_gate_install_dir ~ '/gpu-gate'] == '0755'
+              - modes[gpu_gate_install_dir ~ '/gpu_gate'] == '0755'
+              - modes[gpu_gate_install_dir ~ '/gpu_gate/config.py'] == '0644'
+            fail_msg: "{{ tree }}"
+            quiet: true
+
+        - name: Install 3
+          ansible.builtin.include_tasks: ../tasks/install.yml
+
+        - name: Install 3 changed nothing
+          ansible.builtin.assert:
+            that:
+              - gpu_gate_install_dirs is not changed
+              - gpu_gate_install_launcher is not changed
+              - gpu_gate_install_modules is not changed
+              - gpu_gate_install_pruned is not changed
+              - gpu_gate_install_pruned is skipped
+            quiet: true
+
+        - name: Point the install at a directory that isn't named gpu-gate
+          block:
+            - name: Install into a shared-looking directory
+              ansible.builtin.include_tasks: ../tasks/install.yml
+              vars:
+                gpu_gate_install_dir: "{{ t }}/opt"
+
+            - name: Not reached
+              ansible.builtin.set_fact:
+                gate_test_wrong_dir_failed: false
+          rescue:
+            - name: Note the refusal
+              ansible.builtin.set_fact:
+                gate_test_wrong_dir_failed: "{{ ansible_failed_task.name == 'The install dir is a dedicated gpu-gate directory' }}"
+
+        - name: The install refused it before touching anything
+          ansible.builtin.stat:
+            path: "{{ t }}/opt"
+          register: gate_test_wrong_dir
+          failed_when: not gate_test_wrong_dir_failed or gate_test_wrong_dir.stat.exists
+
+        - name: Render the config
+          ansible.builtin.template:
+            src: "{{ playbook_dir | dirname }}/templates/config.json.j2"
+            dest: "{{ t }}/config.json"
+            mode: "0644"
+            # The same check the role uses, against the scratch install.
+            validate: >-
+              /usr/bin/python3 -I -B -c "import sys; sys.path.insert(0, '{{ gpu_gate_install_dir }}');
+              from gpu_gate.config import load; load(sys.argv[1])" %s
+
+        - name: Read the config
+          ansible.builtin.slurp:
+            src: "{{ t }}/config.json"
+          register: gate_test_config
+
+        - name: Config binds both tailnet addresses on 11500 and talks to Ollama over the tailnet IPv4
+          ansible.builtin.assert:
+            that:
+              - >-
+                (gate_test_config.content | b64decode | from_json) == {
+                  'binds': ['192.0.2.20', '2001:db8::20'],
+                  'port': 11500,
+                  'ollama_url': 'http://192.0.2.20:11434'}
+            fail_msg: "{{ gate_test_config.content | b64decode }}"
+            quiet: true
+
+        - name: Without an IPv6 tailnet address only the IPv4 one is bound
+          vars:
+            gaming_pc_tailnet_ip6: ""
+          ansible.builtin.assert:
+            that:
+              - gpu_gate_binds == ['192.0.2.20']
+            quiet: true
+
+        - name: The installed config loads in the installed app with no bytecode written
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - -I
+              - -B
+              - -c
+              - |
+                import sys
+                sys.path.insert(0, sys.argv[1])
+                from gpu_gate.config import load
+                cfg = load(sys.argv[2])
+                assert cfg["binds"] == ["192.0.2.20", "2001:db8::20"] and cfg["port"] == 11500, cfg
+              - "{{ gpu_gate_install_dir }}"
+              - "{{ t }}/config.json"
+          changed_when: false
+
+        - name: No bytecode cache appeared in the install
+          ansible.builtin.stat:
+            path: "{{ gpu_gate_install_dir }}/gpu_gate/__pycache__"
+          register: gate_test_pycache
+          failed_when: gate_test_pycache.stat.exists
+
+        - name: Verify the unit the role installs (the reviewed one, verbatim)
+          ansible.builtin.command:
+            argv: [systemd-analyze, verify, "{{ gpu_gate_src_dir }}/gpu-gate.service"]
+          register: gate_test_verify
+          changed_when: false
+          failed_when: gate_test_verify.rc != 0 or gate_test_verify.stderr | length > 0
+      always:
+        - name: Remove the scratch directory
+          ansible.builtin.file:
+            path: "{{ gate_test_tmp.path }}"
+            state: absent
