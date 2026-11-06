@@ -54,7 +54,7 @@ for task in 'Inputs refuses bad inputs' 'Preflight refuses units it can.t vouch 
   grep -qE "TASK \[$task" "$log" || { echo "FAIL: task did not run: $task"; exit 1; }
 done
 # Check mode, on a fresh fixture: nothing written, nothing reloaded or restarted.
-rm -rf "$tmp/host" "$tmp/proc" "$tmp/opt" "$tmp/etc" "$tmp/data" "$tmp/state.json" "$tmp/systemctl.log"
+rm -rf "${tmp:?}/host" "${tmp:?}/proc" "${tmp:?}/opt" "${tmp:?}/etc" "${tmp:?}/data" "${tmp:?}/state.json" "${tmp:?}/systemctl.log"
 python3 "$here/make_fixture.py" "$tmp" >/dev/null
 set +e
 "$repo/.venv/bin/ansible-playbook" --check --diff -i "$here/inventory.yml" "$here/test_check_mode.yml" \
