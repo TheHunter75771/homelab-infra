@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  author: homelab-infra
+  description: Wall-screen calendar page (a read-only agenda over the household CalDAV server) as a hardened host service
+  license: MIT
+  min_ansible_version: "2.17"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - all
+dependencies: []

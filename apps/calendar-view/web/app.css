@@ -1,0 +1,209 @@
+/* Wall-screen calendar view: dark, read at about 3 m on a 15.6" 1080p landscape screen. Sizes on the wall
+   layout scale with the viewport width (at 1920 px: clock ~180 px, today's events ~36 px, the week ~28 px).
+   Below 1000 px wide it becomes one scrolling column (phones, small windows). System fonts only. */
+:root {
+  color-scheme: dark;
+  --bg: #0b0e13;
+  --surface: #151a22;
+  --line: #262e3b;
+  --fg: #eef2f7;
+  --fg-2: #c3cbd6;
+  --muted: #8792a2;
+  --now: #ffcf5c;
+  --stale-bg: #f5a524;
+  --stale-fg: #1a1205;
+  --gap: 2.1vw;
+  --banner-h: 4.4vw;
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; background: var(--bg); color: var(--fg); }
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  font-size: 1.5vw;
+  line-height: 1.25;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, p, ul { margin: 0; }
+ul { padding: 0; list-style: none; }
+
+/* --- stale / failed banner ------------------------------------------------------------------------- */
+.banner {
+  position: fixed;
+  inset: 0 0 auto 0;
+  z-index: 2;
+  height: var(--banner-h);
+  padding: 0 var(--gap);
+  display: flex;
+  align-items: center;
+  background: var(--stale-bg);
+  color: var(--stale-fg);
+  font-size: 2.1vw;
+  font-weight: 700;
+}
+.banner[hidden] { display: none; }
+body.is-stale .wall { padding-top: calc(var(--banner-h) + var(--gap)); }
+body.is-stale .today, body.is-stale .week { opacity: 0.72; }
+
+/* --- wall layout: today on the left, the next six days on the right --------------------------------- */
+.wall {
+  display: grid;
+  grid-template-columns: minmax(0, 37fr) minmax(0, 63fr);
+  gap: var(--gap);
+  height: 100vh;
+  padding: var(--gap);
+  overflow: hidden;
+}
+
+.today {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1vw;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.date { font-size: 2.8vw; font-weight: 650; line-height: 1.1; }
+
+.clock {
+  font-size: 8.6vw;
+  font-weight: 700;
+  line-height: 0.95;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.block { flex: none; }
+.block[hidden] { display: none; }
+.block-title {
+  margin-bottom: 0.35em;
+  color: var(--muted);
+  font-size: 1vw;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.now { padding-left: 1vw; border-left: 0.35vw solid var(--now); }
+.now .block-title { color: var(--now); }
+.now .event, .next .event { font-size: 2.15vw; font-weight: 600; }
+/* Today's list takes the rest of the column; what doesn't fit fades out instead of being cut mid-line. */
+.agenda {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 82%, transparent);
+  mask-image: linear-gradient(to bottom, #000 82%, transparent);
+}
+.agenda .event { font-size: 1.7vw; }
+/* A fixed time column keeps the titles in line; a long label ("Until WED 17:00") wraps inside it. */
+.today .event { grid-template-columns: auto 5.9em minmax(0, 1fr); }
+.today .time { white-space: normal; }
+
+/* --- events --------------------------------------------------------------------------------------- */
+.event {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: baseline;
+  column-gap: 0.55em;
+  padding: 0.22em 0;
+}
+.dot {
+  display: inline-block;
+  width: 0.62em;
+  height: 0.62em;
+  border-radius: 50%;
+  background: var(--muted);
+  align-self: center;
+}
+.time {
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.end::before { content: "\2013"; }
+.title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.all-day .time { color: var(--muted); }
+.empty, .more { color: var(--muted); padding: 0.22em 0; }
+.more { font-size: 0.85em; }
+
+/* --- the week ------------------------------------------------------------------------------------- */
+.week {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 1.3vw;
+  min-height: 0;
+}
+.day {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 1vw 1.15vw;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 0.8vw;
+}
+.day-label {
+  margin-bottom: 0.45em;
+  font-size: 1.45vw;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+}
+.day .events { font-size: 1.4vw; }
+.day .event { grid-template-columns: auto 3.9em minmax(0, 1fr); }
+.day .time { white-space: normal; font-size: 0.92em; }
+.day .end { display: none; } /* the week shows start times; today's column shows the range */
+
+/* On the wall layout a list shows its first N events and a "+N more" line (app.js renders all of them). */
+.events[data-cap="1"] > .event:nth-child(n+2),
+.events[data-cap="2"] > .event:nth-child(n+3),
+.events[data-cap="5"] > .event:nth-child(n+6),
+.events[data-cap="7"] > .event:nth-child(n+8) { display: none; }
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4em 1.4em;
+  margin-top: auto;
+  color: var(--muted);
+  font-size: 1.1vw;
+}
+.legend-item { display: inline-flex; align-items: center; gap: 0.45em; }
+
+/* --- one column: phones and small windows ------------------------------------------------------------ */
+@media (max-width: 999px) {
+  :root { --gap: 16px; --banner-h: 48px; }
+  body { font-size: 17px; }
+  .banner { font-size: 18px; }
+  .wall { display: block; height: auto; overflow: visible; }
+  .today { gap: 14px; overflow: visible; margin-bottom: 22px; }
+  .date { font-size: 24px; }
+  .clock { font-size: 64px; }
+  .block-title { font-size: 13px; }
+  .now { padding-left: 12px; border-left-width: 4px; }
+  .now .event, .next .event { font-size: 22px; }
+  .agenda .event { font-size: 18px; }
+  .agenda { overflow: visible; -webkit-mask-image: none; mask-image: none; }
+  .legend { font-size: 14px; margin-top: 4px; }
+  .week { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: none; gap: 12px; }
+  .day { padding: 12px 14px; border-radius: 10px; }
+  .day-label { font-size: 16px; }
+  .day .events { font-size: 16px; }
+  .events > .event { display: grid !important; } /* every event, no caps */
+  .more { display: none; }
+}
+
+@media (max-width: 599px) {
+  .week { grid-template-columns: minmax(0, 1fr); }
+}

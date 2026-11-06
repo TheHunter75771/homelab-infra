@@ -11,16 +11,17 @@
 //   8443  tailscale serve: Jellyseerr (requests)
 //   8444  tailscale serve: Jellyfin (/watch), Sonarr, Radarr, Prowlarr, SABnzbd
 //   8445  tailscale serve: Household Calendar (CalDAV, CONTRACTS §13)
+//   8446  tailscale serve: wall-screen calendar view (CONTRACTS §14)
 //   9999  wol-relay (token-gated)
 // 443 (controls) and 8444 (admin UIs) are for admins only. Household members get Jellyseerr
-// (8443) and the calendar (8445) only; they watch Jellyfin on the LAN or through the public
-// /watch tunnel.
+// (8443), the calendar (8445) and its wall-screen view (8446) only; they watch Jellyfin on the
+// LAN or through the public /watch tunnel. The wall screen (tag:kiosk) gets 8446 only.
 {
 	"groups": {
 		// Noah's login(s). Full access, including SSH and every admin UI.
 		"group:admins": [],
-		// Other household members (for example a partner's phone): Jellyseerr requests and the
-		// calendar.
+		// Other household members (for example a partner's phone): Jellyseerr requests, the
+		// calendar and its wall-screen view.
 		"group:household": [],
 	},
 
@@ -29,19 +30,25 @@
 		"tag:server": ["group:admins"],
 		// The edge VPS that runs the off-site heartbeat (docs/CONTRACTS.md §8).
 		"tag:edge": ["group:admins"],
+		// The pantry station mini PC (wall screen), once it joins the tailnet.
+		"tag:kiosk": ["group:admins"],
 	},
 
 	"grants": [
 		// Admins keep access to everything they own and every tagged node (all ports, including
-		// 22, 443, 8443, 8444, 8445 and 9999 on tag:server).
+		// 22, 443, 8443, 8444, 8445, 8446 and 9999 on tag:server).
 		{"src": ["group:admins"], "dst": ["*"], "ip": ["*"]},
 
 		// Everyone can reach their own devices.
 		{"src": ["autogroup:member"], "dst": ["autogroup:self"], "ip": ["*"]},
 
-		// Household: Jellyseerr and the calendar only (not the dashboard on 443, not the admin
-		// apps on 8444).
-		{"src": ["group:household"], "dst": ["tag:server"], "ip": ["tcp:8443", "tcp:8445"]},
+		// Household: Jellyseerr, the calendar and its wall-screen view only (not the dashboard on
+		// 443, not the admin apps on 8444).
+		{"src": ["group:household"], "dst": ["tag:server"], "ip": ["tcp:8443", "tcp:8445", "tcp:8446"]},
+
+		// Wall screen: the read-only calendar view on 8446 and nothing else on the server.
+		// Whatever the pantry station needs on ai-box is out of scope here (CONTRACTS §14.4).
+		{"src": ["tag:kiosk"], "dst": ["tag:server"], "ip": ["tcp:8446"]},
 
 		// Edge VPS heartbeat: `tailscale ping` plus a TCP check on 22. Nothing else.
 		// If the VPS also triggers Wake-on-LAN, add "tcp:9999" here.
@@ -50,15 +57,21 @@
 
 	// No Tailscale SSH rules: the server runs OpenSSH, limited by the grants above and by UFW.
 
-	// The edge VPS is the only non-admin principal without logins, so it's the one that can be
-	// tested here: SSH only, none of the four serve ports. Household tests need a real login as
-	// "src"; add them in the private copy (accept tag:server:8443 and tag:server:8445, deny :22,
-	// :443, :8444, :9999).
+	// The edge VPS and the wall screen are the only non-admin principals without logins, so
+	// they're the ones that can be tested here: edge gets SSH and none of the five serve ports,
+	// kiosk gets the wall-screen view (8446) and nothing else. Household tests need a real login
+	// as "src"; add them in the private copy (accept tag:server:8443, tag:server:8445 and
+	// tag:server:8446, deny :22, :443, :8444, :9999).
 	"tests": [
 		{
 			"src": "tag:edge",
 			"accept": ["tag:server:22"],
-			"deny": ["tag:server:443", "tag:server:8443", "tag:server:8444", "tag:server:8445", "tag:server:9999"],
+			"deny": ["tag:server:443", "tag:server:8443", "tag:server:8444", "tag:server:8445", "tag:server:8446", "tag:server:9999"],
+		},
+		{
+			"src": "tag:kiosk",
+			"accept": ["tag:server:8446"],
+			"deny": ["tag:server:22", "tag:server:443", "tag:server:8443", "tag:server:8444", "tag:server:8445", "tag:server:9999"],
 		},
 	],
 }

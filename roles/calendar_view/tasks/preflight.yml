@@ -1,0 +1,84 @@
+---
+- name: Preflight | where it listens, what it reads, and how
+  ansible.builtin.assert:
+    that:
+      # Exactly 127.0.0.1: role tailscale_serve proxies 8446 to http://127.0.0.1:5233 only.
+      - calendar_view_listen_host == '127.0.0.1'
+      - calendar_view_port | string is match('^[0-9]{1,5}$')
+      - calendar_view_port | int > 0 and calendar_view_port | int < 65536
+      - calendar_view_port | int != calendar_port | default(5232) | int
+      # The viewer's password goes over this in clear: loopback only (the app refuses anything else too).
+      - calendar_view_caldav_url is match('^http://127[.]0[.]0[.]1:[0-9]{1,5}$')
+      - calendar_view_viewer | string is match('^[a-z][a-z0-9_-]{1,31}$')
+      - calendar_view_days | string is match('^[0-9]{1,2}$')
+      - calendar_view_days | int >= 1 and calendar_view_days | int <= 14
+      - calendar_view_timezone is match('^[A-Za-z_]+(/[A-Za-z0-9_+-]+)*$')
+    fail_msg: >-
+      calendar_view_listen_host must be exactly 127.0.0.1 (tailscale serve proxies 8446 there),
+      calendar_view_port an integer port other than the calendar's, calendar_view_caldav_url
+      http://127.0.0.1:<port>, calendar_view_viewer a calendar login name, calendar_view_days 1 to 14, and
+      calendar_view_timezone an IANA name such as America/New_York.
+    quiet: true
+
+- name: Preflight | the calendars to show (calendar_view_calendars in host_vars)
+  ansible.builtin.assert:
+    that:
+      - calendar_view_calendars is sequence and calendar_view_calendars is not string and calendar_view_calendars is not mapping
+      - calendar_view_calendars | length > 0 and calendar_view_calendars | length <= 12
+      - calendar_view_calendars | rejectattr('path', 'defined') | list | length == 0
+      - calendar_view_calendars | rejectattr('label', 'defined') | list | length == 0
+      - calendar_view_calendars | rejectattr('color', 'defined') | list | length == 0
+      - calendar_view_calendars | map(attribute='path') | map('string') | select('match', '^[a-z][a-z0-9_-]{1,31}/[a-z0-9-]{1,40}$')
+        | list | length == calendar_view_calendars | length
+      - calendar_view_calendars | map(attribute='path') | unique | list | length == calendar_view_calendars | length
+      - calendar_view_calendars | map(attribute='label') | map('string') | map('trim') | select | reject('search', '^.{41,}$')
+        | list | length == calendar_view_calendars | length
+      - calendar_view_calendars | map(attribute='color') | map('string') | select('match', '^#[0-9A-Fa-f]{6}$')
+        | list | length == calendar_view_calendars | length
+    fail_msg: >-
+      calendar_view_calendars (host_vars) must list 1 to 12 calendars as {path, label, color}: a unique path
+      "<login>/<calendar id>" (the calendar role's name rules), a label of 1 to 40 characters, and a color "#rrggbb".
+    quiet: true
+
+- name: Preflight | the time zone exists on the host
+  ansible.builtin.stat:
+    path: /usr/share/zoneinfo/{{ calendar_view_timezone }}
+    follow: true # backward-compatible names (US/Eastern) are links to the real file
+    get_checksum: false
+  register: calendar_view_zone
+
+- name: Preflight | the time zone is known
+  ansible.builtin.assert:
+    that: calendar_view_zone.stat.exists and calendar_view_zone.stat.isreg
+    fail_msg: calendar_view_timezone {{ calendar_view_timezone }} isn't in /usr/share/zoneinfo (package tzdata).
+    quiet: true
+
+# Only a yes/no leaves this task; no_log keeps the value out of any error.
+- name: Preflight | the viewer has a usable password (value never printed)
+  ansible.builtin.set_fact:
+    calendar_view_password_ok: >-
+      {{ (calendar_passwords | default({}))[calendar_view_viewer] | default('') is string
+         and (calendar_passwords | default({}))[calendar_view_viewer] | default('') is match('^[ -~]{16,72}$') }}
+  no_log: true
+
+- name: Preflight | the viewer's password is in the vault
+  ansible.builtin.assert:
+    that: calendar_view_password_ok | bool
+    fail_msg: >-
+      calendar_passwords (vault_calendar_passwords) needs a quoted password of 16 to 72 printable ASCII
+      characters for the viewer login {{ calendar_view_viewer }} (the same entry role calendar hashes).
+    quiet: true
+
+# When role calendar is in the play (playbooks/calendar.yml), its viewers must be able to read every
+# calendar shown: a mismatch would deploy green and then fail every fetch with a 403.
+- name: Preflight | the viewer can read every calendar shown (role calendar's calendar_viewers)
+  ansible.builtin.assert:
+    that:
+      - calendar_viewers | selectattr('user', 'equalto', calendar_view_viewer) | list | length == 1
+      - calendar_view_calendars | map(attribute='path') | difference(
+          (calendar_viewers | selectattr('user', 'equalto', calendar_view_viewer) | first)['read']) | length == 0
+    fail_msg: >-
+      calendar_viewers (role calendar, host_vars) needs an entry for {{ calendar_view_viewer }} whose `read` list
+      holds every path in calendar_view_calendars ({{ calendar_view_calendars | map(attribute='path') | join(', ') }}).
+    quiet: true
+  when: calendar_viewers is defined

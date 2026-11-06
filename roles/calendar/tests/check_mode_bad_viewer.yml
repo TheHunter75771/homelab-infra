@@ -1,0 +1,23 @@
+---
+# One refused viewer for test_check_mode.yml: the role's preflight must stop the run, and say why.
+- name: Preflight refuses a viewer with {{ bad.label }}
+  block:
+    - name: Preflight with this viewer
+      ansible.builtin.include_role:
+        name: "{{ calendar_role }}"
+        tasks_from: preflight
+      vars:
+        calendar_push_group: root
+        calendar_viewers: "{{ bad.viewers }}"
+    - name: The preflight should have stopped here
+      ansible.builtin.fail:
+        msg: "The preflight accepted a viewer with {{ bad.label }}."
+  rescue:
+    - name: It stopped for the viewer, and says why
+      ansible.builtin.assert:
+        # A plain assert fails with msg; a looped one (per viewer) with each item's msg.
+        that: >-
+          bad.says in (ansible_failed_result.msg | default('')
+                       ~ (ansible_failed_result.results | default([]) | map(attribute='msg', default='') | join(' ')))
+        fail_msg: "Wrong failure for {{ bad.label }}: {{ ansible_failed_result.msg | default('none') }}"
+        quiet: true

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="no-referrer">
+<title>Household Calendar</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<p id="banner" class="banner" role="status" hidden></p>
+<main class="wall">
+  <section class="today" aria-labelledby="today-date">
+    <h1 id="today-date" class="date">Household Calendar</h1>
+    <p id="clock" class="clock" aria-live="off">--:--</p>
+    <div id="now-block" class="block now" hidden>
+      <h2 class="block-title">Now</h2>
+      <ul id="now-list" class="events"></ul>
+    </div>
+    <div class="block next">
+      <h2 class="block-title">Next</h2>
+      <ul id="next-list" class="events"></ul>
+    </div>
+    <div class="block agenda">
+      <h2 class="block-title">Today</h2>
+      <ul id="today-list" class="events"></ul>
+    </div>
+    <ul id="legend" class="legend" aria-label="Calendars"></ul>
+  </section>
+  <section id="week" class="week" aria-label="The next days"></section>
+</main>
+</body>
+</html>

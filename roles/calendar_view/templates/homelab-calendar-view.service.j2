@@ -1,0 +1,73 @@
+# {{ ansible_managed }}
+# Calendar wall view (docs/CONTRACTS.md §14.2/§14.3): a read-only agenda page over the household calendar,
+# on loopback only (tailscale serve publishes it on 8446). A host service, outside Docker: no ordering on
+# docker.service or bootgate.service, on purpose. It wants the calendar but doesn't require it: with the
+# calendar down it keeps serving its last good agenda, marked stale, and retries every minute.
+# systemd-analyze security (systemd 259, offline, on the rendered unit): 1.2 OK. What remains: AF_INET
+# sockets and the host network (it listens on loopback for tailscale serve and reads the calendar there),
+# AF_UNIX, no PrivateUsers=/ProcSubset=/RootDirectory=, @resources in the syscall allow list, and the
+# localhost IP allow list.
+# The app ran under this [Service] set (MemoryDenyWriteExecute and the syscall filter included; Seccomp 2,
+# NoNewPrivs 1, no capabilities) in a transient systemd 259 user unit: it fetched from a real Radicale 3.6.0,
+# served the page, /api/agenda and /healthz, and went stale when Radicale stopped. A user manager can't
+# apply User=/Group= or the IP filter, and PrivateTmp=/ProtectHome= were relaxed there so the scratch copy
+# was visible; the Integrator's live run covers those.
+[Unit]
+Description=Calendar wall view (read-only, tailnet-only)
+Documentation=file://{{ calendar_view_app_dir }}
+After=network.target {{ calendar_view_calendar_service }}
+Wants={{ calendar_view_calendar_service }}
+# No start limit: a wall display keeps retrying, however often it fails.
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User={{ calendar_view_user }}
+Group={{ calendar_view_user }}
+# -I: only the distro's site-packages (no user site, no PYTHON* variables). -B: the code dir is read-only.
+ExecStart={{ calendar_view_python }} -I -B {{ calendar_view_app_dir }}/{{ calendar_view_launcher }} --config {{ calendar_view_config_file }}
+Restart=always
+RestartSec=5s
+# direct: an auto-restart skips the failed state (nothing listens for OnFailure= here; no push in v1).
+RestartMode=direct
+SyslogIdentifier=homelab-calendar-view
+UMask=0077
+MemoryMax={{ calendar_view_memory_max }}
+TasksMax={{ calendar_view_tasks_max }}
+
+# Hardening: the dashboard's set (CONTRACTS §11.1, roles/dashboard/templates/homelab-dashboard.service.j2),
+# plus the §14.3 additions below it. The service writes nothing, so there is no ReadWritePaths=.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# As in the dashboard unit: /run read-only explicitly (it was writable despite ProtectSystem=strict).
+ReadOnlyPaths=/run
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+# §14.3 additions. Loopback only: tailscale serve connects over loopback, and so does the calendar fetch.
+IPAddressDeny=any
+IPAddressAllow=localhost
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

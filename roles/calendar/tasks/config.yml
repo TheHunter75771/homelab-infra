@@ -7,6 +7,22 @@
     group: "{{ calendar_user }}"
     mode: "0750"
 
+# Read once, at start (hence the restart). Radicale's from_file reports a broken rule only when a request
+# hits it (a 500), so validate does what it does: ConfigParser (interpolation on), str.format() with
+# {user}, and a regex compile of both patterns in every section.
+- name: Config | rights (owner_only for accounts, read-only viewers)
+  ansible.builtin.template:
+    src: rights.j2
+    dest: "{{ calendar_rights_file }}"
+    owner: root
+    group: "{{ calendar_user }}"
+    mode: "0640"
+    validate: >-
+      /usr/bin/python3 -c "import configparser, re, sys; c = configparser.ConfigParser(); c.read_file(open(sys.argv[1]));
+      [(re.compile(c.get(s, 'user').format()), re.compile(c.get(s, 'collection').format(user='u')), c.get(s, 'permissions'))
+      for s in c.sections()]" %s
+  notify: Calendar restart
+
 # validate: Radicale's own loader, so an unknown option or a bad value never reaches the service.
 - name: Config | Radicale settings
   ansible.builtin.template:
@@ -60,18 +76,16 @@
       {{ calendar_users_file }} are not checked or listed as changes in this run.
   when: ansible_check_mode and calendar_passlib_probe.rc != 0
 
-- name: Users | one bcrypt login per account (passwords from the vault)
+- name: Users | one bcrypt login per account and viewer (passwords from the vault)
   community.general.htpasswd:
     path: "{{ calendar_users_file }}"
-    name: "{{ item.user }}"
-    password: "{{ calendar_passwords[item.user] }}"
+    name: "{{ item }}"
+    password: "{{ calendar_passwords[item] }}"
     crypt_scheme: bcrypt
     owner: root
     group: "{{ calendar_user }}"
     mode: "0640"
-  loop: "{{ calendar_accounts }}"
-  loop_control:
-    label: "{{ item.user }}"
+  loop: "{{ calendar_logins }}"
   register: calendar_users_set # read by tests/check_mode_case.yml only
   no_log: true
   when: calendar_passlib_probe.rc == 0 or not ansible_check_mode
@@ -86,7 +100,7 @@
   check_mode: false
 
 # The login goes; its calendars stay on disk (the role never deletes collection data).
-- name: Users | remove logins that are no longer in calendar_accounts
+- name: Users | remove logins that are no longer in calendar_accounts or calendar_viewers
   community.general.htpasswd:
     path: "{{ calendar_users_file }}"
     name: "{{ item }}"
@@ -96,5 +110,5 @@
     mode: "0640"
   loop: >-
     {{ calendar_users_listed.stdout_lines | default([]) | select
-       | reject('in', calendar_accounts | map(attribute='user') | list) | list }}
+       | reject('in', calendar_logins) | list }}
   when: calendar_passlib_probe.rc == 0 or not ansible_check_mode

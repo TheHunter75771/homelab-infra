@@ -19,6 +19,10 @@ Paths on the box (`C` is used below):
 C=/srv/homelab/data/calendar/collections        # calendars: $C/collection-root/<user>/<calendar-id>/<event>.ics
 ```
 
+**Stopping the calendar by hand:** stop the wall-screen view (`homelab-calendar-view`) first, and start
+it again once the calendar is back. The view has `Wants=homelab-calendar.service`, so any start or
+restart of the view, its own automatic ones included, starts the calendar again in the middle of your work.
+
 ## Add an iPhone
 The phone must be on the tailnet: the Tailscale app connected, with **VPN On Demand** on (Tailscale →
 Settings → VPN On Demand), or sync stops until it's reconnected. Alarms still fire without it.
@@ -63,13 +67,63 @@ Tailscale must be connected on that computer.
 2. Remove it and commit, as the service account, with the service stopped (`git rm` leaves the
    ignored `.Radicale.cache` behind, hence the `rm -rf`):
    ```bash
+   sudo systemctl stop homelab-calendar-view   # first: it would start the calendar again
    sudo systemctl stop homelab-calendar
    sudo -u calendar git -C "$C" rm -r -q collection-root/<user>/<calendar-id>
    sudo -u calendar rm -rf "$C/collection-root/<user>/<calendar-id>"
    sudo -u calendar git -C "$C" commit -q -m "Delete calendar <user>/<calendar-id> (runbook)"
    sudo systemctl start homelab-calendar
+   sudo systemctl start homelab-calendar-view
    ```
    The devices drop it on their next sync. It can still be restored from git (below).
+
+## Viewers (read-only logins)
+A **viewer** is a login that can only read the calendars listed for it. The wall-screen view
+(CONTRACTS §14) logs in as one. It owns no calendars, has no home of its own (the role leaves it an
+empty one so Radicale doesn't log a warning on every poll), and can't change anything. Every write,
+every unlisted calendar, every home and the root are refused with 403. Accounts are unaffected: they
+keep exactly the rights they had (`owner_only`).
+
+**Add a viewer:**
+1. In `inventory/host_vars/<host>.yml`, add it under `calendar_viewers`, listing each calendar as
+   `<owner>/<calendar id>`. Each one must be a calendar in `calendar_accounts`, and the name follows the
+   login rules above and can't also be an account:
+   ```yaml
+   calendar_viewers:
+     - { user: <viewer>, read: [household/shared, household/school, <login>/routines] }
+   ```
+2. Its password goes in the vault, like any login's: `<viewer>: "<password>"` under
+   `vault_calendar_passwords` (16 to 72 characters, saved in the password manager).
+3. Run `playbooks/calendar.yml` (above). It adds the login and the read rule (`/etc/homelab-calendar/rights`),
+   restarting the calendar (a few seconds; phones retry by themselves).
+
+**Change what it reads:** edit its `read` list and run the playbook. **Remove it:** delete the entry
+and its vault password, then run the playbook. The login goes, its rule goes, and its empty home stays (harmless).
+
+**Check a viewer by hand** (from the box; the password is in the password manager):
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -u <viewer> -X PROPFIND -H 'Depth: 0' http://127.0.0.1:5232/household/shared/   # 207
+curl -s -o /dev/null -w '%{http_code}\n' -u <viewer> -X PROPFIND -H 'Depth: 0' http://127.0.0.1:5232/household/          # 403
+```
+
+**The switch to these rules (and the rollback).** Moving from 244eb8b's `owner_only` to the `from_file`
+rules is a rights change, even though accounts see no difference (tested path by path). If a phone
+loses access after it, roll back by redeploying 244eb8b from a clean checkout:
+```bash
+git status --short                       # commit or stash your work first
+git switch --detach 244eb8b
+.venv/bin/ansible-playbook playbooks/calendar.yml --check --diff
+.venv/bin/ansible-playbook playbooks/calendar.yml
+git switch -                             # back to your branch
+```
+- That run writes `type = owner_only` back and restarts the calendar. Then:
+  - The viewer logins are removed: 244eb8b removes every login that isn't an account. So the wall view
+    stops until the new rules are back.
+  - The rights file and the viewers' empty homes stay on disk, unused and harmless.
+  - It also re-applies 244eb8b's `tailscale serve` config, so a port added later, such as the view's
+    8446, goes until you redeploy the current branch.
+- **Don't** just change `type =` in `/etc/homelab-calendar/config` by hand. Under `owner_only` a viewer
+  login would get a home of its own, with write rights.
 
 ## Reset a password
 Change `vault_calendar_passwords.<login>` in the vault and run `playbooks/calendar.yml`. That
@@ -90,7 +144,9 @@ sudo -u calendar git -C "$C" commit -q -m "Restore <event> from <rev>^ (runbook)
 ```
 No restart: Radicale reads the files on each request. Let the clients resync (iPhone: Calendar →
 Calendars → pull down to refresh; Thunderbird: right-click the calendar → Synchronize).
-Never `git reset` or `git checkout` a whole calendar on a live system without stopping the service first.
+Never `git reset` or `git checkout` a whole calendar on a live system. Stop the view, then the calendar,
+first (`sudo systemctl stop homelab-calendar-view`, then `sudo systemctl stop homelab-calendar`), and start
+the calendar, then the view, afterwards.
 
 **A change you expect isn't in `git log`?** A failed hook only logs an error. The change itself is
 saved, and the next change that commits picks it up, under that change's login. Look for it:
@@ -108,8 +164,9 @@ The nightly archive (`/srv/homelab/backups/appdata/appdata-<UTC time>.tar`, role
    sudo tar -xpf /srv/homelab/backups/appdata/appdata-<stamp>.tar -C "$R"
    sudo sh -c "cd $R && sha256sum -c MANIFEST.sha256"
    ```
-2. Stop the calendar and move the current data aside (keep it until the restore is proven):
+2. Stop the view, then the calendar, and move the current data aside (keep it until the restore is proven):
    ```bash
+   sudo systemctl stop homelab-calendar-view   # first: it would start the calendar again
    sudo systemctl stop homelab-calendar
    sudo mv /srv/homelab/data/calendar /srv/homelab/data/calendar.before-restore
    ```
@@ -128,8 +185,8 @@ The nightly archive (`/srv/homelab/backups/appdata/appdata-<UTC time>.tar`, role
    The backup keeps the commits, objects and refs, so `git log` and single-event restores work. It
    doesn't keep `.git/logs/` (the reflog): role `backups` skips every folder named `logs`, so `git reflog`
    starts empty after a restore.
-4. Run `playbooks/calendar.yml`. It checks the layout and the repo, starts the service and proves
-   401/207. Check `sudo -u calendar git -C "$C" log -1` shows the last change you expect.
+4. Run `playbooks/calendar.yml`. It checks the layout and the repo, starts the calendar and proves
+   401/207, then starts the view again (it deploys both). Check `sudo -u calendar git -C "$C" log -1` shows the last change you expect.
 5. On each device, refresh. Events changed since that backup are lost on the server, but a phone
    that still has them offline may upload them again. Check the calendars on a phone before
    removing `calendar.before-restore`.
@@ -138,7 +195,7 @@ The nightly archive (`/srv/homelab/backups/appdata/appdata-<UTC time>.tar`, role
 **It means:** `homelab-calendar.service` failed 5 times within 10 minutes and systemd stopped retrying.
 A crash that heals on an automatic restart sends nothing, and one incident sends one push.
 The phones keep working from their offline copy, and alarms still fire. Nothing syncs until it's fixed.
-When it runs again you get **"Calendar back up"**, which closes the alert on the dashboard.
+When it runs again you get **"Calendar back online"**, which closes the alert on the dashboard.
 
 First three checks:
 1. **Why did it stop?**
@@ -146,7 +203,8 @@ First three checks:
    systemctl status homelab-calendar --no-pager
    sudo journalctl -u homelab-calendar -b --no-pager | tail -40
    ```
-   Look for `Failed to load config file` / `Invalid htpasswd file` (a bad config or users file),
+   Look for `Failed to load config file` / `Invalid htpasswd file` / `Failed to load rights file` (a bad
+   config, users or rights file),
    `bcrypt` (a package update broke the bcrypt/passlib pair), or `Address already in use` (something
    else on 5232).
 2. **Did something change?**
@@ -159,7 +217,7 @@ First three checks:
    a fixed start for 10 minutes otherwise), restarts the service and checks 401/207. By hand instead:
    `sudo systemctl reset-failed homelab-calendar && sudo systemctl start homelab-calendar`.
 
-**No "Calendar back up" after the fix?** Every calendar start queues `homelab-calendar-recovered.service`,
+**No "Calendar back online" after the fix?** Every calendar start queues `homelab-calendar-recovered.service`,
 which sends that push from its own unit once the server answers (within 30 s). Look at it:
 `systemctl status homelab-calendar-recovered --no-pager` and `sudo journalctl -u homelab-calendar-recovered -b`.
 `homelab-notify exited 1` means the push itself failed (its reason is on the line before).
@@ -172,7 +230,10 @@ sudo touch /var/lib/homelab-calendar-alert/down && sudo systemctl start homelab-
 sudo journalctl -u homelab-calendar-recovered -n 5 --no-pager   # expect "delivered to N/N device(s)"
 ```
 
-Phones can't sync but there's no push? Check the tailnet first: is the Tailscale app connected on
+Phones can't sync but there's no push? `sudo journalctl -u homelab-calendar -b | grep -i 'rights file'`
+first: rules are tried in order, and a request that reaches a broken one fails with a 500 ("Error in
+section … of rights file") while the service keeps running. The role validates the file before writing it, so this means it was
+edited by hand; run `playbooks/calendar.yml` to put it back. Then check the tailnet: is the Tailscale app connected on
 the phone, and does `https://<node>.<tailnet>.ts.net:8445/` show "Radicale works!" in a browser on the
 tailnet (there's no web UI; that line is all it serves without a login)? Then check
 `tailscale serve status` on the box (8445 → `http://127.0.0.1:5232`).

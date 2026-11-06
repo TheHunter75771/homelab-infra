@@ -1,0 +1,20 @@
+---
+- name: User | calview group
+  ansible.builtin.group:
+    name: "{{ calendar_view_user }}"
+    system: true
+
+# groups "" with append: false keeps the supplementary list empty.
+- name: User | calview system user (no login, no home, no other groups)
+  ansible.builtin.user:
+    name: "{{ calendar_view_user }}"
+    group: "{{ calendar_view_user }}"
+    groups: ""
+    append: false
+    system: true
+    comment: Calendar wall view
+    shell: /usr/sbin/nologin
+    home: /nonexistent
+    create_home: false
+    password_lock: true
+  notify: Calendar view restart

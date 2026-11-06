@@ -2,10 +2,10 @@
 # homelab-calendar-recovered (docs/CONTRACTS.md §13.1, amended): ExecStart= of
 # homelab-calendar-recovered.service, which every start of homelab-calendar.service queues.
 # homelab-calendar-alert.service leaves a marker when the calendar gave up. On the next start this
-# pushes "Calendar back up" (which closes the alert on the dashboard) and removes the marker, but only
+# pushes "Calendar back online" (which closes the alert on the dashboard) and removes the marker, but only
 # once Radicale really serves: an unauthenticated PROPFIND / answers 401, and the same service
 # invocation is still active after a settle period. A server that binds and then dies gets no
-# "back up", and the marker stays for the next start. No marker: does nothing.
+# "back online", and the marker stays for the next start. No marker: does nothing.
 # Always exits 0: a failed push never fails the unit. Settings come from the unit's environment;
 # the defaults match the role's.
 set -u
@@ -17,6 +17,8 @@ HOST=${CALENDAR_HOST:-127.0.0.1}
 PORT=${CALENDAR_PORT:-5232}
 WAIT_SECONDS=${CALENDAR_WAIT_SECONDS:-30}
 SETTLE_SECONDS=${CALENDAR_SETTLE_SECONDS:-5}
+# Must end in a recovery word, or the dashboard never closes the "Calendar is down" alert.
+TITLE=${CALENDAR_RECOVERED_TITLE:-Calendar back online}
 
 [ -e "$MARKER" ] || exit 0
 
@@ -55,7 +57,7 @@ sleep "$SETTLE_SECONDS"
 systemctl is-active --quiet "$SERVICE" || keep_open "$SERVICE stopped within ${SETTLE_SECONDS}s"
 [ "$(invocation)" = "$before" ] || keep_open "$SERVICE restarted within ${SETTLE_SECONDS}s"
 
-"$NOTIFY_BIN" --tag calendar --title "Calendar back up" \
+"$NOTIFY_BIN" --tag calendar --title "$TITLE" \
   --body "homelab-calendar.service is running again." </dev/null
 rc=$?
 # 0 = delivered (or a suppressed duplicate), 2 = no subscribed devices (CONTRACTS §4).

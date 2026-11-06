@@ -1,0 +1,17 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//homelab-infra//calendar-view tests//EN
+BEGIN:VEVENT
+UID:long-title@example.com
+DTSTAMP:20261101T120000Z
+SUMMARY:Parent-teacher conference about the spring science fair project\, t
+ he field trip permission slips\, the winter concert rehearsal schedule\, a
+ nd the bus route change\nSecond line\n\tindented
+DTSTART;VALUE=DATE:20261106
+END:VEVENT
+BEGIN:VEVENT
+UID:no-title@example.com
+DTSTAMP:20261101T120000Z
+DTSTART;VALUE=DATE:20261107
+END:VEVENT
+END:VCALENDAR

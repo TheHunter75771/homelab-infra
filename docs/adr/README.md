@@ -19,3 +19,4 @@ Short records of why things are the way they are. Format: context, decision, con
 - [ADR 0015: The dashboard has its own origin](0015-the-dashboard-has-its-own-origin.md)
 - [ADR 0016: Public Jellyfin moves to a subdomain; the apex is a static homepage](0016-public-jellyfin-on-a-subdomain.md)
 - [ADR 0017: The household calendar is Radicale from the distro, on the host, tailnet only](0017-household-calendar-radicale-on-the-host.md)
+- [ADR 0018: The wall-screen calendar view is a read-only page fed by a read-only CalDAV login](0018-wall-screen-calendar-view.md)

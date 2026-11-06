@@ -22,5 +22,7 @@
     - role: dashboard
     # host service outside Docker like the dashboard; before tailscale_serve, which proxies to it (CONTRACTS §13)
     - role: calendar
+    # read-only wall-screen view of the calendar (CONTRACTS §14)
+    - role: calendar_view
     - role: tailscale_serve
     - role: backups

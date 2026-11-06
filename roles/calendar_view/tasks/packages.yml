@@ -1,0 +1,39 @@
+---
+- name: Packages | icalendar and recurring-ical-events from the Ubuntu archive
+  ansible.builtin.apt:
+    name: "{{ calendar_view_packages }}"
+    state: present
+    install_recommends: false
+    update_cache: true
+    cache_valid_time: 3600
+  notify: Calendar view restart
+
+- name: Packages | installed versions
+  ansible.builtin.command:
+    argv:
+      - "{{ calendar_view_python }}"
+      - -I
+      - -c
+      - |
+        import importlib.metadata as m
+        print(m.version("icalendar"))
+        print(m.version("recurring-ical-events"))
+  register: calendar_view_libs
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# In check mode on a fresh host nothing is installed yet; the check runs whenever the probe could answer.
+- name: Packages | the contract's major versions (icalendar 6, recurring-ical-events 3)
+  ansible.builtin.assert:
+    that:
+      - calendar_view_libs.rc == 0
+      - calendar_view_libs.stdout_lines | length == 2
+      - calendar_view_libs.stdout_lines[0].split('.')[0] == calendar_view_icalendar_major | string
+      - calendar_view_libs.stdout_lines[1].split('.')[0] == calendar_view_recurring_ical_events_major | string
+    fail_msg: >-
+      Expected icalendar {{ calendar_view_icalendar_major }}.x and recurring-ical-events
+      {{ calendar_view_recurring_ical_events_major }}.x from the Ubuntu archive; got:
+      {{ calendar_view_libs.stdout | default('') }} {{ calendar_view_libs.stderr | default('') | truncate(300) }}
+    quiet: true
+  when: not ansible_check_mode or calendar_view_libs.rc == 0

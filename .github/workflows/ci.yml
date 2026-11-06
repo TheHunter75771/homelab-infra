@@ -168,6 +168,15 @@ jobs:
             pip install "$k==$P"
           done
           python3 -m unittest discover -s roles/calendar/tests -v
+      - name: calendar-view (agenda, HTTP, stale cache, real Radicale fetch)
+        run: |
+          for k in icalendar recurring_ical_events; do
+            P=$(python3 -c "import yaml;v=yaml.safe_load(open('inventory/group_vars/all/versions.yml'));print(v['python_packages']['$k'])")
+            pip install "${k//_/-}==$P"
+          done
+          python3 -m unittest discover -s apps/calendar-view/tests -t apps/calendar-view -v
+      - name: calendar_view role (render, no_log guard)
+        run: python3 -m unittest discover -s roles/calendar_view/tests -v
       - name: storage format guard
         run: |
           pip install -r requirements-tools.txt
@@ -178,6 +187,8 @@ jobs:
       # ./collections, /tmp/vault-pass). Keep it after both.
       - name: calendar check mode (no passlib yet; needs the tools above and libpass from the calendar step)
         run: ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook --check -i localhost, -c local roles/calendar/tests/test_check_mode.yml
+      - name: calendar_view role offline (preflight, install/prune, config validate, check mode)
+        run: ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/calendar_view/tests/test_offline.yml
       - name: base sysctl filter
         run: python3 -m unittest discover -s roles/base/tests -v
       - name: base sysctl files

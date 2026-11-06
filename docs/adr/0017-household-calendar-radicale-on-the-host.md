@@ -17,6 +17,6 @@ Noah wants one self-hosted calendar for the household. It has to sync with both 
 - **One small, extra host service.** A media-drive failure doesn't take the calendar down, and phones keep working from their cache while the box is off.
 - **Each phone has two CalDAV accounts** (own + `household`). Each login can see only its own calendars, and anything both people should see goes under `household`.
 - **Recovery:**
-  - A failed service pushes "Calendar is down" through `homelab-notify` (after 5 failed starts in 10 minutes), and "Calendar back up" once it's running again.
+  - A failed service pushes "Calendar is down" through `homelab-notify` (after 5 failed starts in 10 minutes), and "Calendar back online" once it's running again.
   - Restores come from git (one event) or the nightly backup (everything).
 - **Later items:** a FastAPI debrief service, a PWA, and push for the household member's phone. Each is its own item and reads the same CalDAV server.

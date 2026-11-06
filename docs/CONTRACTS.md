@@ -139,7 +139,7 @@ This is the single spec for the MVP build. Builders own exactly the paths listed
 ## 9. Lead-owned files
 `ansible.cfg`, `requirements.yml`, `inventory/**`, `playbooks/bootstrap.yml`, `playbooks/site.yml`, `docs/CONTRACTS.md`, `README.md`, `CLAUDE.md`, `.github/workflows/ci.yml`, `.gitignore`, lint configs.
 
-`playbooks/site.yml` order (hosts `media_servers`, become): base → users → ssh_hardening → tailscale → dns → watchdog → storage → firewall → docker → bootgate → notifier → stacks → dashboard → calendar → tailscale_serve → backups (firewall moved before docker, review L1; dashboard added 2026-10-24, §11.5; calendar added 2026-11-06, §13; deploy it with `playbooks/calendar.yml` only, §13.4).
+`playbooks/site.yml` order (hosts `media_servers`, become): base → users → ssh_hardening → tailscale → dns → watchdog → storage → firewall → docker → bootgate → notifier → stacks → dashboard → calendar → calendar_view → tailscale_serve → backups (firewall moved before docker, review L1; dashboard added 2026-10-24, §11.5; calendar added 2026-11-06, §13; deploy it with `playbooks/calendar.yml` only, §13.4).
 
 ## 9b. Ownership of shared paths (amended)
 - `{{ homelab_push_dir }}`: owner and mode set **only** by `dashboard` (user `dashboard` 10101, §11.1; was `stacks`/`pushcore` before 2026-10-24). The notifier, backups and heartbeat read it and never chown or chmod it.
@@ -187,6 +187,7 @@ This is the single spec for the MVP build. Builders own exactly the paths listed
 | T cloudflare-as-code | `terraform/cloudflare/` (OpenTofu; P8 #2, encrypted local state, never applied without a reviewed plan) |
 | E ops | `roles/backups/`, `playbooks/gaming-pc.yml`, `playbooks/edge.yml`, `roles/heartbeat/`, `roles/backup_pull/` |
 | Q calendar | `roles/calendar/`, `playbooks/calendar.yml`, `docs/runbooks/calendar.md` (§13) |
+| R calendar view | `apps/calendar-view/`, `roles/calendar_view/` (§14) |
 
 ## 11. Dashboard v2 (build started 2026-10-24)
 Design: `docs/design/handoff/README.md` (high fidelity), corrected by `docs/design/handoff/CORRECTIONS.md`. Decisions: **host service outside Docker** (ADR 0013), **tailnet-only in v2.0** (ADR 0014). The dashboard **absorbs push-core**: the same port, the push store and every push-core endpoint the notifier and phones use.
@@ -2632,9 +2633,9 @@ Noah 2026-11-06: one self-hosted calendar for him and a second household member 
   - `After=network.target`. **No ordering on `docker.service` or `bootgate.service`**: the calendar must run while the boot gate holds Docker (ADR 0004, same reason as ADR 0013).
   - Hardening: the dashboard's full directive set (§11.1, `roles/dashboard/templates/homelab-dashboard.service.j2`) with `ReadWritePaths={{ homelab_data_dir }}/calendar`. Also `IPAddressDeny=any`, `IPAddressAllow=localhost`, `MemoryDenyWriteExecute=yes`, `UMask=0027`, `MemoryMax=192M`, `TasksMax=64`. Target: `systemd-analyze security homelab-calendar` exposure ≤ 2.0. Put the measured score in the unit's header comment.
   - `OnFailure=homelab-calendar-alert.service`. That's a oneshot running `{{ notifier_bin | default('/usr/local/bin/homelab-notify') }} --tag calendar --title "Calendar is down" --body "homelab-calendar.service failed. See: journalctl -u homelab-calendar"` with `SuccessExitStatus=2`, following the `homelab-backup-alert.service` pattern (§8). It also writes a marker under `StateDirectory=homelab-calendar-alert`.
-  - `ExecStartPost=+/usr/local/sbin/homelab-calendar-recovered`: if the marker exists, push `--tag calendar --title "Calendar back up"` and remove the marker. That closes the alert on the dashboard (recovery-word rule, §11). With no marker it does nothing and exits 0. A failed push never fails the unit.
+  - `ExecStartPost=+/usr/local/sbin/homelab-calendar-recovered`: if the marker exists, push `--tag calendar --title "Calendar back online"` and remove the marker. That closes the alert on the dashboard: `isRecovery` in `apps/dashboard/server/src/collectors/alerts.js` needs the title to END in a recovery word, so "back online", never "back up" (amended 2026-11-06). With no marker it does nothing and exits 0. A failed push never fails the unit.
 - **Amended (Lead, 2026-11-06, Builder Q's finding):**
-  - **The recovery push runs in its own unit.** `ExecStartPost=+` stays in the calendar's cgroup, so `IPAddressDeny=any` would drop the push to the internet. The calendar unit now only runs `ExecStartPost=+/usr/bin/systemctl start --no-block homelab-calendar-recovered.service`. That oneshot runs `/usr/local/sbin/homelab-calendar-recovered` (wait for the server, push "Calendar back up" if the marker exists, remove the marker). It has `After=network-online.target`, the marker state dir and no IP filter, and it never fails its caller. The IP filter on the calendar unit stays.
+  - **The recovery push runs in its own unit.** `ExecStartPost=+` stays in the calendar's cgroup, so `IPAddressDeny=any` would drop the push to the internet. The calendar unit now only runs `ExecStartPost=+/usr/bin/systemctl start --no-block homelab-calendar-recovered.service`. That oneshot runs `/usr/local/sbin/homelab-calendar-recovered` (wait for the server, push "Calendar back online" if the marker exists, remove the marker). It has `After=network-online.target`, the marker state dir and no IP filter, and it never fails its caller. The IP filter on the calendar unit stays.
   - **Reserved names:** preflight also refuses any login or calendar id that equals a name in role backups' `backups_exclude_dirs`. Those folders are skipped by the nightly backup wherever they appear, and a test keeps the two lists equal.
 - **Amended (Lead, 2026-11-06, Reviewer round 1):**
   - "Back up" requires an unauthenticated `PROPFIND /` → 401, then a short settle with `homelab-calendar.service` still active on the same InvocationID. One TCP accept isn't enough.
@@ -2701,10 +2702,10 @@ Noah 2026-11-06: one self-hosted calendar for him and a second household member 
   - The role runs twice, the second with `changed=0`.
   - 401/207 on loopback.
   - `systemctl stop docker` (or Docker absent) doesn't affect the calendar.
-  - A broken config gives 5 starts → `failed` → the alert unit ran. Fixed config gives a "back up" push and no marker left.
+  - A broken config gives 5 starts → `failed` → the alert unit ran. Fixed config gives a "Calendar back online" push and no marker left.
   - `systemd-analyze security` ≤ 2.0.
   - `tailscale_serve` is not exercised in the VM.
-- **Amended (2026-11-06, Reviewer round 1):** the failure check must show the stub logging **exactly one** "Calendar is down" per crash-looping incident and **none** for a crash that heals. A run where the unit merely reaches `failed` isn't enough. Then exactly one "Calendar back up" after the fix.
+- **Amended (2026-11-06, Reviewer round 1):** the failure check must show the stub logging **exactly one** "Calendar is down" per crash-looping incident and **none** for a crash that heals. A run where the unit merely reaches `failed` isn't enough. Then exactly one "Calendar back online" after the fix.
 - **Then the media server:**
   - `playbooks/calendar.yml --check --diff`, then a real run, then a re-run with `changed=0`.
   - Over the tailnet from the gaming PC: `https://<node>:8445/` gives 401 and 207.
@@ -2719,3 +2720,118 @@ Noah 2026-11-06: one self-hosted calendar for him and a second household member 
 | C stacks | the 8445 handler and its test/fixtures in `roles/tailscale_serve/`, and the handler count in `roles/ai_control/tests/serve_case.yml` |
 | A host | the 8445 lines in `tailscale/policy.example.hujson` |
 | Lead | §13, §9, §10, `site.yml`, `versions.yml`, `inventory/**`, vault, `ci.yml`, ADR 0017, `rotate-a-secret.md` |
+
+## 14. Wall-screen calendar view (build started 2026-11-06)
+Noah 2026-11-06: a read-only page for the pantry station's wall screen (15.6" 1080p landscape, a full-screen browser, read from across the room). It also works on the PC and phones. It shows **today plus the next 6 days** for three calendars: the household login's **Shared** and **School**, and Noah's **Routines**. It's its own tailnet page for now. Rotating or splitting the screen with the pantry Station page is decided once the screen is mounted. Builds on §13; no write paths of any kind.
+
+### 14.1 Read-only viewer login (module Q, role `calendar`)
+- **Rights move from `owner_only` to `from_file`** (`/etc/homelab-calendar/rights`, root:calendar 0640, templated).
+  - Rules that reproduce `owner_only` exactly: `R` on the root, `RW` on `{user}`, `rw` on `{user}/[^/]+`. They match listed accounts only (see the amendment below).
+  - Plus one rule per entry in `calendar_viewers` (host_vars): `[{user, read: ["<owner>/<calendar id>", …]}]`. That gives `r` (calendar read only, never `R`/`W`/`w`) on an anchored, regex-escaped alternation of exactly those paths.
+  - Preflight checks:
+    - every listed path names an account and calendar in `calendar_accounts`;
+    - a viewer user isn't also an account;
+    - viewer users and paths pass the same name rules as §13.1.
+- **Logins:** viewers get bcrypt logins from the same `calendar_passwords` (vault). A viewer owns no calendars, and the role creates none for it.
+- **Must still hold** (extend the real-server tests):
+  - every §13.1 refusal: cross-user read and write, whole-calendar delete and overwrite;
+  - the viewer can `REPORT`/`GET` its listed calendars;
+  - the viewer can't `PUT`/`DELETE`/`MKCALENDAR`/`PROPPATCH` anywhere, read an unlisted calendar, or list another user's home;
+  - account owners behave exactly as before.
+
+- **Amended (Lead, 2026-11-06, Builder Q's findings):**
+  - The owner rules reproduce `owner_only` exactly as in the 3.6.0 source: `R` on the root, **`RW`** on the login's own home (Radicale creates a home on first login only with `W`), and `rw` under it.
+  - They match only the listed **accounts**, never `.+`. Otherwise a viewer would get a writable home of its own.
+  - Each viewer gets an empty, untracked home folder, so Radicale stops logging a denied warning on every poll.
+  - Viewers get 403 on `/` and on every home, so the view must use its explicit calendar paths, never discovery.
+
+### 14.2 The app (module R, `apps/calendar-view/`)
+- **Runtime:** Python 3 from the distro, standard library HTTP server (`ThreadingHTTPServer`), plus the archive packages `python3-icalendar` and `python3-recurring-ical-events`. No pip on the host, no web framework, no build step for the page.
+- **Fetching:**
+  - One CalDAV `REPORT` (calendar-query with a time-range of the 7-day window) per configured calendar, sent with `urllib` to `http://127.0.0.1:5232` as the viewer.
+  - Multistatus is parsed with `xml.etree`; the server is trusted loopback, but entity expansion stays off.
+  - Recurrence, exceptions and time zones come **only** from `recurring-ical-events` and `icalendar`. No hand-rolled date logic.
+  - Cache the last good agenda. When a fetch fails, serve the cache marked stale with its age, and never show an empty week as if it were real.
+- **Window and time:**
+  - The window is [local midnight today, local midnight + 7 days) in `America/New_York` (config).
+  - Events that cross midnight show on the day they start, and continue the next day only if more than 0 minutes fall after 06:00. The dinner window 23:00–01:00 shows on its start day only.
+  - All-day and multi-day all-day events appear on every day they cover.
+  - Floating times count as local.
+- **API:**
+  - `GET /api/agenda` → JSON:
+    - `generated` (ISO), `stale`, `stale_seconds`;
+    - `today`: `{date_label, now: [...], next: {...}|null}`;
+    - `days[7]`: `{date, label}` with `events: [{title, calendar, color, start_label, end_label, all_day}]`.
+    - Labels are pre-formatted server-side, so the page holds no date logic. Titles are plain text, capped at 120 characters.
+  - `GET /healthz` → 200 `ok` when the last fetch is under 5 minutes old, else 503.
+  - `GET /` and `/static/*`: static files only.
+  - Everything else is 404. Only GET and HEAD are allowed (405 otherwise).
+- **Page:**
+  - One HTML file plus one CSS and one JS file. Vanilla, no external requests, no web fonts.
+  - Layout: today on the left (big date, clock, NOW and NEXT, today's list) and the next 6 days on the right.
+  - Dark theme, readable at about 3 m on 15.6" 1080p, and it degrades to a single column on a phone.
+  - Fetches `/api/agenda` every 60 s; the clock ticks locally.
+  - Shows a visible "not updated for N min" banner when the data is stale or the fetch fails.
+  - Sets text only with `textContent`, never `innerHTML`.
+  - Calendar colors come from config.
+- **Headers on every response:**
+  - `Content-Security-Policy: default-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'`;
+  - `X-Content-Type-Options: nosniff`;
+  - `Referrer-Policy: no-referrer`;
+  - `Cache-Control: no-store` on the API.
+- **Config:** `/etc/homelab-calendar-view/config.json`, root:calview 0640, rendered by the role. It holds the base URL, viewer user and password, time zone, days, and calendars `[{path, label, color}]`. The password never appears in logs or the process list.
+- **Tests:** stdlib `unittest`.
+  - **Agenda builder** with fixtures:
+    - weekly recurring with `EXDATE`;
+    - an all-day event and a 3-day all-day event;
+    - an event crossing the 2026-11-01 DST change;
+    - the 23:00–01:00 event;
+    - a floating-time event;
+    - window edges;
+    - NOW/NEXT at fixed clocks;
+    - title capping.
+  - **Fetch with a real Radicale 3.6.0** (skipped if not importable): the viewer reads its calendars and is refused elsewhere.
+  - **Stale cache:** a fetch failure gives `stale` plus the cached data, and `/healthz` returns 503.
+  - **HTTP surface:** headers, 404, 405, path traversal under `/static`.
+
+### 14.3 Runtime (module R, role `calendar_view`)
+- **Package and user:**
+  - Packages: `python3-icalendar`, `python3-recurring-ical-events`. Assert the major versions (icalendar 6, recurring-ical-events 3).
+  - System user `calview` (nologin, no home).
+  - App at `/opt/homelab-calendar-view` (root-owned, read-only).
+- **Unit `homelab-calendar-view.service`:**
+  - Loopback `127.0.0.1:5233`.
+  - The dashboard's hardening set plus `IPAddressDeny=any`, `IPAddressAllow=localhost`, `MemoryMax=128M`.
+  - `Restart=always`, `RestartMode=direct`, and **no start limit** (a display keeps retrying).
+  - No ordering on docker or the boot gate. `After=homelab-calendar.service`, `Wants=` but not `Requires=`, so the view serves its stale cache when the calendar is down.
+  - Exposure target ≤ 2.0, recorded in the unit header.
+- **No push alerts in v1:** a dead wall page is visible on the wall.
+- **Health check after start:** `/healthz` 200 within retries.
+- **Playbook:** `playbooks/calendar.yml` gains role `calendar_view`, after `calendar` and before `tailscale_serve`. `site.yml` gets the same.
+
+### 14.4 Exposure and policy
+- **Module C:** handler `{ port: 8446, mount: /, backend: "http://127.0.0.1:5233" }` with its own origin. It's coordinated with the open `serve-safe` work in `roles/tailscale_serve`, and **lands after or inside it**.
+- **Module A, policy example:** household gets `tcp:8446` as well. A new `tag:kiosk` (the station mini PC once it joins the tailnet) gets only `tag:server:8446`, plus whatever pantry needs on ai-box, which is out of scope here.
+  - Tests: kiosk accepts `tag:server:8446`; denies 22, 443, 8443, 8444, 8445 and 9999.
+  - Noah pastes the live change.
+
+### 14.5 Integrator
+- **Before the live run:** both roles' tests pass, then `calendar.yml --check --diff`.
+- **Live run checks:**
+  - the rights switch keeps phones working: `noah` and `household` 207 on their homes, cross-user 403;
+  - the viewer reads its 3 calendars and is refused everywhere else;
+  - `/api/agenda` shows today's Routines;
+  - the page renders in a browser at 1920×1080 and at phone width;
+  - stopping `homelab-calendar` gives a stale banner instead of an empty week;
+  - re-run `changed=0`;
+  - exposure ≤ 2.0.
+- **No VM this time** (Noah deleted the kit). The real-server tests and check mode stand in, plus an immediate rollback: re-deploy 244eb8b's `owner_only` rights if a phone loses access.
+
+### 14.6 Ownership
+| Module | Owns |
+|---|---|
+| Q calendar | §14.1 changes in `roles/calendar/` (rights template, viewer logins, preflight, tests, README, runbook) |
+| R calendar view | `apps/calendar-view/`, `roles/calendar_view/` |
+| C stacks | the 8446 handler (after `serve-safe`) |
+| A host | the 8446 / `tag:kiosk` lines in `tailscale/policy.example.hujson` |
+| Lead | §14, §10 row, `playbooks/calendar.yml`, `site.yml`, `inventory/**`, vault, `ci.yml`, ADR 0018 |

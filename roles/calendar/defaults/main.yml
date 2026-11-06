@@ -23,6 +23,19 @@ calendar_user: calendar
 #   - { user: household, calendars: [{ id: shared, name: Shared }] }
 # The role creates missing calendars and never deletes or renames one.
 calendar_accounts: []
+# Read-only logins (host_vars; CONTRACTS §14.1), e.g. the wall-screen view:
+#   - { user: viewer, read: [household/shared, household/school, alice/routines] }
+# A viewer reads (r) exactly the "<owner>/<calendar id>" paths listed, all of them calendars in
+# calendar_accounts, and nothing else: no root, no home of its own, no writes. It owns no calendars;
+# the role creates none for it. Its password is in calendar_passwords like any login's.
+calendar_viewers: []
+# Every login in the users file: accounts, then viewers.
+calendar_logins: "{{ (calendar_accounts + calendar_viewers) | map(attribute='user') | list }}"
+# "<owner>/<calendar id>" for every calendar the role manages (what a viewer may be given).
+calendar_calendar_paths: >-
+  {{ calendar_accounts | subelements('calendars') | map('first') | map(attribute='user')
+     | zip(calendar_accounts | subelements('calendars') | map('last') | map(attribute='id'))
+     | map('join', '/') | list }}
 # Directory names the nightly backup prunes anywhere under homelab_data_dir (role backups,
 # backups_exclude_dirs). A login or calendar id with one of these names would silently miss the
 # backup, so the preflight refuses them. tests/test_render.py keeps this equal to role backups' list.
@@ -49,6 +62,10 @@ calendar_base_url: "http://{{ calendar_listen_host }}:{{ calendar_port }}"
 calendar_config_dir: /etc/homelab-calendar
 calendar_config_file: "{{ calendar_config_dir }}/config"
 calendar_users_file: "{{ calendar_config_dir }}/users"
+# Radicale's from_file rights (templates/rights.j2): owner_only for accounts, plus each viewer's reads.
+calendar_rights_file: "{{ calendar_config_dir }}/rights"
+# The owner rules' login pattern: exactly the accounts (regex-escaped alternation), never a viewer.
+calendar_rights_accounts: "(?:{{ calendar_accounts | map(attribute='user') | map('regex_escape') | join('|') }})"
 # System disk; the nightly backup (role backups) already covers homelab_data_dir.
 calendar_data_dir: "{{ homelab_data_dir }}/calendar"
 calendar_collections_dir: "{{ calendar_data_dir }}/collections"
@@ -66,9 +83,14 @@ calendar_alert_marker: /var/lib/{{ calendar_alert_state_name }}/down
 calendar_recovered_script: /usr/local/sbin/homelab-calendar-recovered
 # Runs the script in its own unit, outside the calendar's IP filter (CONTRACTS §13.1, amended).
 calendar_recovered_service: homelab-calendar-recovered.service
-# homelab-calendar-recovered says "back up" only once an unauthenticated PROPFIND / answers 401
+# The recovery push's title. The dashboard closes the "Calendar is down" alert only with a later push
+# on the same tag whose title ENDS in a recovery word and holds no failure qualifier
+# (apps/dashboard/server/src/collectors/alerts.js, isRecovery: back, recovered, online, resolved, …).
+# "Calendar back up" ends in "up" and would never close it; tests/test_render.py checks this one does.
+calendar_recovered_title: Calendar back online
+# homelab-calendar-recovered says "back online" only once an unauthenticated PROPFIND / answers 401
 # (waiting up to this long), and the same service invocation is still active after the settle period.
-# A server that binds and then dies never gets a false "back up".
+# A server that binds and then dies never gets a false "back online".
 calendar_recovered_wait_seconds: 30
 calendar_recovered_settle_seconds: 5
 # The push store's group (role dashboard: its account and group share dashboard_user). The recovered

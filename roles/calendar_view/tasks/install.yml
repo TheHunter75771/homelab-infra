@@ -1,0 +1,96 @@
+---
+# The app's code only -> calendar_view_app_dir: the launcher (0755), the calendar_view package (*.py,
+# 0644) and the page's three files (web/, 0644), in root-owned 0755 directories. No tests, README, example
+# config or caches. Anything else in the directory (a module that no longer exists, a stray file, a
+# __pycache__) is removed. tests/test_offline.yml runs this unprivileged into a scratch dir.
+- name: Install | the package's modules on the controller
+  ansible.builtin.set_fact:
+    calendar_view_modules: >-
+      {{ query('ansible.builtin.fileglob', calendar_view_src_dir ~ '/' ~ calendar_view_package ~ '/*.py')
+         | map('basename') | sort }}
+
+- name: Install | the source tree looks like calendar-view
+  ansible.builtin.assert:
+    that:
+      - "'__main__.py' in calendar_view_modules"
+      - (calendar_view_src_dir ~ '/' ~ calendar_view_launcher) is file
+      - calendar_view_web_files | map('regex_replace', '^', calendar_view_src_dir ~ '/web/') | select('file') | list | length
+        == calendar_view_web_files | length
+    fail_msg: "{{ calendar_view_src_dir }} doesn't hold the calendar-view launcher, package and page."
+    quiet: true
+
+# The prune below deletes everything else in the install dir: never point it at a shared directory.
+- name: Install | the install dir is a dedicated calendar-view directory
+  ansible.builtin.assert:
+    that:
+      - calendar_view_app_dir is abs
+      - calendar_view_app_dir | basename == 'homelab-calendar-view'
+    fail_msg: calendar_view_app_dir must be an absolute path ending in /homelab-calendar-view (it is pruned), not {{ calendar_view_app_dir }}.
+    quiet: true
+
+- name: Install | code directories (root-owned, read-only to the service)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ calendar_view_root_owner }}"
+    group: "{{ calendar_view_root_owner }}"
+    mode: "0755"
+  loop:
+    - "{{ calendar_view_app_dir }}"
+    - "{{ calendar_view_app_dir }}/{{ calendar_view_package }}"
+    - "{{ calendar_view_app_dir }}/web"
+
+- name: Install | launcher
+  ansible.builtin.copy:
+    src: "{{ calendar_view_src_dir }}/{{ calendar_view_launcher }}"
+    dest: "{{ calendar_view_app_dir }}/{{ calendar_view_launcher }}"
+    owner: "{{ calendar_view_root_owner }}"
+    group: "{{ calendar_view_root_owner }}"
+    mode: "0755"
+    follow: false
+  notify: Calendar view restart
+
+- name: Install | package modules
+  ansible.builtin.copy:
+    src: "{{ calendar_view_src_dir }}/{{ calendar_view_package }}/{{ item }}"
+    dest: "{{ calendar_view_app_dir }}/{{ calendar_view_package }}/{{ item }}"
+    owner: "{{ calendar_view_root_owner }}"
+    group: "{{ calendar_view_root_owner }}"
+    mode: "0644"
+    follow: false
+  loop: "{{ calendar_view_modules }}"
+  notify: Calendar view restart
+
+# The server reads these once at start, so a change needs the restart too.
+- name: Install | the page (index.html, app.css, app.js)
+  ansible.builtin.copy:
+    src: "{{ calendar_view_src_dir }}/web/{{ item }}"
+    dest: "{{ calendar_view_app_dir }}/web/{{ item }}"
+    owner: "{{ calendar_view_root_owner }}"
+    group: "{{ calendar_view_root_owner }}"
+    mode: "0644"
+    follow: false
+  loop: "{{ calendar_view_web_files }}"
+  notify: Calendar view restart
+
+- name: Install | what is in the install dir now
+  ansible.builtin.find:
+    paths: "{{ calendar_view_app_dir }}"
+    recurse: true
+    follow: false
+    file_type: any
+    hidden: true
+  register: calendar_view_installed
+
+- name: Install | anything else is removed
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ calendar_view_installed.files | map(attribute='path') | reject('in', calendar_view_wanted) | sort }}"
+  vars:
+    calendar_view_wanted: >-
+      {{ [calendar_view_app_dir ~ '/' ~ calendar_view_launcher, calendar_view_app_dir ~ '/' ~ calendar_view_package,
+          calendar_view_app_dir ~ '/web']
+         + (calendar_view_modules | map('regex_replace', '^', calendar_view_app_dir ~ '/' ~ calendar_view_package ~ '/') | list)
+         + (calendar_view_web_files | map('regex_replace', '^', calendar_view_app_dir ~ '/web/') | list) }}
+  notify: Calendar view restart

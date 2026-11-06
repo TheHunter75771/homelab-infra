@@ -1,0 +1,229 @@
+---
+# Offline test of role calendar_view: no root, no host, nothing written outside a scratch dir. The role's
+# task files are included directly (not the role), so its restart handler never touches systemd; a
+# same-named handler here counts the restarts instead.
+#   - tasks/preflight.yml passes good inputs and stops each bad one with its plain-English message;
+#   - tasks/install.yml installs the app's code, prunes strays (a removed module, a __pycache__, a stray
+#     file), and a third run changes nothing (no restart requested);
+#   - tasks/config.yml writes the settings 0640 and checks them with the installed app's own loader; a
+#     value the loader refuses never reaches the file, and a re-run changes nothing;
+#   - in check mode on a fresh dir, install and config run, report changes, and write nothing.
+# Placeholders only (alice, household, viewer) and a test-only password.
+#   .venv/bin/ansible-playbook -i localhost, -c local roles/calendar_view/tests/test_offline.yml </dev/null 2>&1 | cat
+- name: Role calendar_view, offline
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+  vars:
+    calendar_view_test_good_calendars:
+      - { path: household/shared, label: Shared, color: "#4F8CFF" }
+      - { path: alice/routines, label: " Routines ", color: "#f2a93b" }
+    calendar_view_test_good_viewers:
+      - { user: viewer, read: [household/shared, household/school, alice/routines] }
+    calendar_view_test_restarts: 0
+  handlers:
+    - name: Calendar view restart
+      ansible.builtin.set_fact:
+        calendar_view_test_restarts: "{{ calendar_view_test_restarts | int + 1 }}"
+  tasks:
+    - name: A scratch directory
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: calendar-view-offline-
+      register: calendar_view_test_tmp
+
+    # Block vars: above vars_files (the role defaults), below each include's own vars (the bad inputs).
+    - name: All the checks, then clean up
+      vars:
+        t: "{{ calendar_view_test_tmp.path }}"
+        calendar_view_src_dir: "{{ playbook_dir }}/../../../apps/calendar-view"
+        calendar_view_python: "{{ ansible_playbook_python }}"
+        calendar_view_calendars: "{{ calendar_view_test_good_calendars }}"
+        calendar_viewers: "{{ calendar_view_test_good_viewers }}"
+        calendar_passwords:
+          viewer: offline-test-only-viewer-0001
+        calendar_view_app_dir: "{{ t }}/opt/homelab-calendar-view"
+        calendar_view_config_dir: "{{ t }}/etc/homelab-calendar-view"
+        calendar_view_root_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        # The config file's group: the test user's own (calview doesn't exist here).
+        calendar_view_user: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
+      block:
+        # --- preflight ------------------------------------------------------------------------------------
+        - name: Preflight passes good inputs
+          ansible.builtin.include_tasks: ../tasks/preflight.yml
+
+        - name: Preflight stops each bad input with its message
+          ansible.builtin.include_tasks: preflight_case.yml
+          loop:
+            - { what: another loopback address, listen_host: 127.0.0.2, expect: must be exactly 127.0.0.1 }
+            - { what: no calendars, calendars: [], expect: must list 1 to 12 calendars }
+            - what: "a color that isn't #rrggbb"
+              calendars: [{ path: household/shared, label: Shared, color: "red" }]
+              expect: a color "#rrggbb"
+            - what: a path outside the name rules
+              calendars: [{ path: "../household/shared", label: Shared, color: "#4f8cff" }]
+              expect: '"<login>/<calendar id>"'
+            - { what: no password, passwords: {}, expect: "for the viewer login viewer" }
+            - { what: a short password, passwords: { viewer: short }, expect: "for the viewer login viewer" }
+            - what: a calendar the viewer can't read
+              calendars: [{ path: alice/personal, label: Personal, color: "#4f8cff" }]
+              expect: "whose `read` list holds every path"
+            - { what: no viewer entry, viewers: [], expect: "needs an entry for viewer" }
+            - { what: an unknown time zone, timezone: Mars/Olympus_Mons, expect: "isn't in /usr/share/zoneinfo" }
+          loop_control:
+            loop_var: case
+            label: "{{ case.what }}"
+
+        # --- install ----------------------------------------------------------------------------------------
+        - name: Install 1
+          ansible.builtin.include_tasks: ../tasks/install.yml
+
+        - name: Restarts after install 1
+          ansible.builtin.meta: flush_handlers
+
+        - name: Plant a removed module, a bytecode cache and a stray file
+          ansible.builtin.shell:
+            cmd: |
+              set -eu
+              echo old > "{{ calendar_view_app_dir }}/calendar_view/removed.py"
+              mkdir -p "{{ calendar_view_app_dir }}/calendar_view/__pycache__"
+              echo x > "{{ calendar_view_app_dir }}/calendar_view/__pycache__/agenda.cpython-314.pyc"
+              echo x > "{{ calendar_view_app_dir }}/web/config.json"
+              echo x > "{{ calendar_view_app_dir }}/README.md"
+          changed_when: true
+
+        - name: Install 2 (prunes)
+          ansible.builtin.include_tasks: ../tasks/install.yml
+
+        - name: Restarts after install 2
+          ansible.builtin.meta: flush_handlers
+
+        - name: Install 3 (nothing to do)
+          ansible.builtin.include_tasks: ../tasks/install.yml
+
+        - name: Restarts after install 3
+          ansible.builtin.meta: flush_handlers
+
+        - name: What is installed
+          ansible.builtin.find:
+            paths: "{{ calendar_view_app_dir }}"
+            recurse: true
+            hidden: true
+            file_type: any
+          register: calendar_view_test_found
+
+        - name: Exactly the launcher, the package and the page; install 3 requested no restart
+          ansible.builtin.assert:
+            that:
+              - calendar_view_test_found.files | map(attribute='path') | map('relpath', calendar_view_app_dir) | sort
+                == (['calendar-view', 'calendar_view', 'web'] + (calendar_view_modules | map('regex_replace', '^', 'calendar_view/') | list)
+                    + ['web/app.css', 'web/app.js', 'web/index.html']) | sort
+              - calendar_view_test_found.files | selectattr('path', 'search', '/calendar-view$') | map(attribute='mode') | first == '0755'
+              - calendar_view_test_found.files | selectattr('path', 'search', '[.](py|js|css|html)$') | map(attribute='mode') | unique == ['0644']
+              - calendar_view_test_restarts | int == 2
+            fail_msg: >-
+              Installed: {{ calendar_view_test_found.files | map(attribute='path') | map('relpath', calendar_view_app_dir) | sort }};
+              restarts {{ calendar_view_test_restarts }} (want 2: install 1, install 2's prune, none for install 3).
+            quiet: true
+
+        # --- config -----------------------------------------------------------------------------------------
+        - name: Config 1
+          ansible.builtin.include_tasks: ../tasks/config.yml
+
+        - name: Restarts after config 1
+          ansible.builtin.meta: flush_handlers
+
+        - name: Config 2 (nothing to do)
+          ansible.builtin.include_tasks: ../tasks/config.yml
+
+        - name: Restarts after config 2
+          ansible.builtin.meta: flush_handlers
+
+        - name: The settings file
+          ansible.builtin.stat:
+            path: "{{ calendar_view_config_file }}"
+          register: calendar_view_test_config
+
+        - name: Read the settings back (the test's own password)
+          ansible.builtin.slurp:
+            src: "{{ calendar_view_config_file }}"
+          register: calendar_view_test_config_body
+
+        - name: The installed app accepts its settings
+          ansible.builtin.command:
+            argv: ["{{ ansible_playbook_python }}", -I, -B, "{{ calendar_view_app_dir }}/calendar-view", --check-config,
+                   "{{ calendar_view_config_file }}"]
+          register: calendar_view_test_check
+          changed_when: false
+
+        - name: 0640, the app's keys, written once
+          vars:
+            settings: "{{ calendar_view_test_config_body.content | b64decode | from_json }}"
+          ansible.builtin.assert:
+            that:
+              - calendar_view_test_config.stat.mode == '0640'
+              - settings.password == 'offline-test-only-viewer-0001'
+              - settings.calendars | map(attribute='path') | list == ['household/shared', 'alice/routines']
+              - settings.calendars | map(attribute='label') | list == ['Shared', 'Routines']
+              - settings.calendars | map(attribute='color') | list == ['#4f8cff', '#f2a93b']
+              - settings.listen_port == 5233 and settings.days == 7 and settings.base_url == 'http://127.0.0.1:5232'
+              - calendar_view_test_check.rc == 0
+              - calendar_view_test_restarts | int == 3
+            fail_msg: "mode {{ calendar_view_test_config.stat.mode }}, restarts {{ calendar_view_test_restarts }} (want 3)"
+            quiet: true
+
+        - name: A value the app refuses never reaches the file
+          block:
+            - name: Config with a time zone the app doesn't know (past the preflight)
+              ansible.builtin.include_tasks: ../tasks/config.yml
+              vars:
+                calendar_view_timezone: Mars/Olympus_Mons
+            - name: The write should have been refused
+              ansible.builtin.fail:
+                msg: The app's validate step accepted an unknown time zone.
+          rescue:
+            - name: The file still holds the good settings
+              ansible.builtin.slurp:
+                src: "{{ calendar_view_config_file }}"
+              register: calendar_view_test_after
+
+            - name: Unchanged
+              ansible.builtin.assert:
+                that: (calendar_view_test_after.content | b64decode | from_json).timezone == 'America/New_York'
+                quiet: true
+
+        # --- check mode on a fresh host ---------------------------------------------------------------------
+        - name: Install in check mode on a fresh dir
+          ansible.builtin.include_tasks:
+            file: ../tasks/install.yml
+            apply:
+              check_mode: true
+          vars:
+            calendar_view_app_dir: "{{ t }}/fresh/homelab-calendar-view"
+
+        - name: Config in check mode on a fresh dir, with an account that doesn't exist yet
+          ansible.builtin.include_tasks:
+            file: ../tasks/config.yml
+            apply:
+              check_mode: true
+          vars:
+            calendar_view_app_dir: "{{ t }}/fresh/homelab-calendar-view"
+            calendar_view_config_dir: "{{ t }}/fresh/etc-homelab-calendar-view"
+            calendar_view_user: calendar-view-test-nobody
+
+        - name: Check mode wrote nothing
+          ansible.builtin.stat:
+            path: "{{ t }}/fresh"
+          register: calendar_view_test_fresh
+
+        - name: Nothing there
+          ansible.builtin.assert:
+            that: not calendar_view_test_fresh.stat.exists
+            quiet: true
+      always:
+        - name: Remove the scratch directory
+          ansible.builtin.file:
+            path: "{{ calendar_view_test_tmp.path }}"
+            state: absent

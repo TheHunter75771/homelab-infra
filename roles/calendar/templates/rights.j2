@@ -1,0 +1,35 @@
+# {{ ansible_managed }}
+# Radicale {{ calendar_radicale_series }} from_file rights (docs/CONTRACTS.md §13.1, §14.1). How Radicale reads it:
+#   - ConfigParser with interpolation on: a literal percent sign would have to be doubled;
+#   - both patterns go through str.format(): {user} is the login, regex-escaped, and {0}, {1}… are the
+#     user pattern's groups; a literal brace would have to be doubled;
+#   - both are matched whole (re.fullmatch) against the login and against the path without its outer
+#     slashes (the root is the empty string);
+#   - the first section that matches wins, and no match means no access.
+# Permissions: R/W read/write collections without a tag (the root, a home), r/w read/write calendars and
+# their events.
+
+# Accounts get exactly what owner_only gave them: R on the root, RW on their own home, rw on the
+# calendars in it, nothing anywhere else. Only the listed accounts: a viewer must never match these.
+[owner-root]
+user: {{ calendar_rights_accounts }}
+collection:
+permissions: R
+
+[owner-home]
+user: {{ calendar_rights_accounts }}
+collection: {user}
+permissions: RW
+
+[owner-calendars]
+user: {{ calendar_rights_accounts }}
+collection: {user}/[^/]+
+permissions: rw
+{% for viewer in calendar_viewers %}
+
+# Viewer {{ viewer.user }}: reads exactly these calendars, and nothing else.
+[viewer-{{ viewer.user }}]
+user: {{ viewer.user | regex_escape }}
+collection: (?:{{ viewer.read | map('regex_escape') | join('|') }})
+permissions: r
+{% endfor %}

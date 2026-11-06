@@ -1,0 +1,45 @@
+---
+- name: Service | homelab-calendar-view unit
+  ansible.builtin.template:
+    src: homelab-calendar-view.service.j2
+    dest: /etc/systemd/system/{{ calendar_view_service }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Calendar view daemon-reload
+    - Calendar view restart
+
+# Reload the unit, then restart the view if anything it reads changed.
+- name: Service | apply pending reloads and restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Service | the view runs on every boot
+  ansible.builtin.systemd_service:
+    name: "{{ calendar_view_service }}"
+    enabled: true
+    state: started
+  ignore_errors: "{{ ansible_check_mode }}"
+
+# 200 needs a good fetch of every calendar shown, as the viewer: the whole chain works.
+- name: Service | /healthz answers 200
+  ansible.builtin.uri:
+    url: "{{ calendar_view_healthz_url }}"
+    status_code: [200, 503]
+  register: calendar_view_healthz
+  until: calendar_view_healthz.status == 200
+  retries: 10
+  delay: 3
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Service | the view is serving fresh calendar data
+  ansible.builtin.assert:
+    that: calendar_view_healthz.status == 200
+    fail_msg: >-
+      {{ calendar_view_healthz_url }} answered {{ calendar_view_healthz.status | default('nothing') }} after 30 s.
+      503 means no good fetch yet: `journalctl -u {{ calendar_view_service }}` names the calendar path and the
+      HTTP status (403: the viewer can't read that path, see calendar_viewers; 401: its password).
+    quiet: true
+  when: not ansible_check_mode

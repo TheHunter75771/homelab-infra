@@ -51,6 +51,44 @@
   loop_control:
     label: "{{ item.user }}"
 
+# Read-only viewers (CONTRACTS §14.1): the same name rules as accounts, never an account themselves,
+# and each reads only calendars the role manages.
+- name: Preflight | viewers (calendar_viewers in host_vars; none by default)
+  ansible.builtin.assert:
+    that:
+      - calendar_viewers is sequence and calendar_viewers is not string and calendar_viewers is not mapping
+      - calendar_viewers | rejectattr('user', 'defined') | list | length == 0
+      - calendar_viewers | map(attribute='user') | map('string') | select('match', '^[a-z][a-z0-9_-]{1,31}$') | list | length
+        == calendar_viewers | length
+      - calendar_viewers | map(attribute='user') | unique | list | length == calendar_viewers | length
+      - calendar_viewers | map(attribute='user') | intersect(calendar_accounts | map(attribute='user')) | length == 0
+      - calendar_viewers | map(attribute='user') | intersect(calendar_backup_excluded_names) | length == 0
+    fail_msg: >-
+      calendar_viewers (host_vars) must be a list of {user, read}, each user unique, 2 to 32 characters (a
+      lowercase letter, then lowercase letters, digits, "_" or "-"), not also in calendar_accounts, and not one
+      of {{ calendar_backup_excluded_names | join(', ') }}.
+    quiet: true
+
+- name: Preflight | each viewer reads only calendars the role manages
+  ansible.builtin.assert:
+    that:
+      - item.read is defined
+      - item.read is sequence and item.read is not string and item.read is not mapping
+      - item.read | length > 0
+      - item.read | map('string') | select('match', '^[a-z][a-z0-9_-]{1,31}/[a-z0-9-]{1,40}$') | list | length
+        == item.read | length
+      - item.read | unique | list | length == item.read | length
+      - item.read | difference(calendar_calendar_paths) | length == 0
+    fail_msg: >-
+      Viewer {{ item.user }}: `read` must be a non-empty list of "<owner>/<calendar id>" paths, each once, all of
+      them calendars in calendar_accounts. Not a calendar the role manages:
+      {{ (item.read | default([]) if item.read is sequence and item.read is not string else [])
+         | difference(calendar_calendar_paths) | join(', ') | default('none', true) }}.
+    quiet: true
+  loop: "{{ calendar_viewers }}"
+  loop_control:
+    label: "{{ item.user }}"
+
 # Only the account names leave this task; no_log keeps the values out of any error.
 - name: Preflight | accounts with a usable password (values never printed)
   ansible.builtin.set_fact:
@@ -59,17 +97,17 @@
          | selectattr('value', 'match', '^[ -~]{16,72}$') | map(attribute='key') | list }}
   no_log: true
 
-- name: Preflight | every account has a password in the vault
+- name: Preflight | every login (account or viewer) has a password in the vault
   ansible.builtin.assert:
     that:
-      - calendar_accounts | map(attribute='user') | difference(calendar_password_ok) | length == 0
+      - calendar_logins | difference(calendar_password_ok) | length == 0
     fail_msg: >-
       calendar_passwords (vault_calendar_passwords) needs a quoted password of 16 to 72 printable ASCII
-      characters for: {{ calendar_accounts | map(attribute='user') | difference(calendar_password_ok) | join(', ') }}.
+      characters for: {{ calendar_logins | difference(calendar_password_ok) | join(', ') }}.
     quiet: true
 
 # homelab-calendar-recovered.service reads the push store through this group (SupplementaryGroups=).
-# systemd won't start a unit whose group is missing (216/GROUP): the "back up" push would never be
+# systemd won't start a unit whose group is missing (216/GROUP): the "back online" push would never be
 # sent and a "Calendar is down" alert would stay open for good. So a missing group fails the play here.
 - name: Preflight | look up the push store's group
   ansible.builtin.getent:
@@ -85,5 +123,5 @@
     fail_msg: >-
       The push group {{ calendar_push_group }} doesn't exist; deploy role dashboard first (it creates the
       group and the push store). Without it homelab-calendar-recovered.service can't start, so a
-      "Calendar is down" alert would never be closed by a "Calendar back up" push.
+      "Calendar is down" alert would never be closed by a "{{ calendar_recovered_title }}" push.
     quiet: true

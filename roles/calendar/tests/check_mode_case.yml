@@ -37,13 +37,13 @@
     quiet: true
   when: not (case_passlib | bool)
 
-- name: With passlib, the logins step ran as a check that would add every login
+- name: With passlib, the logins step ran as a check that would add every login (viewers too)
   ansible.builtin.assert:
     that:
       - calendar_users_set is not skipped
       - calendar_users_set is changed
-      - calendar_users_set.results | length == calendar_accounts | length
-      - calendar_users_set.results | selectattr('changed') | list | length == calendar_accounts | length
+      - calendar_users_set.results | length == (calendar_accounts + calendar_viewers) | length
+      - calendar_users_set.results | selectattr('changed') | list | length == (calendar_accounts + calendar_viewers) | length
       - calendar_users_set.results | selectattr('skipped', 'defined') | list | length == 0
     fail_msg: The htpasswd step didn't run as a check although passlib is importable.
     quiet: true

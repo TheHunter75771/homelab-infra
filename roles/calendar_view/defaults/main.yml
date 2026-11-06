@@ -1,0 +1,54 @@
+---
+# Role calendar_view (module R): the wall-screen calendar page (apps/calendar-view) as a hardened host
+# service on the media server. docs/CONTRACTS.md §14.2/§14.3. It reads the household calendar (role
+# calendar, §13) over loopback as a read-only viewer login (§14.1), and tailscale_serve publishes it on 8446.
+
+# Ubuntu archive, unpinned (unattended-upgrades patches them); the role asserts the major versions.
+calendar_view_packages:
+  - python3-icalendar
+  - python3-recurring-ical-events
+calendar_view_icalendar_major: 6
+calendar_view_recurring_ical_events_major: 3
+
+# Identity: a system account with no fixed uid (nothing outside this role shares its files).
+calendar_view_user: calview
+# The read-only CalDAV login (role calendar's calendar_viewers, CONTRACTS §14.1). Set it in host_vars to the
+# live viewer's name; its password is calendar_passwords[calendar_view_viewer] (vault).
+calendar_view_viewer: viewer
+calendar_passwords: {}
+
+# What the page shows (host_vars, never committed), in display order, e.g.
+#   - { path: household/shared, label: Shared, color: "#4f8cff" }
+#   - { path: alice/routines, label: Routines, color: "#f2a93b" }
+# path is "<login>/<calendar id>", one of the viewer's `read` paths in calendar_viewers.
+calendar_view_calendars: []
+calendar_view_timezone: America/New_York
+calendar_view_days: 7
+
+# Runtime. Loopback only: tailscale_serve publishes it on 8446 (CONTRACTS §14.4).
+calendar_view_service: homelab-calendar-view.service
+calendar_view_listen_host: 127.0.0.1 # exactly this (preflight): tailscale serve proxies 8446 to 127.0.0.1
+calendar_view_port: 5233
+# The calendar server: role calendar's own address when this play runs it, else its defaults.
+calendar_view_caldav_url: "http://{{ calendar_listen_host | default('127.0.0.1') }}:{{ calendar_port | default(5232) }}"
+calendar_view_calendar_service: "{{ calendar_service | default('homelab-calendar.service') }}"
+calendar_view_healthz_url: "http://{{ calendar_view_listen_host }}:{{ calendar_view_port }}/healthz"
+calendar_view_memory_max: 128M
+calendar_view_tasks_max: 64
+
+# Paths on the host. The code is root-owned and read-only to the service; nothing in it is writable.
+calendar_view_app_dir: /opt/homelab-calendar-view
+calendar_view_config_dir: /etc/homelab-calendar-view
+calendar_view_config_file: "{{ calendar_view_config_dir }}/config.json"
+calendar_view_python: /usr/bin/python3
+# Owner of the code and the config file (root; tests/test_offline.yml runs the tasks unprivileged).
+calendar_view_root_owner: root
+
+# Controller side: the app's sources (module R's apps/calendar-view).
+calendar_view_src_dir: "{{ role_path }}/../../apps/calendar-view"
+calendar_view_launcher: calendar-view
+calendar_view_package: calendar_view
+calendar_view_web_files:
+  - index.html
+  - app.css
+  - app.js

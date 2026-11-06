@@ -11,7 +11,8 @@
 # The role's restart handler then reports the missing unit and is ignored: check mode on a fresh host.
 # Also in check mode: tasks/preflight.yml passes when the push store's group exists (root stands in
 # for dashboard), and stops the run, in plain English, when it doesn't, or when calendar_listen_host
-# isn't exactly 127.0.0.1 (tailscale_serve always proxies 8445 there).
+# isn't exactly 127.0.0.1 (tailscale_serve always proxies 8445 there), and for read-only viewers
+# (CONTRACTS §14.1) that read an unknown calendar, are also an account, or name a path badly.
 - name: Calendar preflight and users file in check mode on a fresh host
   hosts: localhost
   connection: local
@@ -27,9 +28,12 @@
     calendar_accounts:
       - { user: alice, calendars: [{ id: personal, name: Personal }] }
       - { user: household, calendars: [{ id: shared, name: Shared }] }
+    calendar_viewers:
+      - { user: viewer, read: [household/shared, alice/personal] }
     calendar_passwords:
       alice: check-mode-test-only-0001
       household: check-mode-test-only-0002
+      viewer: check-mode-test-only-0003
   tasks:
     - name: This test runs in check mode
       ansible.builtin.assert:
@@ -107,6 +111,20 @@
                   - "'deploy role dashboard first' in ansible_failed_result.msg"
                 fail_msg: "Wrong failure: {{ ansible_failed_result.msg | default('none') }}"
                 quiet: true
+
+        - name: Preflight, viewers that must be refused
+          ansible.builtin.include_tasks: check_mode_bad_viewer.yml
+          loop:
+            - { label: an unknown calendar, viewers: [{ user: viewer, read: [household/shared, household/nope] }],
+                says: "Not a calendar the role manages: household/nope" }
+            - { label: also an account, viewers: [{ user: household, read: [alice/personal] }],
+                says: not also in calendar_accounts }
+            - { label: a malformed path, viewers: [{ user: viewer, read: [household/shared/extra] }],
+                says: '"<owner>/<calendar id>" paths' }
+            - { label: no calendars, viewers: [{ user: viewer, read: [] }], says: '"<owner>/<calendar id>" paths' }
+          loop_control:
+            loop_var: bad
+            label: "{{ bad.label }}"
 
         - name: Preflight, another loopback address
           block:

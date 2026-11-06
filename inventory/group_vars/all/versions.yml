@@ -31,6 +31,10 @@ python_packages:
   # archive packages (python3-bcrypt 5.0.0, python3-passlib 1.9.3 = libpass), for CI's smoke test.
   bcrypt: "5.0.0"
   libpass: "1.9.3"
+  # §14 wall-screen view: the media server's archive packages (python3-icalendar, python3-recurring-ical-events);
+  # role calendar_view asserts the majors, CI installs these exact versions.
+  icalendar: "6.3.1"
+  recurring_ical_events: "3.8.0"
 # Docker apt packages (role docker, docker_install: true). Exact Debian versions from download.docker.com
 # (resolute/stable). They matched the mediaserver's installed set on 2026-10-26; the mediaserver's own Docker is
 # not pinned or held, so a manual upgrade there breaks the match. ai-box installs name=version and holds them.

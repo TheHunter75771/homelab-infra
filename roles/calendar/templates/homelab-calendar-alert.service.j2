@@ -1,7 +1,7 @@
 # {{ ansible_managed }}
 # OnFailure= of {{ calendar_service }}: it gave up after 5 failed starts in 10 minutes.
 # The marker tells {{ calendar_recovered_service }} (queued by every start of the calendar) to
-# push "Calendar back up" on the next good start, which closes this alert on the dashboard.
+# push "{{ calendar_recovered_title }}" on the next good start, which closes this alert on the dashboard.
 # It's written first, so a push that fails still leaves it.
 [Unit]
 Description=Push an alert when the household calendar is down

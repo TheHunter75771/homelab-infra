@@ -43,6 +43,8 @@ HOST_VARS = {
         {"user": "bob", "calendars": [{"id": "personal", "name": "Personal"}]},
         {"user": "household", "calendars": [{"id": "shared", "name": "Shared"}, {"id": "school", "name": "School"}]},
     ],
+    # The wall-screen view's read-only login (CONTRACTS §14.1); "viewer" is the shared placeholder name.
+    "calendar_viewers": [{"user": "viewer", "read": ["household/shared", "household/school", "alice/routines"]}],
 }
 
 
@@ -56,8 +58,11 @@ def require_tools(jinja: bool = True) -> None:
 
 
 def environment():
-    """Ansible's template settings, as far as these templates need them."""
-    return jinja2.Environment(undefined=jinja2.StrictUndefined, keep_trailing_newline=True, trim_blocks=True)
+    """Ansible's template settings and filters, as far as these templates need them."""
+    env = jinja2.Environment(undefined=jinja2.StrictUndefined, keep_trailing_newline=True, trim_blocks=True)
+    env.filters["regex_escape"] = re.escape  # ansible.builtin.regex_escape (re_type python)
+    env.filters["regex_replace"] = lambda value, pattern, replacement="": re.sub(pattern, replacement, value)
+    return env
 
 
 def resolve(env, variables: dict) -> dict:

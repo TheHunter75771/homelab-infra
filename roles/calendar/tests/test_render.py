@@ -24,7 +24,9 @@ CONTRACT_OPTIONS = {
     "server": {"hosts": "127.0.0.1:5232", "max_connections": "8", "max_content_length": "10000000", "timeout": "30"},
     "auth": {"type": "htpasswd", "htpasswd_filename": "/etc/homelab-calendar/users", "htpasswd_encryption": "bcrypt",
              "delay": "1", "realm": "Calendar"},
-    "rights": {"type": "owner_only", "permit_delete_collection": "False", "permit_overwrite_collection": "False"},
+    # §14.1: from_file, with rules that give accounts exactly owner_only (test_rights.py), plus viewers.
+    "rights": {"type": "from_file", "file": "/etc/homelab-calendar/rights",
+               "permit_delete_collection": "False", "permit_overwrite_collection": "False"},
     "storage": {"type": "multifilesystem", "filesystem_folder": "/srv/homelab/data/calendar/collections", "hook": HOOK},
     "web": {"type": "none"},
     "logging": {"level": "info", "mask_passwords": "True"},
@@ -81,6 +83,54 @@ class Rendered(unittest.TestCase):
         self.assertEqual(rendered - wanted, set(EXTRA_OPTIONS), "options set beyond the contract")
         for (section, option), value in EXTRA_OPTIONS.items():
             self.assertEqual(parser.get(section, option), value)
+
+    def test_the_rights_file(self) -> None:
+        """Owner rules for exactly the accounts, then one r rule per viewer (none by default)."""
+        def sections(variables: dict) -> dict:
+            parser = configparser.ConfigParser()  # what Radicale's from_file uses
+            parser.read_string(rr.render("rights.j2", variables))
+            return {name: dict(parser[name]) for name in parser.sections()}
+
+        owners = {
+            "owner-root": {"user": "(?:alice|bob|household)", "collection": "", "permissions": "R"},
+            "owner-home": {"user": "(?:alice|bob|household)", "collection": "{user}", "permissions": "RW"},
+            "owner-calendars": {"user": "(?:alice|bob|household)", "collection": "{user}/[^/]+", "permissions": "rw"},
+        }
+        self.assertEqual(sections(self.vars), {**owners, "viewer-viewer": {
+            "user": "viewer", "collection": "(?:household/shared|household/school|alice/routines)", "permissions": "r"}})
+        self.assertEqual(sections(rr.load_vars({"calendar_viewers": []})), owners)
+        self.assertEqual(rr.yaml.safe_load((rr.ROLE / "defaults/main.yml").read_text())["calendar_viewers"], [])
+        # A viewer never gets more than r, and the owner rules never name a viewer.
+        for name, rule in sections(self.vars).items():
+            if name.startswith("viewer-"):
+                self.assertEqual(rule["permissions"], "r")
+            else:
+                self.assertNotIn("viewer", rule["user"])
+
+    def test_the_rights_validate_step(self) -> None:
+        """The template task's own validate command: accepts the rendered file, refuses broken ones
+        (from_file itself would only fail later, with a 500 per request that reaches the rule)."""
+        import sys
+
+        task = next(t for t in rr.load_tasks("config.yml") if t["name"].startswith("Config | rights"))
+        command = task["ansible.builtin.template"]["validate"]
+        good = rr.render("rights.j2", self.vars)
+        broken = {
+            "an unclosed group": good.replace("alice/routines)", "alice/routines"),
+            "an unknown placeholder": good.replace("{user}/[^/]+", "{login}/[^/]+"),
+            "no permissions": good.replace("permissions: r\n", ""),
+        }
+        for what, text in broken.items():
+            self.assertNotEqual(text, good, f"the {what} mutation changed nothing")
+        with tempfile.TemporaryDirectory() as tmp:
+            for what, text in {"the rendered file": good, **broken}.items():
+                with self.subTest(case=what):
+                    path = pathlib.Path(tmp, "rights")
+                    path.write_text(text)
+                    argv = shlex.split(command % path)
+                    self.assertEqual(argv[0], "/usr/bin/python3")
+                    r = subprocess.run([sys.executable, *argv[1:]], capture_output=True, text=True)
+                    self.assertEqual(r.returncode == 0, what == "the rendered file", r.stderr[-300:])
 
     def test_the_hook_reaches_radicale_unescaped_and_fills_in_the_login(self) -> None:
         hook = self.parse_config().get("storage", "hook")
@@ -269,11 +319,27 @@ class Rendered(unittest.TestCase):
         defaults = rr.yaml.safe_load((rr.REPO / "roles/notifier/defaults/main.yml").read_text())
         self.assertEqual(defaults["notifier_state_dir"], self.vars["calendar_notify_state_dir"])
 
+    def test_the_recovery_title_closes_the_alert_on_the_dashboard(self) -> None:
+        """The dashboard closes "Calendar is down" only with a later same-tag push that isRecovery() accepts."""
+        is_recovery = dashboard_is_recovery()
+        title = unit_environment(rr.render("homelab-calendar-recovered.service.j2", self.vars))["CALENDAR_RECOVERED_TITLE"]
+        self.assertEqual(title, self.vars["calendar_recovered_title"])
+        down = shlex.split(rr.directives(rr.render("homelab-calendar-alert.service.j2", self.vars))["ExecStart"][1])
+        down_title, down_tag = down[down.index("--title") + 1], down[down.index("--tag") + 1]
+        self.assertEqual(down_tag, "calendar", "the recovery must use the down alert's tag")
+        self.assertTrue(is_recovery(title), f"{title!r} wouldn't close the alert on the dashboard")
+        self.assertTrue(is_recovery("[REHEARSAL] " + title), "the notifier's rehearsal prefix keeps it a recovery")
+        self.assertFalse(is_recovery(down_title), f"{down_title!r} would close itself")
+        # The translation itself: the live bug, and the dashboard's own documented examples.
+        self.assertFalse(is_recovery("Calendar back up"))
+        for example in ("Media drive back", "jellyfin recovered", "mediaserver back online", "x healthy again"):
+            self.assertTrue(is_recovery(example), example)
+        self.assertFalse(is_recovery("Calendar still not back online"))
+
     def test_the_recovered_script_reads_what_the_unit_sets(self) -> None:
         script = (rr.ROLE / "files/homelab-calendar-recovered.sh").read_text()
         reads = dict(re.findall(r"\$\{(CALENDAR_[A-Z_]+):-([^}]*)\}", script))
-        env = dict(line.split("=", 1) for line in
-                   rr.directives(rr.render("homelab-calendar-recovered.service.j2", self.vars))["Environment"])
+        env = unit_environment(rr.render("homelab-calendar-recovered.service.j2", self.vars))
         self.assertEqual(set(reads), set(env), "every setting the script reads comes from the unit")
         for key, default in reads.items():
             with self.subTest(env=key):
@@ -282,6 +348,29 @@ class Rendered(unittest.TestCase):
     def test_the_gitignore(self) -> None:
         lines = [x for x in rr.render("collections.gitignore.j2", self.vars).splitlines() if x and not x.startswith("#")]
         self.assertEqual(lines, [".Radicale.cache", ".Radicale.lock", ".Radicale.tmp-*"])
+
+
+def unit_environment(unit_text: str) -> dict[str, str]:
+    """Environment= lines as systemd reads them: whitespace-separated assignments, double quotes kept together."""
+    return dict(a.split("=", 1) for v in rr.directives(unit_text).get("Environment", []) for a in shlex.split(v))
+
+
+def dashboard_is_recovery():
+    """The dashboard's isRecovery(), translated from apps/dashboard/server/src/collectors/alerts.js:
+    RECOVERY_END_RE and QUALIFIER_RE as Python re (the JS patterns are compatible), same logic."""
+    js = (rr.REPO / "apps/dashboard/server/src/collectors/alerts.js").read_text()
+
+    def pattern(name: str) -> re.Pattern:
+        m = re.search(rf"const {name}\s*=\s*/(.+?)/([a-z]*);", js, re.DOTALL)
+        assert m, f"{name} is gone from alerts.js"
+        assert set(m.group(2)) <= {"i"}, f"{name} gained flags {m.group(2)!r}; translate them"
+        return re.compile(m.group(1), re.IGNORECASE if "i" in m.group(2) else 0)
+
+    body = re.search(r"export function isRecovery\(title\) \{(.*?)\n\}", js, re.DOTALL)
+    assert body and "return RECOVERY_END_RE.test(t) && !QUALIFIER_RE.test(t);" in body.group(1), \
+        "isRecovery's logic changed; update this translation"
+    recovery, qualifier = pattern("RECOVERY_END_RE"), pattern("QUALIFIER_RE")
+    return lambda title: bool(recovery.search(title.strip())) and not qualifier.search(title.strip())
 
 
 # --- no_log guard -----------------------------------------------------------------------------------
@@ -356,7 +445,8 @@ class Static(unittest.TestCase):
         self.assertEqual(len(plays), 1)
         self.assertEqual(plays[0]["hosts"], "media_servers")
         self.assertIs(plays[0]["become"], True)
-        self.assertEqual([r["role"] for r in plays[0]["roles"]], ["calendar", "tailscale_serve"])
+        # §14.3: the view (module R) after the calendar it reads, before the serve config that publishes both.
+        self.assertEqual([r["role"] for r in plays[0]["roles"]], ["calendar", "calendar_view", "tailscale_serve"])
         self.assertIn("touches nothing else", text)
 
     def test_every_task_that_touches_a_password_has_no_log(self) -> None:

@@ -1,5 +1,5 @@
 # {{ ansible_managed }}
-# "Calendar back up" (docs/CONTRACTS.md §13.1, amended 2026-11-06). Started, never waited for, by
+# "{{ calendar_recovered_title }}" (docs/CONTRACTS.md §13.1, amended 2026-11-06). Started, never waited for, by
 # ExecStartPost= of {{ calendar_service }}. It runs in its own unit because an ExecStartPost= process
 # stays in the calendar's cgroup, where IPAddressDeny=any would drop the push to the internet.
 # If {{ calendar_alert_service }} left its marker, homelab-calendar-recovered waits until Radicale
@@ -17,7 +17,7 @@
 # sandbox: DNS, TLS to an internet host, payload encryption and VAPID signing, its state dir and syslog
 # all worked. Root without capabilities can't be reproduced in a user manager.
 [Unit]
-Description=Push "Calendar back up" after the household calendar recovered
+Description=Push "{{ calendar_recovered_title }}" after the household calendar recovered
 After=network-online.target {{ calendar_service }}
 Wants=network-online.target
 # Never rate-limited: a refused start would swallow the recovery push.
@@ -34,6 +34,8 @@ Environment=CALENDAR_PORT={{ calendar_port }}
 Environment=CALENDAR_WAIT_SECONDS={{ calendar_recovered_wait_seconds }}
 Environment=CALENDAR_SETTLE_SECONDS={{ calendar_recovered_settle_seconds }}
 Environment=CALENDAR_SERVICE={{ calendar_service }}
+# Quoted: it holds spaces. It must end in a recovery word for the dashboard (defaults/main.yml).
+Environment="CALENDAR_RECOVERED_TITLE={{ calendar_recovered_title }}"
 # The wait, the settle period, and one push per device (homelab-notify times out each one).
 TimeoutStartSec=5min
 SyslogIdentifier=homelab-calendar-recovered

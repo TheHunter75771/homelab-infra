@@ -20,8 +20,10 @@ delay = 1
 realm = Calendar
 
 [rights]
-# Each login sees only /<user>/.
-type = owner_only
+# owner_only for each account (each sees only /<user>/), plus read-only viewers: the rules are in
+# {{ calendar_rights_file }} (templates/rights.j2).
+type = from_file
+file = {{ calendar_rights_file }}
 # Phones can't delete a whole calendar or replace one wholesale (a runbook step instead).
 # Radicale 3.6 reads both from [rights].
 permit_delete_collection = False

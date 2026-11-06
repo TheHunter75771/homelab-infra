@@ -1,0 +1,17 @@
+{#- Settings of apps/calendar-view (calendar_view/config.py: exactly these keys). Holds the viewer's password:
+    root:calview 0640, written by a no_log task. -#}
+{%- set calendars = [] -%}
+{%- for c in calendar_view_calendars -%}
+{%-   set _ = calendars.append({'path': c.path | string, 'label': c.label | string | trim, 'color': c.color | string | lower}) -%}
+{%- endfor -%}
+{%- set settings = {
+  'base_url': calendar_view_caldav_url,
+  'user': calendar_view_viewer,
+  'password': calendar_passwords[calendar_view_viewer],
+  'timezone': calendar_view_timezone,
+  'days': calendar_view_days | int,
+  'listen_host': calendar_view_listen_host,
+  'listen_port': calendar_view_port | int,
+  'calendars': calendars,
+} -%}
+{{ settings | to_nice_json(indent=2) }}

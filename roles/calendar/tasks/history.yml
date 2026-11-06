@@ -16,6 +16,21 @@
     - "{{ calendar_data_dir }}"
     - "{{ calendar_collections_dir }}"
 
+# Radicale tries to create a login's home on every request until it exists, and a viewer has no right
+# to (it would log "Access to principal path … denied" on each poll). So each viewer gets an empty home,
+# as Radicale makes one for any login: not a calendar, no rights for anyone, nothing for git to track.
+# collection-root first, as Radicale makes it, so it never ends up root-owned.
+- name: History | Radicale's collection root, and an empty home per viewer
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ calendar_user }}"
+    group: "{{ calendar_user }}"
+    mode: "0750"
+  loop: >-
+    {{ [calendar_collections_dir ~ '/collection-root']
+       + calendar_viewers | map(attribute='user') | map('regex_replace', '^', calendar_collections_dir ~ '/collection-root/') | list }}
+
 - name: History | is the repository there
   ansible.builtin.stat:
     path: "{{ calendar_collections_dir }}/.git/HEAD"

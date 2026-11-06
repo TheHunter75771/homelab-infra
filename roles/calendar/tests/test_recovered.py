@@ -3,9 +3,9 @@ the way homelab-calendar-recovered.service runs it (its settings in the environm
 homelab-notify and a stub systemctl on PATH that record their arguments:
   - no marker: no push, exit 0;
   - marker, a server whose unauthenticated PROPFIND / answers 401, and the same active invocation
-    after the settle period: exactly one push ("Calendar back up", tag calendar), marker gone;
+    after the settle period: exactly one push ("Calendar back online", tag calendar), marker gone;
   - the notifier failing, or missing, never fails the unit (exit 0), and the marker still goes;
-  - no "back up", the marker kept, exit 0, when: nothing listens; the port answers but not with 401
+  - no "back online", the marker kept, exit 0, when: nothing listens; the port answers but not with 401
     (another server, or Radicale failing); it accepts and closes (bound, then died); the service
     restarted (new InvocationID) or stopped within the settle period; or it has no invocation.
 Stdlib only (bash and, if installed, shellcheck). test_server.py runs it against a real Radicale.
@@ -50,7 +50,7 @@ SYSTEMCTL_STUB = textwrap.dedent("""\
         sys.exit(0)
     sys.exit(1)
 """)
-PUSH = ["--tag", "calendar", "--title", "Calendar back up", "--body", "homelab-calendar.service is running again."]
+PUSH = ["--tag", "calendar", "--title", "Calendar back online", "--body", "homelab-calendar.service is running again."]
 
 
 class Propfind(http.server.BaseHTTPRequestHandler):

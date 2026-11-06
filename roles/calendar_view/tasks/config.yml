@@ -1,0 +1,23 @@
+---
+- name: Config | directory (root:calview 0750)
+  ansible.builtin.file:
+    path: "{{ calendar_view_config_dir }}"
+    state: directory
+    owner: "{{ calendar_view_root_owner }}"
+    group: "{{ calendar_view_user }}"
+    mode: "0750"
+
+# It holds the viewer's password: no_log keeps it out of the output, --diff included. The app's own
+# loader checks the file before it's written (-B: as root it must not leave a __pycache__ in the code dir,
+# which the install step would then prune on every run). The preflight has already said, in plain
+# English, anything this check could refuse.
+- name: Config | settings (root:calview 0640, with the viewer's password)
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ calendar_view_config_file }}"
+    owner: "{{ calendar_view_root_owner }}"
+    group: "{{ calendar_view_user }}"
+    mode: "0640"
+    validate: "{{ calendar_view_python }} -I -B {{ calendar_view_app_dir }}/{{ calendar_view_launcher }} --check-config %s"
+  no_log: true
+  notify: Calendar view restart

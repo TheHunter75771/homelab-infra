@@ -1,0 +1,14 @@
+{
+  "base_url": "http://127.0.0.1:5232",
+  "user": "viewer",
+  "password": "example-only-not-a-real-password",
+  "timezone": "America/New_York",
+  "days": 7,
+  "listen_host": "127.0.0.1",
+  "listen_port": 5233,
+  "calendars": [
+    {"path": "household/shared", "label": "Shared", "color": "#4f8cff"},
+    {"path": "household/school", "label": "School", "color": "#3ccf91"},
+    {"path": "alice/routines", "label": "Routines", "color": "#f2a93b"}
+  ]
+}

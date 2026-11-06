@@ -1,0 +1,21 @@
+---
+# Role calendar_view (docs/CONTRACTS.md §14.3). Runs after role calendar (it reads that server as a viewer)
+# and before tailscale_serve, which proxies 8446 to it. Nothing here touches Docker or the boot gate.
+
+- name: Preflight checks
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Service account
+  ansible.builtin.import_tasks: user.yml
+
+- name: Libraries from the Ubuntu archive (icalendar, recurring-ical-events)
+  ansible.builtin.import_tasks: packages.yml
+
+- name: The app's code
+  ansible.builtin.import_tasks: install.yml
+
+- name: Settings (with the viewer's password)
+  ansible.builtin.import_tasks: config.yml
+
+- name: Calendar view service
+  ansible.builtin.import_tasks: service.yml

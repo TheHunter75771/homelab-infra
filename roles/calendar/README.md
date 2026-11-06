@@ -3,7 +3,8 @@
 The household calendar: a CalDAV server (Radicale from the Ubuntu archive) as a hardened host
 service, outside Docker. Module Q, docs/CONTRACTS.md §13.1, ADR 0017. Phones and desktops use
 their own calendar apps; reminders are VALARMs stored on the events and fired by each device, so
-there is no push code here beyond the "down" and "back up" alerts.
+there is no push code here beyond the "down" and "back online" alerts. Since §14.1, read-only **viewer**
+logins (the wall-screen view) can read the calendars listed for them, and nothing else.
 
 Nothing in this role touches Docker. The calendar deploys and runs while the boot gate holds Docker.
 It listens on `127.0.0.1:5232` only; `tailscale_serve` publishes it on `https://<node>:8445/`
@@ -17,19 +18,23 @@ It listens on `127.0.0.1:5232` only; `tailscale_serve` publishes it on `https://
 | user/group `calendar` | system account, no fixed uid, `/usr/sbin/nologin`, home `/nonexistent`, no supplementary groups, password locked |
 | `/etc/homelab-calendar/` | root:calendar 0750 |
 | `/etc/homelab-calendar/config` | Radicale settings (root:calendar 0640), checked by Radicale's own loader before it's written |
-| `/etc/homelab-calendar/users` | htpasswd, bcrypt (root:calendar 0640), from `calendar_passwords` (vault) |
+| `/etc/homelab-calendar/users` | htpasswd, bcrypt (root:calendar 0640), from `calendar_passwords` (vault): accounts and viewers |
+| `/etc/homelab-calendar/rights` | Radicale `from_file` rights (root:calendar 0640, `templates/rights.j2`): owner_only for accounts, `r` for viewers |
 | `{{ homelab_data_dir }}/calendar/` | calendar:calendar 0750; the nightly backup picks it up (role `backups`, unchanged) |
 | `…/calendar/collections/` | the calendars (`collection-root/<user>/<id>/`), and a git repo of their history |
 | `homelab-calendar.service` | `python3 -m radicale --config /etc/homelab-calendar/config` |
 | `homelab-calendar-alert.service` | `OnFailure=` of the calendar: "Calendar is down" push, plus a marker in `/var/lib/homelab-calendar-alert/` |
 | `homelab-calendar-recovered.service` | oneshot, queued by every calendar start (`ExecStartPost=`): runs the script below in its own unit, outside the calendar's IP filter |
-| `/usr/local/sbin/homelab-calendar-recovered` | `files/homelab-calendar-recovered.sh`: "Calendar back up" push, if the marker is there |
+| `/usr/local/sbin/homelab-calendar-recovered` | `files/homelab-calendar-recovered.sh`: "Calendar back online" push, if the marker is there |
 
 ## Inputs
 - `calendar_accounts` (host_vars, never committed): `[{user, calendars: [{id, name}]}]`. Each phone
   adds two CalDAV accounts, its own and `household` (shared calendars; Radicale 3.6 has no sharing
   that iOS discovers, ADR 0017).
-- `calendar_passwords` (group_vars → `vault_calendar_passwords`): `{user: password}`.
+- `calendar_viewers` (host_vars, default `[]`): `[{user, read: ["<owner>/<calendar id>", …]}]`, the
+  read-only logins (see Rights).
+- `calendar_passwords` (group_vars → `vault_calendar_passwords`): `{user: password}`, for every account
+  and every viewer.
 - The preflight refuses, with a plain-English message:
   - no accounts;
   - a user not matching `^[a-z][a-z0-9_-]{1,31}$`, or a repeated one;
@@ -41,6 +46,10 @@ It listens on `127.0.0.1:5232` only; `tailscale_serve` publishes it on `https://
   - a non-integer `calendar_port`, an undefined `homelab_data_dir`;
   - a `calendar_listen_host` other than exactly `127.0.0.1`: role tailscale_serve always proxies 8445
     to `http://127.0.0.1:5232`, so any other address would deploy green behind a dead 8445;
+  - a viewer that isn't a list entry with `user` and a non-empty `read`; a viewer name that breaks
+    the account name rules, repeats, is also an account, or is backup-excluded; a `read` path that
+    isn't `<owner>/<calendar id>`, repeats, or isn't a calendar in `calendar_accounts` (the message
+    names it);
   - a missing push-store group (`calendar_push_group`, `dashboard`; a `getent` lookup, also in check
     mode). Deploy role dashboard first. Without the group, systemd refuses to start
     homelab-calendar-recovered.service (216/GROUP), so a "Calendar is down" alert would never close
@@ -50,9 +59,9 @@ It listens on `127.0.0.1:5232` only; `tailscale_serve` publishes it on `https://
 
 ## Logins and calendars
 - **Users file:** created empty first (root:calendar 0640, so a hash is never world-readable), then
-  `community.general.htpasswd` with `crypt_scheme: bcrypt` per account (`no_log`). It writes
+  `community.general.htpasswd` with `crypt_scheme: bcrypt` per login, accounts and viewers (`no_log`). It writes
   Apache-style `$2y$` hashes, which Radicale accepts (the smoke test hashes with the module's exact
-  passlib call). A login no longer in `calendar_accounts` is removed: the role reads the names with
+  passlib call). A login in neither `calendar_accounts` nor `calendar_viewers` is removed: the role reads the names with
   `cut -d: -f1` (never the hashes) and sets `state: absent` for the extras. Its calendars stay on
   disk; the role never deletes collection data.
 - **passlib first:** `community.general.htpasswd` checks for passlib on the target before it looks
@@ -96,6 +105,61 @@ one argument (defence in depth; the preflight already limits logins to `[a-z0-9_
   reports what it would change.
 - The very first write (a user's first login creates `/<user>/`) commits the `.gitignore`. After
   that, one commit per change and none for a request that changed nothing. A role re-run commits nothing.
+
+## Rights (§14.1): owner_only for accounts, read-only viewers
+`[rights] type = from_file`, with `/etc/homelab-calendar/rights` rendered from `templates/rights.j2`:
+| Section | Login (`user`) | Path (`collection`) | Gives |
+|---|---|---|---|
+| `owner-root` | the accounts, `(?:alice\|bob\|household)` | the root | `R` |
+| `owner-home` | the accounts | `{user}`, their own home | `RW` |
+| `owner-calendars` | the accounts | `{user}/[^/]+`, the calendars in it | `rw` |
+| `viewer-<name>`, one per viewer | that viewer | `(?:household/shared\|…)`, exactly its listed calendars | `r` |
+
+Everything else gets nothing, and Radicale answers 403 (401 without a login).
+- **Accounts behave exactly as under `owner_only`.** `test_rights.py` compares the rendered rules
+  with Radicale's own `owner_only` class, login by path, for every account and for anonymous
+  requests, with and without viewers. The login matrix covers the root, every home, own and other
+  calendars, events, deeper paths and lookalikes.
+  - Two points that differ from §14.1's wording, both verified in the 3.6.0 source:
+    - `owner_only` gives the home **`RW`**, not `R`. Radicale creates a login's home on first login
+      only when it has `W` there, so `R` would leave a new account without one.
+    - The owner rules match **the listed accounts**, not every login (`.+`). With `.+`, a viewer would
+      also get `RW` on a home of its own and `rw` under it, so MKCALENDAR and writes there.
+  - A login that is neither an account nor a viewer gets nothing; under `owner_only` it got a home.
+- **iOS discovery is unchanged.** For owners, the server test checks `current-user-principal` from
+  the root (`/<user>/`), `calendar-home-set` and the calendar listing.
+- **A viewer**, checked on a real server:
+  - `REPORT`, `GET` and `PROPFIND` on its listed calendars give 207 or 200.
+  - `PUT`, `DELETE`, `MKCALENDAR`, `MKCOL` and `PROPPATCH` give 403 everywhere: on its calendars,
+    their events, its own home, owners' homes and the root.
+  - Unlisted calendars, every home (its own included) and the root give 403 at any depth.
+  - It needs no discovery: the view app `REPORT`s the calendar paths directly.
+- **The viewer's empty home.** On every request, Radicale tries to create a login's home until it
+  exists. A viewer has no `W` there, so each poll would log `WARNING Access to principal path
+  '/<viewer>/' denied by rights backend`, about 4,000 a day for the wall view. So the role makes
+  each viewer an empty home, as Radicale does for any login.
+  - It's not a calendar, nobody has rights on it (403), and git doesn't track an empty folder.
+  - `collection-root` is created first, `calendar`-owned and 0750 as Radicale makes it, so it never
+    ends up root-owned.
+  - The server test checks that no such warning is logged.
+- **How Radicale reads the file** (`radicale/rights/from_file.py`):
+  - With `ConfigParser`, interpolation on, so a literal `%` would have to be `%%` (there is none).
+  - Both patterns go through `str.format()`. `{user}` is the login, regex-escaped, and `{0}`, `{1}`…
+    are groups of the user pattern. There's no `%(login)s` in 3.6, and a literal brace must be doubled.
+  - Both are `re.fullmatch`ed, so they're anchored: the login, and the sanitized path without its outer
+    slashes (the root is `""`). The first matching section wins.
+  - `R`/`W` cover collections without a tag (the root, a home), and `r`/`w` cover calendars and their
+    events. An event uses its calendar's rights.
+  - Viewer names and paths go through `regex_escape`: `kiosk-2` becomes `kiosk\-2`, and `.` can't
+    match any character.
+- **Validated before it's written.** `from_file` reads the file at start, but a broken rule only fails
+  when a request reaches it, as a 500 ("Error in section … of rights file"). Requests settled by an
+  earlier rule still work, which was checked with a deliberately broken rule. So the template's `validate`
+  does what `from_file` does: ConfigParser, `format()` with `{user}`, a regex compile of both
+  patterns, and a `permissions` value in every section. The file is read only at start, so a change
+  restarts the calendar.
+- **The live switch** from 244eb8b's `owner_only` to these rules is a rights change, even though
+  accounts see no difference. Rollback: redeploy 244eb8b (runbook, "Viewers").
 
 ## What Radicale 3.6.0 actually does (checked in its source and on a real server)
 - **`permit_delete_collection` / `permit_overwrite_collection`** are read from **`[rights]`**
@@ -156,12 +220,12 @@ failed starts systemd refuses even a fixed start for 10 minutes, so the run clea
   `homelab-notify --tag calendar --title "Calendar is down" --body "homelab-calendar.service failed. See: journalctl -u homelab-calendar"`.
   - **Only then:** with the default `RestartMode=normal`, every auto-restart passes through the failed
     state and fires `OnFailure=`. The Integrator's VM got 5 "Calendar is down" calls for one broken
-    config, and a single crash that healed on its first restart would push "down" and then "back up".
+    config, and a single crash that healed on its first restart would push "down" and then "back online".
   - `RestartMode=direct` skips that state on auto-restarts, and the start limit's final failure still
     fires `OnFailure=` once. Checked in a systemd 259 user manager with `StartLimitBurst=5`:
     - a crash loop ran the `OnFailure=` unit exactly once (5 times with `normal`);
     - one crash followed by a good restart ran it zero times (once with `normal`).
-- **Back up** (§13.1 as amended 2026-11-06): the push runs in **its own unit**,
+- **Back online** (§13.1 as amended 2026-11-06): the push runs in **its own unit**,
   `homelab-calendar-recovered.service`. An `ExecStartPost=` process, `+` or not, stays in the
   calendar's cgroup, and `IPAddressDeny=any` applies to the whole cgroup (systemd.service(5),
   systemd.resource-control(5)), so a push from there could never leave the box.
@@ -208,15 +272,24 @@ failed starts systemd refuses even a fixed start for 10 minutes, so the run clea
       `is-active` (no errors under the syscall filter), then the real notifier's push.
     - Root without capabilities, and the group, can't be reproduced in a user manager: the
       Integrator's one real-notifier run on the host proves them (see the runbook).
-  - **The script:** no marker, exits 0 at once. With a marker, "back up" needs Radicale to really
+  - **The script:** no marker, exits 0 at once. With a marker, "back online" needs Radicale to really
     serve, not just a port that accepts:
     1. Up to 30 s for an unauthenticated `PROPFIND /` to answer **401**: plain bash over `/dev/tcp`,
        HTTP/1.0, so there's no curl dependency. A connection that closes, or any other status (another
        server on the port, a failing Radicale), keeps waiting.
     2. Its `InvocationID` (`systemctl show`), then a 5 s settle period (`calendar_recovered_settle_seconds`).
     3. The service is still active with the same `InvocationID`: a server that bound and then died,
-       or restarted, gets no "back up".
-    4. Then `--tag calendar --title "Calendar back up"`, and the marker goes.
+       or restarted, gets no "back online".
+    4. Then `--tag calendar --title "Calendar back online"` (`calendar_recovered_title`), and the marker goes.
+  - **The title must end in a recovery word.** The dashboard only closes the "Calendar is down" alert
+    when a later push on the same tag passes its `isRecovery`
+    (`apps/dashboard/server/src/collectors/alerts.js`). That means the title ends in "back",
+    "recovered", "online", "resolved", "healthy again", "ok again" or "up again", with no failure
+    qualifier ("not", "still", "failed", …).
+    - The first title, "Calendar back up", ended in "up", so it never closed the alert (a live bug,
+      found in review).
+    - `test_render.py` reads both patterns from the dashboard's source and checks the role's title,
+      taken from the rendered recovered unit, against them.
   - Any check failing: no push, the marker stays for the next start, and the log says which check
     failed ("keeping the alert open"). It always exits 0.
   - Its settings come from the recovered unit's `Environment=` lines; the script's fallbacks match
@@ -226,6 +299,8 @@ failed starts systemd refuses even a fixed start for 10 minutes, so the run clea
 ```bash
 python3 -m unittest discover -s roles/calendar/tests -v
 ansible-playbook --check -i localhost, -c local roles/calendar/tests/test_check_mode.yml   # needs the collections
+# test_check_mode.yml also runs the real preflight on viewers: a valid one passes; an unknown calendar,
+# a viewer that's also an account, a malformed path or an empty list each stop the run, in plain English.
 ```
 Stdlib, PyYAML and Jinja2; `radicale` (the versions.yml pin, plus `bcrypt`) for the server tests,
 which skip cleanly without it. Under CI (`CI=true`) a missing PyYAML or Jinja2 fails instead of skipping.
@@ -251,7 +326,15 @@ which skip cleanly without it. Under CI (`CI=true`) a missing PyYAML or Jinja2 f
     - The one exception is `calendar_password_ok`, which the preflight prints. A test checks it's
       built as `… | map(attribute='key') | list`, account names only, by a `no_log` task.
     - A self-test plants each form and checks the guard catches it.
-- `test_server.py` (b): a real Radicale from the rendered config on a free loopback port.
+- `test_rights.py` (b): the rendered rights, run through Radicale's own `from_file` and compared
+  with `owner_only`.
+  - Accounts and anonymous requests match path for path, with and without viewers.
+  - The viewer gets `r` on its three calendars and `""` elsewhere, lookalike paths included.
+  - A login that is neither gets nothing.
+  - The default `calendar_viewers: []` leaves exactly the three owner sections.
+  - Two viewers get one rule each, with exactly their paths.
+  - The file passes the role's validate step.
+- `test_server.py` (b): a real Radicale from the rendered config and rights on a free loopback port.
   - Logins are hashed exactly as the htpasswd module does; the repo is set up with the argv and
     settings in `tasks/history.yml`; calendars are created with the body in `tasks/calendars.yml`.
   - 401 without a login or with a wrong one, 207 with one.
@@ -264,6 +347,10 @@ which skip cleanly without it. Under CI (`CI=true`) a missing PyYAML or Jinja2 f
   - One commit per change (`Changes by alice`), by the placeholder identity with no home and no system
     git config, and none for an unchanged PUT. The tree stays clean, and no cache, lock or temp file is tracked.
   - The recovered script's raw HTTP/1.0 PROPFIND gets this real server's 401, so a marker leads to one push.
+  - Owners discover their home as iOS does.
+  - The viewer, with its empty home made from the role's own loop: it reads its listed calendars;
+    every write attempt is 403, with nothing committed and nothing changed; every other read is 403;
+    and no "principal path denied" warning is logged.
 - `test_recovered.py` (c): the script with stub `homelab-notify` and `systemctl` on `PATH`, and a real
   loopback HTTP server.
   - No marker: no push and no systemctl call.

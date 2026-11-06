@@ -1,0 +1,22 @@
+---
+# One bad input for test_offline.yml: tasks/preflight.yml must stop with a message containing case.expect.
+- name: Preflight refuses {{ case.what }}
+  block:
+    - name: Preflight with {{ case.what }}
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+      vars:
+        calendar_view_listen_host: "{{ case.listen_host | default('127.0.0.1') }}"
+        calendar_view_calendars: "{{ case.calendars | default(calendar_view_test_good_calendars) }}"
+        calendar_passwords: "{{ case.passwords | default({'viewer': 'offline-test-only-viewer-0001'}) }}"
+        calendar_viewers: "{{ case.viewers | default(calendar_view_test_good_viewers) }}"
+        calendar_view_timezone: "{{ case.timezone | default('America/New_York') }}"
+
+    - name: The preflight should have stopped here
+      ansible.builtin.fail:
+        msg: The preflight passed with {{ case.what }}.
+  rescue:
+    - name: It stopped, and says why, for {{ case.what }}
+      ansible.builtin.assert:
+        that: case.expect in ansible_failed_result.msg | default('')
+        fail_msg: "Wrong failure for {{ case.what }}: {{ ansible_failed_result.msg | default('none') }}"
+        quiet: true
