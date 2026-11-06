@@ -166,7 +166,10 @@
             - name: Validate (gaming-PC inputs)
               ansible.builtin.include_tasks: ../tasks/validate.yml
 
-            - name: Find classic sudo on this machine (no sudo-rs expected on Fedora)
+            # The one detection run against this machine, on purpose: its classic visudo checks the rendered
+            # rule below. Where sudo-rs is installed (an Ubuntu 25.10+ runner) this also derives the real
+            # guarded set (read-only: stat, dpkg-query, --version). Sections 5 and 6 never look at this machine.
+            - name: Find this machine's classic sudo and visudo (the real visudo checks the sudoers rule)
               ansible.builtin.include_tasks: ../tasks/sudo_detect.yml
 
             - name: Render each account's files
@@ -437,14 +440,15 @@
             #   passwd-link -> ../../other/passwd (setuid, owned by another package: must NOT be guarded)
             #   sudo diverted to sudo.distrib (setuid, the diverted-to path must be guarded)
             # Guarded set must be exactly {su, sudo, sudo.distrib}; only sudo/sudo.distrib answer -l -U.
-            - name: Fake sudo-rs package tree
+            # The candidate paths point at rs-host (classic sudo and visudo only), never at this machine's own.
+            - name: Fake sudo-rs package tree and scratch host
               ansible.builtin.file:
                 path: "{{ t }}/{{ item }}"
                 state: directory
                 mode: "0755"
-              loop: [pkg/usr/lib/cargo/bin, pkg/usr/share/doc/sudo-rs, other, bin]
+              loop: [pkg/usr/lib/cargo/bin, pkg/usr/share/doc/sudo-rs, other, bin, rs-host/usr/bin, rs-host/usr/sbin]
 
-            - name: Fake package files
+            - name: Fake package files, and the scratch host's classic sudo and visudo
               ansible.builtin.copy:
                 dest: "{{ t }}/{{ item.path }}"
                 mode: "{{ item.mode }}"
@@ -456,6 +460,8 @@
                 - { path: pkg/usr/lib/cargo/bin/visudo, mode: "0755", version: "visudo-rs 0.2.99" }
                 - { path: pkg/usr/share/doc/sudo-rs/README, mode: "0644", version: "" }
                 - { path: other/passwd, mode: "04755", version: "passwd from shadow 4.16" }
+                - { path: rs-host/usr/bin/sudo, mode: "0755", version: "Sudo version 1.9.17p2" }
+                - { path: rs-host/usr/sbin/visudo, mode: "0755", version: "visudo version 1.9.17p2" }
 
             - name: Fake symlinks (sudoedit inside, passwd-link outside the package)
               ansible.builtin.file:
@@ -483,6 +489,7 @@
                           "{{ t }}/pkg/"*) echo "sudo-rs: $2" ;;
                           *) echo "passwd: $2" ;;
                         esac ;;
+                    *) echo "fake dpkg-query: unexpected $*" >&2; exit 2 ;;
                   esac
 
             - name: Run the guarded-set cases

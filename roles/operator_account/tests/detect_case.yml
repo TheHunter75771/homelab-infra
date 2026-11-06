@@ -72,3 +72,8 @@
         operator_account_sudo_candidates: [/usr/bin/sudo.ws, /usr/bin/sudo]
         operator_account_visudo_candidates: [/usr/sbin/visudo.ws, /usr/sbin/visudo]
         operator_account_sudo_rs_candidates: [/usr/lib/cargo/bin/sudo, /usr/bin/sudo-rs, /usr/bin/sudo]
+
+    - name: "Detection stayed in the scratch dir ({{ detect_case.name }})"
+      ansible.builtin.include_tasks: detect_scope.yml
+      vars:
+        scope_case: "{{ detect_case.name }}"
