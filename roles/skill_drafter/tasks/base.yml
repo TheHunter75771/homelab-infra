@@ -1,0 +1,56 @@
+---
+# The library package needs Python 3.12+ (§12.11); K2 is stdlib only. Ubuntu 26.04 ships newer.
+- name: Base | Python version
+  ansible.builtin.command:
+    argv:
+      - "{{ skill_drafter_python }}"
+      - -I
+      - -c
+      - "import sys; print(sys.version_info >= (3, 12))"
+  register: skill_drafter_py
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Base | Python is 3.12 or newer
+  ansible.builtin.assert:
+    that: skill_drafter_py.rc == 0 and skill_drafter_py.stdout | trim == 'True'
+    fail_msg: "Need Python >= 3.12 at {{ skill_drafter_python }}: {{ skill_drafter_py.stdout | default('') }} {{ skill_drafter_py.stderr | default('') }}"
+    quiet: true
+
+# §12.19.1: system account, no login, no home, primary group sdraft, supplementary group rgate (the library
+# mount), never docker. `groups` + `append: false` makes rgate the ONLY supplementary group: a converge removes
+# any other membership. The read-only check below proves the result.
+- name: Base | sdraft group
+  ansible.builtin.group:
+    name: "{{ skill_drafter_user }}"
+    system: true
+
+- name: Base | sdraft system user (no login, no home, group rgate only)
+  ansible.builtin.user:
+    name: "{{ skill_drafter_user }}"
+    group: "{{ skill_drafter_user }}"
+    groups: ["{{ skill_drafter_library_group }}"]
+    append: false
+    system: true
+    shell: /usr/sbin/nologin
+    home: /nonexistent
+    create_home: false
+  register: skill_drafter_user_task
+
+- name: Base | sdraft's groups
+  ansible.builtin.command:
+    argv: [id, -Gn, "{{ skill_drafter_user }}"]
+  register: skill_drafter_user_groups
+  changed_when: false
+  check_mode: false
+  when: not (ansible_check_mode and skill_drafter_user_task is changed)
+
+- name: Base | sdraft is in exactly its own group and the library's (never docker)
+  ansible.builtin.assert:
+    that: skill_drafter_user_groups.stdout.split() == [skill_drafter_user, skill_drafter_library_group]
+    fail_msg: >-
+      {{ skill_drafter_user }} is in groups '{{ skill_drafter_user_groups.stdout }}'; it must be exactly
+      '{{ skill_drafter_user }} {{ skill_drafter_library_group }}' (never docker).
+    quiet: true
+  when: not (ansible_check_mode and skill_drafter_user_task is changed)

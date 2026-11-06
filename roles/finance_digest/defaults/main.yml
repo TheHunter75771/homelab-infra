@@ -1,0 +1,108 @@
+---
+# Role finance_digest (docs/CONTRACTS.md §12.18.3, module H5): the daily read-only Money Hub digest (module D,
+# apps/finance-digest) on ai-box. Oneshot finance-digest.service + finance-digest.timer, user fdigest; code at
+# /opt/finance-digest (D's finance_digest package plus apps/skill-library's library, read-only); config
+# /etc/finance-digest/config.json; optional /etc/finance-digest/notion.json.
+
+# --- Inventory (host_vars, git-ignored) ---
+# moneyhub_url (REQUIRED, no default): Money Hub's origin as http://<tailnet IPv4>:<port>. An IP literal, never
+#   a hostname: the unit's IP filter allows exactly that address. Preflight refuses anything else.
+# tailnet_ip: ai-box's tailnet IPv4 (the broker publishes there; role ai_stack).
+# ai_stack_broker_port: the broker's published port (role ai_stack's default, 11434, when unset).
+# finance_digest_notion_token (vault) + finance_digest_notion_page_id: both set = Notion on (notion.json is
+#   written and the IP filter opens the public internet); both unset or empty = Notion off (the file is removed).
+
+# The AI Library on ai-box: role ai_library_share's client automount (§12.17.3; CIFS as uid/gid rgate, dir_mode
+# 0770, so fdigest writes through its supplementary group rgate). Absolute, plain characters only (it goes into
+# the unit unescaped), and not under /home, /root, /run, /tmp (ProtectHome / ProtectSystem / PrivateTmp).
+finance_digest_library_root: /srv/ai-library
+# The mount point the library lives on: the root itself, or a parent of it. `findmnt --target <root>` must name
+# exactly this mount, and it can't be /.
+finance_digest_library_mount: "{{ finance_digest_library_root }}"
+
+# D's config (§12.18.3).
+finance_digest_timezone: America/New_York
+finance_digest_ai_summary: true
+# More config keys D's loader accepts, merged over the role's own (empty by default).
+finance_digest_config_extra: {}
+
+# The broker: published by role ai_stack on ai-box's tailnet address.
+finance_digest_broker_port: "{{ ai_stack_broker_port | default(11434) }}"
+
+# Notion (§12.18.2: optional, off until Noah provides a token). Both or neither.
+finance_digest_notion_token: ""
+finance_digest_notion_page_id: ""
+
+# Money Hub must sit on the tailnet (it has no auth; §12.14): its address must be inside this range.
+finance_digest_moneyhub_range: 100.64.0.0/10
+
+# Schedule (§12.18.2): daily 09:30 local, after Money Hub's 09:00 sync; a missed run catches up.
+finance_digest_on_calendar: "*-*-* 09:30:00 {{ finance_digest_timezone }}"
+finance_digest_randomized_delay: 120
+
+# The host's DNS: the systemd-resolved stub (role dns). Without Notion nothing resolves a name (both URLs are IP
+# literals), but the stub is allowed per §12.18.3; with Notion, api.notion.com is resolved through it.
+finance_digest_dns_stub: 127.0.0.53
+
+# The broker is published on tailnet_ip with Docker's userland proxy off, so a connection to it is DNATed in
+# nat OUTPUT to the broker container's bridge address, and systemd's egress filter sees that rewritten
+# destination; the replies are un-NATed before delivery, so the ingress filter sees tailnet_ip (§12.15
+# Reviewer D, §12.16.4 research_gate). Both must be allowed. The broker's container address isn't pinned
+# (queued for ai_stack P2), so the allow covers role docker's container range, the same source ai_control
+# uses, MINUS SearXNG's pinned subnet: SearXNG forwards query strings to public search engines, so reaching
+# it would be a way out to the internet for figures the digest holds. Override with the broker network's real
+# subnet (or a /32 once pinned) to narrow it.
+finance_digest_docker_defaults_file: "{{ role_path }}/../docker/defaults/main.yml"
+finance_digest_searxng_defaults_file: "{{ role_path }}/../searxng/defaults/main.yml"
+# The broker's DNAT target ranges: role docker's container range (inventory value, else role docker's default
+# via include_vars) minus SearXNG's pinned subnet (inventory value, else role searxng's default). A list of
+# CIDRs; set it in the inventory to narrow it (the broker network's subnet, or a /32 once pinned).
+finance_digest_docker_container_range: >-
+  {{ docker_address_pools_container
+     | default(finance_digest_docker_role_defaults.docker_address_pools_container | default('')) }}
+finance_digest_searxng_subnet: >-
+  {{ searxng_subnet | default(finance_digest_searxng_role_defaults.searxng_subnet | default('')) }}
+finance_digest_broker_ranges: >-
+  {{ finance_digest_docker_container_range
+     | finance_digest_exclude([finance_digest_searxng_subnet] | select | list) }}
+
+# Notion on: everything outside these ranges (the public internet) is allowed; inside them only the allow
+# list. The same deny set as role research_gate (loopback, RFC 1918, CGNAT/tailnet, link-local, ULA, plus
+# unspecified, multicast, reserved, benchmark, the IETF block, NAT64 and IPv4-mapped forms).
+finance_digest_ip_deny_public:
+  - 127.0.0.0/8
+  - ::1/128
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  - 100.64.0.0/10
+  - 169.254.0.0/16
+  - fe80::/10
+  - fc00::/7
+  - 0.0.0.0/8
+  - 192.0.0.0/24
+  - 198.18.0.0/15
+  - 224.0.0.0/4
+  - 240.0.0.0/4
+  - ::/128
+  - ::ffff:0:0/96
+  - 64:ff9b::/96
+  - 64:ff9b:1::/48
+  - ff00::/8
+
+# Unit limits. The run is short: a few GETs, at most one 120 s broker call, one append, an optional Notion post.
+finance_digest_memory_max: 256M
+finance_digest_tasks_max: 32
+finance_digest_timeout_start: 10min
+
+# Sources on the controller: D's launcher and package, and the library from apps/skill-library.
+finance_digest_src_dir: "{{ role_path }}/../../apps/finance-digest"
+finance_digest_pkg_src: "{{ finance_digest_src_dir }}/finance_digest"
+finance_digest_launcher_src: "{{ finance_digest_src_dir }}/finance-digest"
+finance_digest_library_src_dir: "{{ role_path }}/../../apps/skill-library"
+# Owner of the installed code (the tests run unprivileged and override it).
+finance_digest_owner: root
+
+# Post-deploy check (not in check mode): a sandboxed --dry-run as fdigest must exit 0 and print the
+# freshness line. Set false to skip it (e.g. while Money Hub is down for maintenance).
+finance_digest_verify: true

@@ -1,0 +1,9 @@
+---
+# Finance digest on ai-box (docs/CONTRACTS.md §12.18). Run as the operator account `claude`, after ai-library.yml
+# and the AI stack. Read-only toward Money Hub; writes only 50-finance/ in the AI Library.
+- name: Finance digest on ai-box
+  hosts: ai_servers
+  become: true
+  gather_facts: false
+  roles:
+    - role: finance_digest

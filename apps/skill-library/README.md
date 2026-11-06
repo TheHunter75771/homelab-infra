@@ -30,8 +30,10 @@ INDEX.md                  generated: one line per item, grouped by folder
 35-forge/                 Skill Forge requests (module F; not indexed or checked here)
 40-writing/{samples,drafts}/
 50-finance/log/
+50-finance/payday-runs/   the Payday tool's saved runs (§12.27); `open` doesn't require it yet
 90-archive/               retired items under their original path; inbox-log.md
 95-shelf/                 denied skills kept by the forge (not indexed or checked here)
+.ai-library-sentinel      mount marker, placed by the share role (L2); never created by this package
 ```
 
 - **Names:** `YYYY-MM-DD_kebab-title.ext` (date = day added). Topic/skill folders: kebab-case,
@@ -44,6 +46,14 @@ INDEX.md                  generated: one line per item, grouped by folder
   anything under `30-skills/<skill>/code/` (no rules at all), and anything still in
   `00-inbox/` (or archived straight from it). `35-forge/` and `95-shelf/` belong to the forge:
   `check` only reports symlinks and temp files there, and `INDEX.md` leaves them out.
+- **Mount sentinel:** `.ai-library-sentinel` (`library.SENTINEL_NAME`) is the share role's (L2)
+  mount marker (CONTRACTS §12.11, §12.17). `init` never creates it. As a regular file at the root
+  of at most 4 KiB (`SENTINEL_MAX_BYTES`), `check` accepts it, `INDEX.md` leaves it out, and the
+  cap does not count it. A bigger one, sparse or not, counts against the cap and `check` reports it
+  as `oversized-sentinel`, so it can't hide bytes. Anywhere else, or as
+  a folder, it is an ordinary hidden file and `check` reports it as `hidden-file`. As a symlink,
+  `check` reports `symlink`. Other hidden root files, and other spellings or cases of the name, are
+  also still reported.
 
 ## CLI
 
@@ -64,12 +74,29 @@ python3 -m library --root R check
   is missing (an unmounted share) or a non-empty folder that is not a library; every other command
   refuses a folder without the layout.
 - **Cap:** `--cap` or `AI_LIBRARY_CAP` (default `500GB`, decimal; `GiB` etc. for binary). Usage is
-  the total size of the regular files under the root (symlinks are not followed). `file` and `inbox`
+  the total size of the regular files under the root, minus the root sentinel (symlinks are not
+  followed). `file` and `inbox`
   warn when the result would be at 90 % or more and refuse when it would pass 100 % (a refused
   `file` writes nothing; `inbox` stops at the item that would not fit).
 - **file** copies (the original is untouched) into `10-sources/<topic>/`. A Markdown file keeps its
   body and gets a complete header (existing values kept, flags override, `added` = today); a malformed
   header is refused, not guessed at. Taken names get `-2`, `-3`, ..., compared case-insensitively.
+  - **Extra header keys** (library API only, no CLI flag): `Library.file(..., extra={"forge": rid})`
+    writes more keys into the item's header, or into the sidecar for a non-Markdown item. The
+    research gate uses this for `forge:`.
+    - **Keys:** must match `[a-z][a-z0-9_]{0,31}`, and none of the six standard keys may appear.
+      Pass those through their own arguments.
+    - **Values:** text on a single line. It must be valid Unicode and printable (`str.isprintable()`),
+      so line breaks, tabs, control characters, zero-width, bidi and BOM characters, and
+      non-breaking spaces are all refused. An empty string is allowed.
+    - **Placement:** extras follow the standard keys, sorted. An extra replaces a key of the same
+      name already in a Markdown source's header.
+    - **Refusals:** a bad `extra` raises `LibraryError` before anything is written.
+  - **Research gate keys:** `forge`, `fetched`, `final_url` and `content_type`
+    (`FORGE_RESERVED_KEYS`) are the gate's record of a fetch, and the forge's `record-ingest`
+    trusts `forge:` together with `source:`. `file` therefore drops them from a Markdown file's own
+    header, and only `extra` can set them. `inbox` can't change a header, so it leaves such an item
+    in the inbox with the reason.
 - **inbox** moves top-level inbox files into `10-sources/<topic>/`. A topic map is lines of
   `<topic> <glob>`; the first glob matching the file name (any case) wins, e.g. `rocm *rocm*` or
   `papers *.pdf`. A dropped `x.pdf.md` next to `x.pdf` is its sidecar and moves with it.
@@ -97,8 +124,9 @@ python3 -m library --root R check
     is missing or not a regular file (never filed as a note of its own), and files with no topic.
     Dotfiles, `desktop.ini` and `Thumbs.db` are ignored.
 - **index** rebuilds `INDEX.md`. The output depends only on the files (never on the clock), and an
-  unchanged library leaves the file untouched (same bytes and mtime). Hidden files and folders
-  (`.git`, `.recycle`, ...) and names that are not valid UTF-8 are skipped (`check` reports them).
+  unchanged library leaves the file untouched (same bytes and mtime). Root files (`README.md`,
+  `INDEX.md`, the sentinel) are not items. Hidden files and folders (`.git`, `.recycle`, ...) and
+  names that are not valid UTF-8 are skipped (`check` reports them).
   `file`, `inbox` and `archive` reindex automatically.
 - **archive** takes a path relative to the root (or absolute inside it). It moves an item with its
   sidecar, or a whole folder, to `90-archive/<same path>`. It refuses layout folders, root files, and
@@ -108,7 +136,16 @@ python3 -m library --root R check
   `bad-field`, `bad-encoding`, `missing-sidecar`, `orphan-sidecar`, `empty-placeholder` (a dated
   name that is an empty file with no header or sidecar: reserved by an interrupted run, never
   filled), `case-collision`, `symlink`, `hidden-file` and `temp-file`, one per line as
-  `kind<TAB>path: message`.
+  `kind<TAB>path: message`, plus `oversized-sentinel`. The one hidden file it accepts is the root
+  sentinel, up to 4 KiB (see Layout).
+  Declared tool outputs have their own rules instead of the dated item names:
+  `50-finance/payday-runs/` holds only `YYYY-MM-DD_<1st|15th>[-N].md` (N 2-99, a real date) with
+  `source: payday-tool` (CONTRACTS §12.27). `40-writing/samples-text/` holds only kebab-case
+  `<slug>.md` and `MANIFEST.md`, each with `generator: voice-profile`; `40-writing/style-stats.md`,
+  `voice-profile.md` and `voice-profile.next.md` need the header; `40-writing/include.txt` and
+  `40-writing/samples/*.docx` (any name, no sidecar) are accepted as they are (§12.21). The same
+  entries are accepted under `90-archive/40-writing/`, also with an archive move's `-2`, `-3`, ...
+  Anything else there is reported (`bad-name`, `misplaced`, `bad-field`, `missing-field`).
 
 Exit codes: `0` ok. `1` means `check` found problems, `inbox` left items behind (or could not log
 a finished move), or `cap` is at 90 % or more. `2` means refused or failed (bad input, a malformed
@@ -118,7 +155,9 @@ control characters in names, so every result is one line.
 
 The same operations are available as a library: `from library import Library`,
 `Library.open(root, clock=..., cap_bytes=...)`, then `.file()`, `.inbox()`, `.index()`,
-`.cap_status()`, `.archive()`, `.check()`. The clock is injectable for tests. Building blocks for
+`.cap_status()`, `.archive()`, `.check()`. The clock is injectable for tests. `file()` also
+takes `extra=` (see **file** above). `SENTINEL_NAME` and `SENTINEL_MAX_BYTES` are exported for the
+mount and backup tooling, and `FORGE_RESERVED_KEYS` for the research gate. Building blocks for
 other modules (the forge) are public too: `abs_path(rel)` (confined, symlink-checked path),
 `ensure_dir(rel)`, `write_new(rel, text)` (atomic, never overwrites), `cap_gate(incoming)` and
 `move_dir(src_rel, dest_rel)`. The old private names (`_abs`, `_ensure_dir`, `_write_new`,

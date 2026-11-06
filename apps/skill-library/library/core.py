@@ -28,7 +28,7 @@ import stat
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 
 from . import frontmatter as fm
 from . import naming
@@ -54,14 +54,37 @@ SKILLS = "30-skills"
 WRITING = "40-writing"
 FINANCE = "50-finance"
 ARCHIVE = "90-archive"
+PAYDAY_RUNS = f"{FINANCE}/payday-runs"  # the Payday tool's saved runs (§12.27)
 LAYOUT_DIRS = (
     INBOX, SOURCES, NOTES, SKILLS, WRITING, f"{WRITING}/samples", f"{WRITING}/drafts",
-    FINANCE, f"{FINANCE}/log", ARCHIVE, FORGE, SHELF,
+    FINANCE, f"{FINANCE}/log", PAYDAY_RUNS, ARCHIVE, FORGE, SHELF,
 )
+# Layout folders added after libraries were already live. `init` creates them and `check` reports
+# them missing, but `open` doesn't require them: every unit that opens the live library (and the
+# share role, which creates them) keeps working until the folder exists.
+LATER_LAYOUT_DIRS = frozenset({PAYDAY_RUNS})
+OPEN_REQUIRED_DIRS = tuple(d for d in LAYOUT_DIRS if d not in LATER_LAYOUT_DIRS)
 TOP_DIRS = frozenset(d.split("/")[0] for d in LAYOUT_DIRS)
 ROOT_FILES = ("README.md", "INDEX.md")
 INBOX_LOG = f"{ARCHIVE}/inbox-log.md"
 WRITING_SUBDIRS = frozenset({"samples", "drafts"})
+FINANCE_SUBDIRS = frozenset({"log", "payday-runs"})
+# 50-finance/payday-runs/: exactly what the Payday tool writes (§12.27): <date>_<1st|15th>.md, a
+# same-day re-run -2 ... -99, with the library header and `source: payday-tool`.
+PAYDAY_NAME_RE = re.compile(r"(?P<date>\d{4}-\d{2}-\d{2})_(?:1st|15th)(?:-(?:[2-9]|[1-9][0-9]))?\.md")
+PAYDAY_SOURCE = "payday-tool"
+# The voice-profile tool's outputs in 40-writing/ (§12.21, Reviewer K's note): samples-text/ holds
+# only <slug>.md cleaned texts plus MANIFEST.md, each with `generator: voice-profile`. Beside it:
+# style-stats.md, voice-profile.md, voice-profile.next.md (headers), Noah's include.txt (plain
+# text), and Noah's samples/*.docx under his own names (no sidecar). 90-archive/40-writing/ accepts
+# the same entries, also with the `-2`, `-3`, ... that an archive move adds.
+SAMPLES_TEXT = "samples-text"
+SAMPLES_MANIFEST = "MANIFEST.md"
+VOICE_GENERATOR = "voice-profile"
+WRITING_HEADER_FILES = frozenset({"style-stats.md", "voice-profile.md", "voice-profile.next.md"})
+WRITING_PLAIN_FILES = frozenset({"include.txt"})
+WRITING_DIRS = WRITING_SUBDIRS | {SAMPLES_TEXT}
+_NUMBERED_RE = re.compile(r"(?P<stem>.+)-(?:[2-9]|[1-9][0-9]+)(?P<ext>\.[^.]+)?")
 TOPIC_SECTIONS = frozenset({SOURCES, NOTES, SKILLS})  # <section>/<kebab-name>/<item>
 FORGE_OWNED = frozenset({FORGE, SHELF})  # the forge keeps its own layout; `forge status` covers them
 SKILL_CODE = "code"  # 30-skills/<skill>/code/** holds a skill's code: any names, any depth
@@ -73,6 +96,19 @@ DEFAULT_CAP = 500 * 10**9  # 500 GB, decimal like the drive's label
 WARN_FRACTION = 0.9
 # Files Windows and macOS clients drop on shares; the inbox ignores them silently.
 OS_JUNK = frozenset({"desktop.ini", "thumbs.db"})
+# The mount marker the AI Library share role (L2) keeps at the library root (§12.11 mount safety).
+# This package never creates it. Exactly this name, as a regular file of at most SENTINEL_MAX_BYTES
+# at the root, is accepted by `check`, not indexed and not counted against the cap. A bigger one
+# counts and is reported (`oversized-sentinel`), so it can't hide bytes; anywhere else the name is
+# an ordinary hidden file.
+SENTINEL_NAME = ".ai-library-sentinel"
+SENTINEL_MAX_BYTES = 4096
+# Header keys only the research gate may set (its provenance for a fetched item; the forge's
+# record_ingest trusts `forge:` + `source:`). `file` drops them from an existing header unless they
+# are passed in `extra`; `inbox`, which must not change a header, leaves such an item in the inbox.
+FORGE_RESERVED_KEYS = frozenset({"forge", "fetched", "final_url", "content_type"})
+# Library.file(extra=...): extra header keys a caller may add (e.g. the research gate's forge:).
+EXTRA_KEY_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
 
 Clock = Callable[[], dt.datetime]
 
@@ -256,7 +292,7 @@ class Library:
         """Open an initialized library; refuses a folder without the layout (e.g. unmounted)."""
         lib = cls(root, **kwargs)
         missing = []
-        for rel in LAYOUT_DIRS:
+        for rel in OPEN_REQUIRED_DIRS:
             try:
                 st = os.lstat(lib.root / rel)
             except FileNotFoundError:
@@ -496,6 +532,13 @@ class Library:
             else:
                 yield _Entry(child, "other", 0)
 
+    @staticmethod
+    def _is_sentinel(entry: _Entry) -> bool:
+        """The L2 mount marker: exactly ``SENTINEL_NAME``, a regular file of at most
+        ``SENTINEL_MAX_BYTES``, at the root."""
+        return (entry.kind == "file" and entry.rel.parts == (SENTINEL_NAME,)
+                and entry.size <= SENTINEL_MAX_BYTES)
+
     def _is_regular(self, rel: PurePosixPath) -> bool:
         try:
             return stat.S_ISREG(os.lstat(self.root.joinpath(*rel.parts)).st_mode)
@@ -521,14 +564,22 @@ class Library:
 
     def file(self, src: str | os.PathLike[str], topic: str, *, title: str | None = None,
              source: str | None = None, tags: list[str] | None = None,
-             summary: str | None = None) -> FileResult:
+             summary: str | None = None, extra: Mapping[str, str] | None = None) -> FileResult:
         """Copy ``src`` into ``10-sources/<topic>/`` under a dated kebab name, with a header.
 
         A Markdown file keeps its body and gets (or updates) its header; anything else is copied
         byte for byte and gets a sidecar ``<name>.<ext>.md``. Never overwrites: a taken name gets
         ``-2``, ``-3``, ... The original at ``src`` is not touched.
+
+        ``extra`` adds header keys beyond the standard six (e.g. ``{"forge": request_id}``): each
+        key matches ``[a-z][a-z0-9_]{0,31}`` and is not a standard key; each value is one line of
+        printable text. They are written into the item's header (Markdown) or its sidecar, and
+        win over a same-named key already in a Markdown file's header. Checked before anything
+        is written. The research gate's keys (``FORGE_RESERVED_KEYS``) in a Markdown file's own
+        header are dropped; only ``extra`` can set them.
         """
         self._check_kebab(topic, "topic")
+        extra_meta = self._check_extra(extra)
         src_path = Path(src)
         try:
             st = os.stat(src_path)
@@ -541,6 +592,7 @@ class Library:
         body = ""
         if ext == "md":
             existing, body = self._split(self._read_text(src_path, str(src)), str(src))
+            existing = {k: v for k, v in existing.items() if k not in FORGE_RESERVED_KEYS}
         meta = self._compose(
             existing,
             title=title or self._existing_str(existing, "title") or naming.title_from_filename(src_path.name),
@@ -549,6 +601,7 @@ class Library:
                 or src_path.name.encode("utf-8", "surrogateescape").decode("utf-8", "replace")),
             tags=tags, summary=summary,
         )
+        meta.update(extra_meta)
         date, slug = self._today(), naming.slugify(meta["title"])  # type: ignore[arg-type]
         if ext == "md":
             content = fm.render(meta, body).encode("utf-8")
@@ -579,6 +632,36 @@ class Library:
             sidecar=None if ext == "md" else self._rel(directory / f"{name}.md"),
             warning=warning,
         )
+
+    @staticmethod
+    def _check_extra(extra: Mapping[str, str] | None) -> fm.Meta:
+        """Validate ``Library.file(extra=...)``; returns a plain copy (keys in the given order)."""
+        if extra is None:
+            return {}
+        if not isinstance(extra, Mapping):
+            raise LibraryError("extra must be a mapping of header key to text")
+        out: fm.Meta = {}
+        for key, value in extra.items():
+            if not isinstance(key, str) or not EXTRA_KEY_RE.fullmatch(key):
+                raise LibraryError(
+                    f"extra header key {naming.display(str(key))!r} is not allowed: use lowercase "
+                    "letters, digits and _, starting with a letter, at most 32 characters"
+                )
+            if key in fm.REQUIRED:
+                raise LibraryError(f"extra header key {key!r} is a standard key; pass it as its own argument")
+            if not isinstance(value, str):
+                raise LibraryError(f"extra header {key!r} must be text, got {type(value).__name__}")
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError:
+                raise LibraryError(f"extra header {key!r} is not valid Unicode text") from None
+            if not value.isprintable():
+                raise LibraryError(
+                    f"extra header {key!r} must be one line of printable text (no line breaks, tabs "
+                    "or control characters)"
+                )
+            out[key] = value
+        return out
 
     # ------------------------------------------------------------------ inbox
     #
@@ -665,6 +748,11 @@ class Library:
             for key in ("tags", "related"):
                 if key in existing and not isinstance(existing[key], list):
                     raise LibraryError(f"'{key}' in {label} must be a list like [a, b]; fix the header")
+            reserved = sorted(FORGE_RESERVED_KEYS & existing.keys())
+            if reserved:
+                raise LibraryError(
+                    f"the header of {label} has {', '.join(reserved)}, which only the research gate may "
+                    "set; remove the line(s), or use `file` (which copies and drops them)")
             if "added" in existing and existing["added"] != date:
                 raise LibraryError(
                     f"{label} says added: {existing['added']}, but the inbox files items as added {date}; "
@@ -995,7 +1083,7 @@ class Library:
         if rel.parts[0] == INBOX:
             return line + " — unfiled"
         if meta is None:
-            return line + " — (no valid front-matter; run check)"
+            return line if self._headerless_ok(rel) else line + " — (no valid front-matter; run check)"
         added, summary, tags = meta.get("added"), meta.get("summary"), meta.get("tags")
         if isinstance(added, str) and added:
             line += f" — {self._md_text(added)}"
@@ -1010,7 +1098,7 @@ class Library:
         groups: dict[str, list[str]] = {}
         for entry in self._walk():
             if entry.kind != "file" or len(entry.rel.parts) == 1:
-                continue
+                continue  # root files (README.md, INDEX.md, the sentinel) are not items
             if any(part.startswith(".") for part in entry.rel.parts):
                 continue  # hidden files and anything in hidden folders (.git, .recycle, ...)
             if entry.rel.parts[0] in FORGE_OWNED:
@@ -1050,8 +1138,11 @@ class Library:
     # ------------------------------------------------------------------ cap
 
     def usage_bytes(self) -> int:
-        """Total size of the regular files under the root (symlinks are not followed)."""
-        return sum(e.size for e in self._walk() if e.kind == "file")
+        """Total size of the regular files under the root (symlinks are not followed).
+
+        The root's ``SENTINEL_NAME`` is a mount marker, not content, so it is not counted.
+        """
+        return sum(e.size for e in self._walk() if e.kind == "file" and not self._is_sentinel(e))
 
     def cap_status(self) -> CapStatus:
         return CapStatus(self.usage_bytes(), self.cap_bytes)
@@ -1162,6 +1253,13 @@ class Library:
                 continue  # the forge's own layout; `forge status` / `forge verify` check it
             if top == SKILLS and len(parts) > 3 and parts[2] == SKILL_CODE:
                 continue  # a skill's code/: any names, any depth (the forge pins it by hash)
+            if self._is_sentinel(entry):
+                continue  # the L2 mount marker (SENTINEL_NAME); only this exact, small root file
+            if entry.kind == "file" and parts == (SENTINEL_NAME,):
+                report(path, "oversized-sentinel",
+                       f"the mount sentinel is {entry.size} bytes; at most {SENTINEL_MAX_BYTES} are "
+                       "allowed, and a bigger one counts against the cap")
+                continue
             if name.startswith("."):
                 report(path, "hidden-file", "hidden files do not belong in the library")
                 continue
@@ -1201,11 +1299,11 @@ class Library:
             elif not naming.is_kebab_name(name):
                 report(path, "bad-dir-name", "topic/skill names are kebab-case, 1-48 characters")
         elif top == WRITING:
-            if depth > 2 or name not in WRITING_SUBDIRS:
-                report(path, "misplaced", "40-writing holds only samples/ and drafts/")
+            if depth > 2 or name not in WRITING_DIRS:
+                report(path, "misplaced", "40-writing holds only samples/, drafts/ and samples-text/")
         elif top == FINANCE:
-            if depth > 2 or name != "log":
-                report(path, "misplaced", "50-finance holds only log/")
+            if depth > 2 or name not in FINANCE_SUBDIRS:
+                report(path, "misplaced", "50-finance holds only log/ and payday-runs/")
 
     def _check_file(self, rel: PurePosixPath, report) -> None:
         parts, path, name, top, depth = rel.parts, rel.as_posix(), rel.name, rel.parts[0], len(rel.parts)
@@ -1214,6 +1312,8 @@ class Library:
                 report(path, "unknown-entry" if top not in TOP_DIRS else "misplaced",
                        "loose file at the library root")
             return  # README.md and INDEX.md are tool files without a header
+        if self._check_declared(rel, report):
+            return
         if top in TOPIC_SECTIONS:
             placed = depth == 3
         elif top == WRITING:
@@ -1250,6 +1350,65 @@ class Library:
             if name.endswith(".md"):
                 self._check_header(rel, report)
 
+    def _check_declared(self, rel: PurePosixPath, report) -> bool:
+        """Files with their own rules (§12.27 payday runs, §12.21 voice-profile outputs and Noah's
+        samples). True when this handled ``rel``; False leaves it to the general item rules."""
+        parts, path, name = rel.parts, rel.as_posix(), rel.name
+        if len(parts) == 3 and f"{parts[0]}/{parts[1]}" == PAYDAY_RUNS:
+            m = PAYDAY_NAME_RE.fullmatch(name)
+            if m is None or not fm.is_iso_date(m.group("date")):
+                report(path, "bad-name", "payday runs are named YYYY-MM-DD_1st.md or YYYY-MM-DD_15th.md "
+                       "(a same-day re-run -2 ... -99), with a real date")
+                if not name.endswith(".md"):
+                    return True
+            self._check_header(rel, report, require={"source": PAYDAY_SOURCE})
+            return True
+        kind = self._writing_kind(parts)
+        if kind is None:
+            return False
+        if kind == "bad-sample-text":
+            report(path, "bad-name", f"{SAMPLES_TEXT}/ holds only kebab-case <slug>.md cleaned texts and "
+                   f"{SAMPLES_MANIFEST}")
+            if not name.endswith(".md"):
+                return True
+            kind = "header"
+        if kind == "header":
+            self._check_header(rel, report, require={"generator": VOICE_GENERATOR}
+                               if SAMPLES_TEXT in parts[:-1] else None)
+        return True  # kind "plain": no header and no sidecar
+
+    @staticmethod
+    def _writing_kind(parts: tuple[str, ...]) -> str | None:
+        """How a file in 40-writing (or archived to 90-archive/40-writing) is checked: "header",
+        "plain", "bad-sample-text", or None for the general item rules."""
+        archived = len(parts) > 2 and parts[0] == ARCHIVE and parts[1] == WRITING
+        if not archived and parts[0] != WRITING:
+            return None
+        sub = parts[2:] if archived else parts[1:]
+        names = {sub[-1]}
+        if archived:  # an archive move may have numbered the name: x.md -> x-2.md
+            m = _NUMBERED_RE.fullmatch(sub[-1])
+            if m:
+                names.add(m.group("stem") + (m.group("ext") or ""))
+        if len(sub) == 1:
+            if names & WRITING_HEADER_FILES:
+                return "header"
+            return "plain" if names & WRITING_PLAIN_FILES else None
+        if len(sub) != 2:
+            return None
+        if sub[0] == "samples" and sub[1].casefold().endswith(".docx"):
+            return "plain"  # Noah's originals under his own names; voice-profile reads only .docx
+        if sub[0] == SAMPLES_TEXT:
+            stem = sub[1][:-3] if sub[1].endswith(".md") else ""
+            if SAMPLES_MANIFEST in names or (naming.is_slug(stem) and stem.casefold() != "manifest"):
+                return "header"
+            return None if archived else "bad-sample-text"
+        return None
+
+    def _headerless_ok(self, rel: PurePosixPath) -> bool:
+        """A file `check` accepts without a header or sidecar (include.txt, Noah's .docx samples)."""
+        return self._writing_kind(rel.parts) == "plain"
+
     def _size(self, rel: PurePosixPath) -> int | None:
         """Size of a regular file, or None if it is missing or not a regular file."""
         try:
@@ -1258,7 +1417,8 @@ class Library:
             return None
         return st.st_size if stat.S_ISREG(st.st_mode) else None
 
-    def _check_header(self, rel: PurePosixPath, report) -> None:
+    def _check_header(self, rel: PurePosixPath, report, require: Mapping[str, str] | None = None) -> None:
+        """The library header; ``require`` adds keys that must hold exactly these values."""
         path = rel.as_posix()
         try:
             text = self.root.joinpath(*rel.parts).read_bytes().decode("utf-8")
@@ -1275,6 +1435,13 @@ class Library:
             return
         for kind, message in fm.validate(meta):
             report(path, kind, message)
+        for key, want in (require or {}).items():
+            got = meta.get(key)
+            if got is None:
+                if key not in fm.REQUIRED:  # a missing required key is already reported
+                    report(path, "missing-field", f"missing '{key}' (must be {want!r} here)")
+            elif got != want:
+                report(path, "bad-field", f"'{key}' must be {want!r} here, got {got!r}")
 
     # Private names kept as aliases for existing callers (forge).
     _abs = abs_path

@@ -35,6 +35,15 @@ def is_kebab_name(name: str) -> bool:
     )
 
 
+def is_slug(name: str, max_len: int = MAX_SLUG) -> bool:
+    """A kebab-case slug of 1..max_len characters that is not a Windows device name."""
+    return (
+        0 < len(name) <= max_len
+        and _KEBAB_RE.fullmatch(name) is not None
+        and name not in _WINDOWS_RESERVED
+    )
+
+
 def slugify(title: str, max_len: int = MAX_SLUG) -> str:
     """Turn any title into a kebab-case slug ("Ünïcode: A/B test!" -> "unicode-a-b-test").
 

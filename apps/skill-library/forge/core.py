@@ -31,9 +31,19 @@ Invariants:
   into ``30-skills/``; a difference rolls the move back. After approval, any change to the skill
   needs a new decision; ``verify`` checks an installed skill against its CHANGELOG **and** the
   approving request's ``state.md`` and ``review.md``.
-* **Noah's concurrent edits survive.** Proposals are appended with one ``O_APPEND`` write (never a
-  rewrite of a copy read earlier); ``review.md`` is rewritten only if its inode, size and mtime are
-  unchanged since it was read.
+* **Noah's concurrent edits survive (with one narrow window).** Proposals are appended with one
+  ``O_APPEND`` write (never a rewrite of a copy read earlier). Files Noah edits by hand that the
+  forge does rewrite (``review.md`` in ``decide``/``revive``; ``searches.md`` / ``sources.md`` in a
+  chat tick, ``tick_searches`` / ``tick_sources``) go through ``_replace_if_same``: it writes and
+  fsyncs a temp file, then re-checks the inode, size, mtime **and the bytes** of the file against
+  what it read, and renames only if nothing changed (a directory, FIFO or symlink swapped in is
+  refused too). What is left: an edit saved in the microseconds between that last check and the
+  rename, or written later by an editor that still holds the old file open (it lands in the
+  replaced inode), is lost. The forge's write then stands and Noah's edit must be redone.
+* **Rewrites replace the file by rename.** ``searches.md`` / ``sources.md`` (after a tick) and
+  ``review.md`` (after ``decide`` approve or ``revive``) get a new inode. Their owner and mode are
+  whatever a new file gets: on the ntfs3/CIFS share the mount options decide; on a POSIX
+  filesystem it is the user the forge runs as, with its umask.
 
 Limits (by design, like the library):
 
@@ -60,13 +70,14 @@ import secrets
 import stat
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from dataclasses import replace as _dc_replace
 from pathlib import Path
 
 from library import Library, LibraryError, PathRefused
 from library import frontmatter as fm
 from library import naming
 from library.core import ARCHIVE, SKILLS, SOURCES
-from library.safefs import atomic_copy, atomic_write_bytes, casefold_names
+from library.safefs import TMP_PREFIX, atomic_copy, atomic_write_bytes, casefold_names, fsync_dir
 
 from . import checklist
 from .hashing import CHANGELOG, file_digests, skill_hash, tree_files
@@ -98,6 +109,16 @@ QUERY_STATES = frozenset({S_SEARCH, S_SOURCE})
 URL_STATES = frozenset({S_SOURCE, S_REDRAFT})
 PROPOSE_STATES = frozenset({S_SEARCH, S_SOURCE})
 DRAFT_STATES = frozenset({S_SOURCE, S_REDRAFT})
+
+# Ticks made through the forge API (CONTRACTS §12.25): one call approves at most this many.
+MAX_TICK_QUERIES = 10
+MAX_TICK_URLS = 30
+MAX_TICK_QUERY_CHARS = 200
+MAX_LOGGED_ITEMS = 10          # ticked items per state.md audit line (more items: more lines)
+_BY_RE = re.compile(r"[A-Za-z0-9._@-]{1,64}")  # the approver's id (Open WebUI user id)
+TICKED = "ticked"
+ALREADY = "already"
+NOT_FOUND = "not-found"
 
 MAX_ID_SLUG = 48
 _ID_RE = re.compile(r"(?P<date>\d{4}-\d{2}-\d{2})_(?P<slug>[a-z0-9]+(?:-[a-z0-9]+)*)")
@@ -138,6 +159,40 @@ class DecideResult:
     location: str                       # library-relative folder afterwards
     hash: str | None = None             # the approved hash (approve only)
     edited: list[str] = field(default_factory=list)  # files changed since the draft (approve only)
+
+
+@dataclass(frozen=True)
+class TickItem:
+    """One requested query or URL and what ``tick_*`` did with it.
+
+    ``item`` is the matched form: the query as checked (surrounding spaces removed) or the
+    canonical URL. ``reason`` is a fixed explanation for ``not-found``; it never quotes the file.
+    """
+    requested: str
+    item: str
+    outcome: str          # TICKED | ALREADY | NOT_FOUND
+    reason: str = ""
+
+
+@dataclass
+class TickResult:
+    kind: str                                   # "search" | "source"
+    items: list[TickItem] = field(default_factory=list)
+
+    def _with(self, outcome: str) -> list[str]:
+        return [i.item for i in self.items if i.outcome == outcome]
+
+    @property
+    def ticked(self) -> list[str]:
+        return self._with(TICKED)
+
+    @property
+    def already(self) -> list[str]:
+        return self._with(ALREADY)
+
+    @property
+    def not_found(self) -> list[str]:
+        return self._with(NOT_FOUND)
 
 
 @dataclass
@@ -238,29 +293,70 @@ class Forge:
             os.close(fd)
 
     def _read_guarded(self, rel: str) -> tuple[str, tuple[int, int, int]]:
-        """Text plus a fingerprint (inode, size, mtime) for ``_replace_unchanged``."""
+        """Text plus a fingerprint (inode, size, mtime) for ``_replace_if_same``.
+
+        Opened with O_NOFOLLOW and O_NONBLOCK (a FIFO swapped in cannot block while the forge
+        lock is held), and checked to be a regular file before it is read."""
         path = self._abs(rel)
         try:
-            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            fd = os.open(path, _RO_FLAGS)
         except FileNotFoundError:
             raise ForgeError(f"{rel} is missing") from None
+        st = _regular_fstat(fd)
+        if st is None:
+            raise PathRefused(f"{rel} is not a regular file")
         with os.fdopen(fd, "rb") as fh:
-            st = os.fstat(fh.fileno())
-            if not stat.S_ISREG(st.st_mode):
-                raise PathRefused(f"{rel} is not a regular file")
             data = fh.read()
         try:
             return data.decode("utf-8"), (st.st_ino, st.st_size, st.st_mtime_ns)
         except UnicodeDecodeError:
             raise ForgeError(f"{rel} is not UTF-8 text") from None
 
-    def _replace_unchanged(self, rel: str, fingerprint: tuple[int, int, int], text: str) -> None:
-        """Replace a file Noah may edit, only if it is unchanged since we read it."""
-        st = os.lstat(self._abs(rel))
-        if (st.st_ino, st.st_size, st.st_mtime_ns) != fingerprint:
-            raise ForgeError(f"{rel} changed while the forge was working (an edit by Noah?); "
+    def _replace_if_same(self, rel: str, fingerprint: tuple[int, int, int], old: str, new: str) -> None:
+        """Atomically replace a file Noah may edit by hand (temp + fsync + rename), re-checking
+        immediately before the rename that it is still exactly what we read: same inode, size
+        and mtime, and the same bytes (an in-place, same-size edit within one mtime tick is
+        caught by the bytes). Anything else: the temp file is removed and nothing is written."""
+        path = self._abs(rel)
+        expected = old.encode("utf-8")
+
+        def unchanged() -> bool:
+            try:
+                fd = os.open(path, _RO_FLAGS)
+            except OSError:
+                return False
+            st = _regular_fstat(fd)  # a directory, FIFO or device swapped in: closed, not read
+            if st is None or (st.st_ino, st.st_size, st.st_mtime_ns) != fingerprint:
+                if st is not None:
+                    os.close(fd)
+                return False
+            with os.fdopen(fd, "rb") as fh:
+                return fh.read(len(expected) + 1) == expected
+
+        refused = ForgeError(f"{rel} changed while the forge was working (an edit by Noah?); "
                              "nothing was written to it; run the command again")
-        self._replace(rel, text)
+        if not unchanged():
+            raise refused
+        while True:
+            tmp = path.parent / f"{TMP_PREFIX}{secrets.token_hex(8)}"
+            try:
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o666)
+                break
+            except FileExistsError:
+                continue
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(new.encode("utf-8"))
+                fh.flush()
+                os.fsync(fh.fileno())
+            if not unchanged():
+                raise refused
+            os.replace(tmp, path)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp)  # our own temp file, never library content
+            raise
+        fsync_dir(path.parent)
 
     def _read(self, rel: str) -> str:
         path = self._abs(rel)
@@ -328,8 +424,10 @@ class Forge:
         return meta, body
 
     def _set_state(self, base: str, meta: fm.Meta, body: str, message: str,
-                   status: str | None = None, **extra: str | list[str]) -> None:
-        """Rewrite the header and append exactly one log line; earlier log lines are kept as is."""
+                   status: str | None = None, *, more: list[str] | tuple[str, ...] = (),
+                   **extra: str | list[str]) -> None:
+        """Rewrite the header and append one log line (plus one per ``more`` message, same stamp);
+        earlier log lines are kept as is."""
         meta = dict(meta)
         if status is not None:
             meta["status"] = status
@@ -337,7 +435,9 @@ class Forge:
         if body and not body.endswith("\n"):
             body += "\n"
         note = f" (status {status})" if status is not None else ""
-        self._replace(f"{base}/{STATE}", _render(meta, body + f"- {self._stamp()} {message}{note}\n"))
+        stamp = self._stamp()
+        lines = f"- {stamp} {message}{note}\n" + "".join(f"- {stamp} {m}\n" for m in more)
+        self._replace(f"{base}/{STATE}", _render(meta, body + lines))
 
     @staticmethod
     def _require(status: str, allowed: frozenset[str] | set[str], what: str) -> None:
@@ -580,6 +680,100 @@ class Forge:
             self._set_state(base, meta, body, f"ingested {canon} -> {rel}", ingested=ingested)
         return rel
 
+    # ------------------------------------------------------------------ ticks (CONTRACTS §12.25)
+
+    def tick_searches(self, rid: str, queries: list[str], *, by: str) -> TickResult:
+        """Approve searches already listed in ``searches.md``: turn exactly the matching ``- [ ]``
+        lines into ``- [x]``. A query matches only the one well-formed line whose query, as the
+        parser reads it (Noah's edited text, if he edited it), is the same code point for code
+        point. Everything else in the file is kept byte for byte. Each query is reported as
+        ``ticked``, ``already`` or ``not-found`` (absent, listed more than once, or also on a
+        line the parser refuses); nothing is ever added or reworded. Allowed only while the gate
+        may run searches (QUERY_STATES).
+
+        ``by`` is the approver's id (1-64 of ``A-Z a-z 0-9 . _ @ -``). When anything is ticked,
+        the ``state.md`` log records ``approve-chat``, ``by=<id>``, the kind and every ticked item
+        in full, at most 10 per log line (CONTRACTS §12.25, "K3 done", Reviewer P-4); nothing is
+        written when nothing was ticked.
+
+        The file is replaced by rename (temp + fsync + a final unchanged-check + rename), so it
+        gets a new inode; its owner and mode follow the mount (ntfs3/CIFS) or the writing user."""
+        by = _check_by(by)
+        wanted = _tick_inputs(queries, MAX_TICK_QUERIES, "queries", _tick_query)
+        return self._tick(rid, by, "search", SEARCHES, wanted, QUERY_STATES, checklist.parse_searches,
+                          lambda q: q.query, _loose_query)
+
+    def tick_sources(self, rid: str, urls: list[str], *, by: str) -> TickResult:
+        """Approve sources already listed in ``sources.md``, matched by canonical URL (so
+        ``HTTPS://Example.com/a`` matches the line for ``https://example.com/a``, but a different
+        path, port, query or scheme does not). Same rules and outcomes as ``tick_searches``.
+        Allowed only while the gate may fetch (URL_STATES)."""
+        by = _check_by(by)
+        wanted = _tick_inputs(urls, MAX_TICK_URLS, "URLs", _tick_url)
+        return self._tick(rid, by, "source", SOURCES_FILE, wanted, URL_STATES, checklist.parse_sources,
+                          lambda s: s.url, _loose_url)
+
+    def _tick(self, rid: str, by: str, kind: str, name: str, wanted: list[tuple[str, str]],
+              states: frozenset[str], parse, key_of, loose_key) -> TickResult:
+        result = TickResult(kind)
+        plural, counted = ("searches", "search(es)") if kind == "search" else ("sources", "source(s)")
+        with self._locked():
+            base = self._base(rid)
+            meta, body = self._state(base)
+            self._require(meta["status"], states, f"ticking {plural}")
+            rel = f"{base}/{name}"
+            if not os.path.lexists(self._abs(rel)):
+                result.items = [TickItem(req, key, NOT_FOUND, f"{name} does not exist yet")
+                                for req, key in wanted]
+                return result
+            text, fingerprint = self._read_guarded(rel)
+            listed, bad = parse(text)
+            # Same line split as the parser, so its line numbers index this list, and joining
+            # it gives back the file exactly.
+            lines = text.splitlines(keepends=True)
+            refused = {loose_key(lines[b.line - 1]) for b in bad} - {None}
+            ticks: set[int] = set()
+            for requested, key in wanted:
+                hits = [e for e in listed if key_of(e) == key]
+                if key in refused:
+                    reason = "also on a line the forge refuses (malformed or hidden text); fix the file by hand"
+                    result.items.append(TickItem(requested, key, NOT_FOUND, reason))
+                elif not hits:
+                    result.items.append(TickItem(requested, key, NOT_FOUND, f"not listed in {name}"))
+                elif len(hits) > 1:
+                    result.items.append(TickItem(requested, key, NOT_FOUND,
+                                                 f"listed more than once in {name}; fix the file by hand"))
+                elif hits[0].checked:
+                    result.items.append(TickItem(requested, key, ALREADY))
+                else:
+                    ticks.add(hits[0].line)
+                    result.items.append(TickItem(requested, key, TICKED))
+            if not ticks:
+                return result
+            for lineno in ticks:
+                line = lines[lineno - 1]
+                lead = "\ufeff" if lineno == 1 and line.startswith("\ufeff") else ""
+                if not line.startswith(lead + "- [ ] "):
+                    raise ForgeError(f"{rel} line {lineno} is not an unticked box; nothing was written")
+                lines[lineno - 1] = lead + "- [x] " + line[len(lead) + len("- [ ] "):]
+            new_text = "".join(lines)
+            # Fail closed: the new file must parse exactly as before, except that these boxes
+            # (and only these) are now ticked.
+            expected = [_dc_replace(e, checked=True) if e.line in ticks else e for e in listed]
+            if parse(new_text) != (expected, bad):
+                raise ForgeError(f"{rel}: ticking would change more than the requested boxes; "
+                                 "nothing was written")
+            self._replace_if_same(rel, fingerprint, text, new_text)
+            counts = {o: sum(i.outcome == o for i in result.items) for o in (TICKED, ALREADY, NOT_FOUND)}
+            chunks = _logged_chunks(result.ticked)
+            more = [f"approve-chat by={by} {kind} (continued, {n}/{len(chunks)}): {chunk}"
+                    for n, chunk in enumerate(chunks[1:], start=2)]
+            self._set_state(base, meta, body,
+                            f"approve-chat by={by} {kind}: ticked {counts[TICKED]} {counted} in {name} "
+                            f"by tick-{plural} ({counts[ALREADY]} already ticked, "
+                            f"{counts[NOT_FOUND]} not found): {chunks[0]}", more=more)
+        return result
+
     # ------------------------------------------------------------------ draft
 
     def draft_skill(self, rid: str, src: str | os.PathLike[str], *, name: str | None = None) -> tuple[str, str, str | None]:
@@ -681,14 +875,16 @@ class Forge:
             if not naming.is_kebab_name(skill):
                 raise ForgeError(f"{base}/{REVIEW}: skill {skill!r} is not kebab-case (1-48 characters)")
             if decision == "approve":
-                return self._approve(rid, base, meta, body, review_meta, review_body, fingerprint, skill)
+                return self._approve(rid, base, meta, body, review_meta, review_body, fingerprint, skill,
+                                     review_text)
             if decision == "deny":
                 return self._deny(rid, base, meta, body, skill)
             self._set_state(base, meta, body, "Noah asked for a revision", status=S_REDRAFT)
             return DecideResult("revise", skill, base)
 
     def _approve(self, rid: str, base: str, meta: fm.Meta, body: str, review_meta: fm.Meta,
-                 review_body: str, fingerprint: tuple[int, int, int], skill: str) -> DecideResult:
+                 review_body: str, fingerprint: tuple[int, int, int], skill: str,
+                 review_text: str) -> DecideResult:
         # ---- preflight: every check runs before the first move.
         skill_rel = f"{base}/{SKILL_DIR}"
         if not self._is_dir(skill_rel):
@@ -767,7 +963,7 @@ class Forge:
                         status=S_APPROVED, approved_hash=installed)
         review_meta = dict(review_meta)
         review_meta.update(approved_hash=installed, decided=stamp)
-        self._replace_unchanged(f"{base}/{REVIEW}", fingerprint, _render(review_meta, review_body))
+        self._replace_if_same(f"{base}/{REVIEW}", fingerprint, review_text, _render(review_meta, review_body))
         return DecideResult("approve", skill, dest_rel, installed, edited)
 
     def _deny(self, rid: str, base: str, meta: fm.Meta, body: str, skill: str) -> DecideResult:
@@ -812,7 +1008,7 @@ class Forge:
             dest = f"{FORGE}/{rid}"
             if dest.split("/")[-1].casefold() in casefold_names(self._abs(FORGE)):
                 raise ForgeError(f"{dest} already exists; nothing was moved")
-            self._replace_unchanged(f"{src}/{REVIEW}", fingerprint, _render(review_meta, review_body))
+            self._replace_if_same(f"{src}/{REVIEW}", fingerprint, review_text, _render(review_meta, review_body))
             self._move_dir(src, dest)
             meta = {k: v for k, v in meta.items() if k != "shelf"}
             self._set_state(dest, meta, body, f"revived from {src}/ (sources kept, no new searches; "
@@ -954,6 +1150,101 @@ def _require_confirm(review_meta: fm.Meta, current: str, base: str, edited: list
         f"exactly this content add the line 'confirm_hash: {want}' to {base}/{REVIEW} "
         f"(content {current}), then run decide again"
         + (f"; the confirm_hash given ({given!r}) does not match" if given else ""))
+
+
+def _tick_inputs(items: object, cap: int, what: str, clean) -> list[tuple[str, str]]:
+    """(as given, checked form) for each distinct item; refuses the whole call on any bad one."""
+    if not isinstance(items, (list, tuple)):
+        raise ForgeError(f"{what} must be a list")
+    if not items:
+        raise ForgeError(f"no {what} given")
+    if len(items) > cap:
+        raise ForgeError(f"at most {cap} {what} per call (got {len(items)})")
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for i, item in enumerate(items, start=1):
+        if not isinstance(item, str):
+            raise ForgeError(f"{what} {i} is not text")
+        try:
+            key = clean(item)
+        except ValueError as exc:
+            raise ForgeError(f"{what} {i}: {exc}") from None
+        if key not in seen:
+            seen.add(key)
+            out.append((item, key))
+    return out
+
+
+_RO_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+
+
+def _regular_fstat(fd: int) -> os.stat_result | None:
+    """fstat of a raw fd if it is a regular file; otherwise the fd is closed and None returned
+    (checked before ``os.fdopen``, which would raise on a directory and leak the fd)."""
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        return None
+    return st
+
+
+def _check_by(by: object) -> str:
+    if not isinstance(by, str) or not _BY_RE.fullmatch(by):
+        raise ForgeError("by must be the approver's id: 1-64 characters of A-Z a-z 0-9 . _ @ -")
+    return by
+
+
+def _logged_chunks(items: list[str]) -> list[str]:
+    """Every ticked item for the state.md log, in full, as code spans (queries and URLs can never
+    contain a backtick), at most MAX_LOGGED_ITEMS per log line. An item that fails the line rules
+    (never expected: inputs were checked) is written as "(unprintable item)"."""
+    shown = ["(unprintable item)" if checklist.line_problem(item) else f"`{item}`" for item in items]
+    return [", ".join(shown[i:i + MAX_LOGGED_ITEMS]) for i in range(0, len(shown), MAX_LOGGED_ITEMS)]
+
+
+def _tick_query(query: str) -> str:
+    if len(query) > MAX_TICK_QUERY_CHARS:
+        raise ValueError(f"longer than {MAX_TICK_QUERY_CHARS} characters")
+    return checklist.check_query(query)
+
+
+def _tick_url(url: str) -> str:
+    return checklist.canonical_url(url.strip())  # the same checks as propose_sources
+
+
+_LOOSE_BOX_RE = re.compile(r"\s*[-*+]\s*\[[^\]]{0,3}\]\s*")
+_LOOSE_WHY_RE = re.compile(r"why:", re.IGNORECASE)
+
+
+def _loose_payload(line: str) -> str:
+    """A refused checkbox-ish line without its line ending, BOM and (any) box prefix."""
+    line = (line.splitlines() or [""])[0].removeprefix("\ufeff")
+    m = _LOOSE_BOX_RE.match(line)
+    return line[m.end():] if m else line
+
+
+def _loose_query(line: str) -> str | None:
+    """The query a refused ``searches.md`` line seems to name (text before the first ``why:``,
+    without trailing spaces and dashes). Used only to refuse a tick, never to make one."""
+    head = _LOOSE_WHY_RE.split(_loose_payload(line), 1)[0]
+    head = head.rstrip(" \t\u00a0\u2014\u2013\u2012\u2015\u2212-").strip()
+    return head or None
+
+
+def _loose_url(line: str) -> str | None:
+    """The canonical URL a refused ``sources.md`` line seems to name (the first code span, else
+    the first word). Used only to refuse a tick, never to make one."""
+    payload = _loose_payload(line)
+    parts = payload.split("`")
+    candidate = parts[1] if len(parts) > 2 else (payload.split() or [""])[0]
+    try:
+        return checklist.canonical_url(candidate.strip())
+    except ValueError:
+        return None
 
 
 def _title(state_meta: fm.Meta) -> str:

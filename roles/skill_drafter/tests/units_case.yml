@@ -1,0 +1,63 @@
+---
+# Render skill-drafter.service and verify it. Any systemd-analyze warning fails. Params: sd_case (name),
+# sd_expect_allow (the exact IPAddressAllow value).
+- name: Unit dir ({{ sd_case }})
+  ansible.builtin.file:
+    path: "{{ test_tmp }}/units-{{ sd_case }}"
+    state: directory
+    mode: "0755"
+
+- name: Render the unit ({{ sd_case }})
+  ansible.builtin.template:
+    src: skill-drafter.service.j2
+    dest: "{{ test_tmp }}/units-{{ sd_case }}/skill-drafter.service"
+    mode: "0644"
+
+- name: Systemd-analyze verify ({{ sd_case }})
+  ansible.builtin.command:
+    argv: [systemd-analyze, verify, "{{ test_tmp }}/units-{{ sd_case }}/skill-drafter.service"]
+  register: sd_test_verify
+  changed_when: false
+  failed_when: sd_test_verify.rc != 0 or sd_test_verify.stderr | length > 0
+
+- name: The unit carries the contract's settings ({{ sd_case }})
+  vars:
+    unit: "{{ lookup('ansible.builtin.file', test_tmp ~ '/units-' ~ sd_case ~ '/skill-drafter.service') }}"
+    lines: "{{ unit.splitlines() }}"
+    allow: "{{ unit | regex_search('(?m)^IPAddressAllow=(.*)$', '\\1') | first | split(' ') }}"
+    service_section: "{{ unit | regex_search('(?ms)^\\[Service\\]$(.*)^\\[Install\\]$', '\\1') | first }}"
+  ansible.builtin.assert:
+    that:
+      # The [Service] section is exactly the sandbox list plus the five fixed keys (each entry once).
+      - skill_drafter_sandbox | reject('in', lines) | list == []
+      - (service_section.splitlines() | reject('match', '^(#|$)') | list | sort)
+        == ((skill_drafter_sandbox + ['Type=exec', 'ExecStart=' ~ ((skill_drafter_argv + ['serve']) | join(' ')),
+            'Restart=on-failure', 'RestartSec=30s', 'SyslogIdentifier=skill-drafter']) | sort)
+      - unit is search('(?m)^Type=exec$')
+      - unit is search('(?m)^ExecStart=/usr/bin/python3 -I -B /opt/skill-drafter/skill-drafter --config /etc/skill-drafter/config.json serve$')
+      - unit is search('(?m)^Restart=on-failure$')
+      - unit is search('(?m)^\[Install\]\nWantedBy=multi-user.target$')
+      - unit is search('(?m)^User=sdraft$') and unit is search('(?m)^Group=sdraft$')
+      - unit is not search('(?m)^SupplementaryGroups=')
+      - unit is search('(?m)^ProtectSystem=strict$') and unit is search('(?m)^ProtectHome=yes$')
+      - unit is search('(?m)^PrivateTmp=yes$') and unit is search('(?m)^NoNewPrivileges=yes$')
+      - unit | regex_findall('(?m)^ReadWritePaths=') == ['ReadWritePaths=']
+      - unit is search('(?m)^ReadWritePaths=/srv/ai-library/35-forge$')
+      - unit is search('(?m)^ReadOnlyPaths=/run$')
+      - unit is search('(?m)^RequiresMountsFor=/srv/ai-library$')
+      - unit is search('(?m)^AssertPathExists=/srv/ai-library/.ai-library-sentinel$')
+      - unit is search('(?m)^AssertPathIsDirectory=/srv/ai-library/35-forge$')
+      - unit is search('(?m)^CapabilityBoundingSet=$') and unit is search('(?m)^AmbientCapabilities=$')
+      - unit is search('(?m)^RestrictAddressFamilies=AF_INET AF_UNIX$')
+      - unit is search('(?m)^ProtectProc=invisible$')
+      - unit is not search('(?m)^ProcSubset=')
+      # The only environment: the library cap.
+      - unit | regex_findall('(?m)^(?:Environment|EnvironmentFile|PassEnvironment)=.*$') == ['Environment=AI_LIBRARY_CAP=500GB']
+      # IP filter: exactly one of each line; deny any; the broker and the stub only.
+      - unit | regex_findall('(?m)^IPAddressDeny=.*$') == ['IPAddressDeny=any']
+      - unit | regex_findall('(?m)^IPAddressAllow=') | length == 1
+      - unit is search('(?m)^IPAddressAllow=' ~ (sd_expect_allow | regex_escape) ~ '$')
+      - "'localhost' not in allow and 'any' not in allow and '127.0.0.1/32' not in allow"
+      - allow | select('search', '/0$') | list == []
+    fail_msg: "{{ unit }}"
+    quiet: true

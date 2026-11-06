@@ -1,0 +1,208 @@
+---
+# Role inputs and the library mount, checked before anything is written (§12.18.3).
+- name: Preflight | role docker's and role searxng's defaults (the container range, SearXNG's subnet)
+  ansible.builtin.include_vars:
+    file: "{{ item.file }}"
+    name: "{{ item.name }}"
+  loop:
+    - {file: "{{ finance_digest_docker_defaults_file }}", name: finance_digest_docker_role_defaults}
+    - {file: "{{ finance_digest_searxng_defaults_file }}", name: finance_digest_searxng_role_defaults}
+  loop_control:
+    label: "{{ item.name }}"
+
+# Plain absolute paths: they go into the unit (ReadWritePaths, RequiresMountsFor, Assert*) unescaped.
+- name: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+  ansible.builtin.assert:
+    that:
+      - item is string
+      - item is match('^/[A-Za-z0-9._/-]+$')
+      - item is not search('//|/$|(^|/)[.]{1,2}(/|$)')
+      - item is not match(finance_digest_library_forbidden_re)
+    fail_msg: >-
+      {{ item }} must be an absolute path of plain characters (A-Z a-z 0-9 . _ - /), with no //, trailing /, . or ..
+      components, and not under {{ finance_digest_library_forbidden_re }} (the unit's ProtectHome/ProtectSystem/PrivateTmp
+      hide or lock those).
+    quiet: true
+  loop:
+    - "{{ finance_digest_library_root }}"
+    - "{{ finance_digest_library_mount }}"
+
+- name: Preflight | the library root is the mount or below it
+  ansible.builtin.assert:
+    that:
+      - >-
+        finance_digest_library_root == finance_digest_library_mount
+        or finance_digest_library_root.startswith(finance_digest_library_mount ~ '/')
+    fail_msg: >-
+      finance_digest_library_root ({{ finance_digest_library_root }}) must be finance_digest_library_mount
+      ({{ finance_digest_library_mount }}) or inside it.
+    quiet: true
+
+- name: Preflight | Money Hub's URL is an http(s) origin on a tailnet IP literal
+  vars:
+    finance_digest_mh_issues: "{{ finance_digest_moneyhub_url | finance_digest_url_problems(finance_digest_moneyhub_range) }}"
+  ansible.builtin.assert:
+    that: finance_digest_mh_issues | length == 0
+    fail_msg: >-
+      moneyhub_url ('{{ finance_digest_moneyhub_url }}', required in host_vars) must be http://<IPv4 inside
+      {{ finance_digest_moneyhub_range }}>:<port>, the bare origin: {{ finance_digest_mh_issues | join('; ') }}
+    quiet: true
+
+- name: Preflight | the broker's address, the settings and the schedule
+  ansible.builtin.assert:
+    that:
+      - tailnet_ip | default('') is match('^[0-9]{1,3}([.][0-9]{1,3}){3}$')
+      - ('http://' ~ tailnet_ip | default('') ~ '/') | finance_digest_url_problems(finance_digest_moneyhub_range) | length == 0
+      - finance_digest_broker_port | string is match('^[0-9]{1,5}$')
+      - finance_digest_broker_port | int > 0 and finance_digest_broker_port | int < 65536
+      - finance_digest_ai_summary is boolean
+      - finance_digest_timezone is string and finance_digest_timezone is match('^[A-Za-z]+(/[A-Za-z0-9_+-]+){1,2}$')
+      - finance_digest_randomized_delay | string is match('^[0-9]{1,5}$')
+      - finance_digest_dns_stub is match('^127([.][0-9]{1,3}){3}$')
+      - finance_digest_config_extra is mapping
+      - finance_digest_config_extra.keys() | intersect(['moneyhub_url', 'broker_url', 'library_root', 'notion_file']) | length == 0
+      - finance_digest_user is match('^[a-z_][a-z0-9_-]*$') and finance_digest_user not in ['root', 'docker', finance_digest_library_group]
+    fail_msg: >-
+      Check the finance_digest inputs: tailnet_ip (ai-box's tailnet IPv4, inside {{ finance_digest_moneyhub_range }}),
+      the broker port (ai_stack_broker_port), finance_digest_ai_summary (a boolean), finance_digest_timezone (an
+      Area/City name), finance_digest_randomized_delay (seconds), the resolver stub (a 127.x address), and
+      finance_digest_config_extra (a mapping that can't override the URLs, the library root or the Notion file).
+    quiet: true
+
+# Notion: both values or neither. The token is a secret: nothing about it is printed (no_log), and the message
+# names only which values are set.
+- name: Preflight | Notion is configured completely or not at all
+  ansible.builtin.assert:
+    that:
+      - (finance_digest_notion_token | default('') | string | length > 0) == (finance_digest_notion_page_id | default('') | string | length > 0)
+      - finance_digest_notion_token | default('') | string is match('^[!-~]{0,256}$')
+      - finance_digest_notion_page_id | default('') | string is match('^([0-9a-fA-F]{32}|[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})?$')
+    fail_msg: >-
+      Set both finance_digest_notion_token (vault) and finance_digest_notion_page_id (32 hex digits, dashes allowed),
+      or neither. The token must be 1-256 printable ASCII characters without spaces (D's rule).
+    quiet: true
+  no_log: true
+
+- name: Preflight | the IP filter
+  vars:
+    finance_digest_ip_issues: >-
+      {{ finance_digest_ip_allow | finance_digest_ip_problems(finance_digest_ip_deny, finance_digest_ip_deny_required,
+         finance_digest_notion_on | bool) }}
+  ansible.builtin.assert:
+    that:
+      - finance_digest_broker_ranges | length > 0
+      - finance_digest_ip_issues | length == 0
+    fail_msg: >-
+      IP filter (Notion {{ 'on' if finance_digest_notion_on | bool else 'off' }}): allow {{ finance_digest_ip_allow }},
+      broker ranges {{ finance_digest_broker_ranges }}: {{ finance_digest_ip_issues | join('; ') }}
+    quiet: true
+
+# Reviewer H (H5-1): SearXNG forwards query strings to public search engines, so no broker range may reach its
+# subnet, whether the range is the computed default or an inventory override.
+- name: Preflight | no broker range reaches SearXNG's subnet
+  vars:
+    finance_digest_searxng_hits: "{{ finance_digest_broker_ranges | finance_digest_overlapping(finance_digest_searxng_subnet) }}"
+  ansible.builtin.assert:
+    that:
+      - finance_digest_searxng_subnet | length > 0
+      - finance_digest_searxng_hits | length == 0
+    fail_msg: >-
+      finance_digest_broker_ranges {{ finance_digest_searxng_hits }} overlap SearXNG's subnet
+      '{{ finance_digest_searxng_subnet }}' (searxng_subnet, or role searxng's default): the digest must never reach
+      SearXNG, which forwards queries to the internet. Narrow the ranges around it.
+    quiet: true
+
+- name: Preflight | the app sources exist on the controller (modules D and L)
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ finance_digest_launcher_src }}"
+    - "{{ finance_digest_pkg_src }}/__init__.py"
+    - "{{ finance_digest_pkg_src }}/config.py"
+    - "{{ finance_digest_library_src_dir }}/library/__init__.py"
+  register: finance_digest_src_stat
+  delegate_to: localhost
+  become: false
+
+- name: Preflight | require the app sources
+  ansible.builtin.assert:
+    that: finance_digest_src_stat.results | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      Missing on the controller:
+      {{ finance_digest_src_stat.results | rejectattr('stat.exists') | map(attribute='item') | join(', ') }}
+    quiet: true
+
+# The account the library mount maps to (roles ai_library_share and research_gate create it). This role only
+# joins its group, it never creates it.
+- name: Preflight | the library's group exists
+  ansible.builtin.getent:
+    database: group
+    key: "{{ finance_digest_library_group }}"
+    fail_key: false
+
+- name: Preflight | require the library's group
+  ansible.builtin.assert:
+    that: (ansible_facts.getent_group | default({})).get(finance_digest_library_group) is not none
+    fail_msg: >-
+      Group {{ finance_digest_library_group }} doesn't exist: converge the AI Library share first
+      (playbooks/ai-library.yml), which creates it with the mount.
+    quiet: true
+
+# §12.11 mount safety: the digest writes into the library, so it must really be mounted.
+- name: Preflight | stat the library root without following links
+  ansible.builtin.stat:
+    path: "{{ finance_digest_library_root }}"
+    follow: false
+    get_checksum: false
+  register: finance_digest_root_stat
+
+- name: Preflight | the library root is a real directory
+  ansible.builtin.assert:
+    that:
+      - finance_digest_root_stat.stat.exists
+      - finance_digest_root_stat.stat.isdir and not finance_digest_root_stat.stat.islnk
+    fail_msg: "{{ finance_digest_library_root }} is missing, or is a symlink or a file. Is the AI Library share mounted?"
+    quiet: true
+
+- name: Preflight | which mount holds the library root
+  ansible.builtin.command:
+    argv: [findmnt, --noheadings, --first-only, --output, TARGET, --target, "{{ finance_digest_library_root }}"]
+  register: finance_digest_findmnt
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# An unmounted share leaves an empty directory on the parent filesystem: findmnt then names that parent.
+- name: Preflight | the library root is on the declared mount (not the disk under an empty mount point)
+  ansible.builtin.assert:
+    that:
+      - finance_digest_findmnt.rc == 0
+      - finance_digest_findmnt.stdout | trim == finance_digest_library_mount
+      - finance_digest_library_mount != '/'
+    fail_msg: >-
+      {{ finance_digest_library_root }} is on mount '{{ finance_digest_findmnt.stdout | default('') | trim }}', not on
+      finance_digest_library_mount ({{ finance_digest_library_mount }}). Is the AI Library share mounted?
+    quiet: true
+
+- name: Preflight | stat the sentinel and the finance folder without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: false
+  loop:
+    - "{{ finance_digest_sentinel }}"
+    - "{{ finance_digest_finance_dir }}"
+  register: finance_digest_lib_stat
+
+- name: Preflight | the sentinel is a regular file and 50-finance a real folder (an initialized library)
+  vars:
+    sentinel: "{{ finance_digest_lib_stat.results[0].stat }}"
+    finance: "{{ finance_digest_lib_stat.results[1].stat }}"
+  ansible.builtin.assert:
+    that:
+      - sentinel.exists and sentinel.isreg and not sentinel.islnk
+      - finance.exists and finance.isdir and not finance.islnk
+    fail_msg: >-
+      {{ finance_digest_sentinel }} must be a regular file (§12.11) and {{ finance_digest_finance_dir }} a real folder
+      (ReadWritePaths needs it; python3 -m library --root ... init creates it). This isn't the mounted AI Library.
+    quiet: true

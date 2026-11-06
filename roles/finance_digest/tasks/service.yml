@@ -1,0 +1,25 @@
+---
+# The oneshot service is static (no [Install]): only the timer starts it. A converge never runs the real
+# digest; tasks/verify.yml runs a --dry-run under the same sandbox.
+- name: Service | finance-digest unit and timer
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ finance_digest_unit_dir }}/{{ item }}"
+    owner: "{{ finance_digest_root_owner }}"
+    group: "{{ finance_digest_root_owner }}"
+    mode: "0644"
+    follow: false
+  loop:
+    - "{{ finance_digest_service }}"
+    - "{{ finance_digest_timer }}"
+  notify: Reload systemd for finance-digest
+
+- name: Service | apply a pending reload
+  ansible.builtin.meta: flush_handlers
+
+- name: Service | the timer is enabled and running
+  ansible.builtin.systemd_service:
+    name: "{{ finance_digest_timer }}"
+    enabled: true
+    state: started
+  ignore_errors: "{{ ansible_check_mode }}"

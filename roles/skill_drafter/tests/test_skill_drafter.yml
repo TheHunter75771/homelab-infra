@@ -1,0 +1,675 @@
+---
+# Offline test for role skill_drafter (no root, no systemd changes, nothing applied to this machine). Run it
+# through tests/run.sh (it loads the role's filter plugins and puts the fake systemd-run and systemctl first on
+# PATH). It runs the role's own task files against a scratch dir:
+#   0. the defaults, and the sdraft account task's exact attributes (groups: rgate only, never docker);
+#   1. preflight.yml: passes enabled against a scratch library on the scratch dir's real mount, and disabled with
+#      no library at all; the IP allow/deny lists; refuses bad inputs (tailnet address, broker port, K2's
+#      config ranges via K2's loader, the cap, IP filter, broker ranges reaching SearXNG, library paths and
+#      mount, sentinel, 35-forge, sources, the library group);
+#   2. install.yml: K2's launcher and package plus forge and library, from scratch copies with junk planted, run
+#      twice with strays in between (pruned), a third time changing nothing; symlinked directories refused;
+#   3. config.yml: exactly K2's keys, 0640 in a 0750 dir, validated with K2's loader (which refuses bad
+#      configs); a symlinked config dir refused;
+#   4. the unit: rendered with the real paths, systemd-analyze verify clean, the sandbox list exactly, the IP
+#      filter (default and a narrowed broker range);
+#   5. verify.yml with the fakes: the real installed drafter runs `status` against the scratch library; a
+#      steady unit passes; a failed unit, a restarting unit and a status that exits 2 are refused.
+- name: Role skill_drafter deploys a sandboxed, broker-only skill drafter
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  vars:
+    ansible_managed: Ansible managed
+    test_tmp: ""
+    test_repo: "{{ playbook_dir }}/../../.."
+    # A synthetic tailnet address (inside 100.64.0.0/10; not a real host).
+    tailnet_ip: 100.64.0.2
+    sd_test_restarts: 0
+  # Stub handlers with the role's names: nothing touches systemd; restart requests are counted.
+  handlers:
+    - name: Reload systemd for skill-drafter
+      ansible.builtin.debug:
+        msg: reload requested
+    - name: Restart skill-drafter
+      ansible.builtin.set_fact:
+        sd_test_restarts: "{{ sd_test_restarts | int + 1 }}"
+  tasks:
+    - name: The test runs through tests/run.sh
+      ansible.builtin.assert:
+        that: test_tmp is abs
+        fail_msg: Run this through roles/skill_drafter/tests/run.sh.
+        quiet: true
+
+    - name: The role's defaults (before any test override)
+      ansible.builtin.assert:
+        that:
+          - skill_drafter_enabled is sameas true
+          - skill_drafter_user == 'sdraft' and skill_drafter_library_group == 'rgate'
+          - skill_drafter_app_dir == '/opt/skill-drafter'
+          - skill_drafter_launcher == '/opt/skill-drafter/skill-drafter'
+          - skill_drafter_config_file == '/etc/skill-drafter/config.json'
+          - skill_drafter_library_root == '/srv/ai-library'
+          - skill_drafter_forge_dir == '/srv/ai-library/35-forge'
+          - skill_drafter_sentinel == '/srv/ai-library/.ai-library-sentinel'
+          - skill_drafter_library_cap == '500GB'
+          - skill_drafter_broker_port | int == 11434
+          - skill_drafter_broker_url == 'http://100.64.0.2:11434'
+          - skill_drafter_ip_deny == ['any']
+          - >-
+            skill_drafter_config == {'library_root': '/srv/ai-library', 'broker_url': 'http://100.64.0.2:11434',
+            'model': 'assistant', 'poll_interval': 120, 'max_source_chars': 16000,
+            'num_ctx': 16384, 'timeout': 1200, 'max_attempts': 3}
+        fail_msg: "{{ skill_drafter_config | to_json }} {{ skill_drafter_ip_deny | to_json }} {{ skill_drafter_broker_url }}"
+        quiet: true
+
+    - name: The role's config defaults are K2's own (config.example.json, the Lead's K2 decisions)
+      vars:
+        example: "{{ lookup('ansible.builtin.file', test_repo ~ '/apps/skill-drafter/config.example.json') | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - example.keys() | sort == skill_drafter_config.keys() | sort
+          - (example | dict2items | rejectattr('key', 'in', ['library_root', 'broker_url']) | items2dict)
+            == (skill_drafter_config | dict2items | rejectattr('key', 'in', ['library_root', 'broker_url']) | items2dict)
+          - example.library_root == skill_drafter_config.library_root
+        fail_msg: "{{ example | to_json }} vs {{ skill_drafter_config | to_json }}"
+        quiet: true
+
+    # ---- 0. the account -----------------------------------------------------------------------------------
+    - name: Read the role's account tasks
+      ansible.builtin.set_fact:
+        sd_test_base: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../tasks/base.yml') | from_yaml }}"
+
+    - name: The sdraft user and group tasks set exactly the agreed attributes (§12.19.1)
+      vars:
+        my_user: "{{ (sd_test_base | select('contains', 'ansible.builtin.user') | first)['ansible.builtin.user'] }}"
+        my_group: "{{ (sd_test_base | select('contains', 'ansible.builtin.group') | first)['ansible.builtin.group'] }}"
+        groups_check: "{{ (sd_test_base | selectattr('name', 'search', 'exactly its own group') | first)['ansible.builtin.assert'] }}"
+      ansible.builtin.assert:
+        that:
+          - sd_test_base | select('contains', 'ansible.builtin.user') | list | length == 1
+          - my_user.keys() | sort == ['append', 'create_home', 'group', 'groups', 'home', 'name', 'shell', 'system']
+          # The raw task text names the role's variables (built here so the test itself holds no template).
+          - my_user.name == ('{' ~ '{ skill_drafter_user }' ~ '}') and my_user.group == my_user.name
+          - my_user.groups == [('{' ~ '{ skill_drafter_library_group }' ~ '}')]
+          - my_user.append is sameas false
+          - my_user.system is sameas true and my_user.create_home is sameas false
+          - my_user.shell == '/usr/sbin/nologin' and my_user.home == '/nonexistent'
+          - my_group.keys() | sort == ['name', 'system'] and my_group.system is sameas true
+          - my_group.name == my_user.name
+          # The read-only check: `id -Gn sdraft` split must equal exactly [sdraft, rgate].
+          - groups_check.that == 'skill_drafter_user_groups.stdout.split() == [skill_drafter_user, skill_drafter_library_group]'
+        fail_msg: "{{ my_user }} / {{ my_group }}"
+        quiet: true
+
+    # ---- scratch sources and library ------------------------------------------------------------------------
+    - name: Scratch sources with never-deployed junk, and a scratch library with one forge request
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          s="{{ test_tmp }}/src"
+          mkdir -p "$s/skill-drafter" "$s/skill-library"
+          cp -r "{{ test_repo }}/apps/skill-drafter/." "$s/skill-drafter/"
+          # A nested package, so the install covers a subdirectory (guards, pruning). K2 has none today.
+          mkdir -p "$s/skill-drafter/skill_drafter/sub"
+          echo '"""nested"""' > "$s/skill-drafter/skill_drafter/sub/__init__.py"
+          cp -r "{{ test_repo }}/apps/skill-library/library" "{{ test_repo }}/apps/skill-library/forge" "$s/skill-library/"
+          for p in "$s/skill-drafter/skill_drafter" "$s/skill-library/library" "$s/skill-library/forge"; do
+            mkdir -p "$p/__pycache__" "$p/tests" "$p/test" "$p/node_modules/x"
+            echo junk > "$p/__pycache__/m.cpython-314.pyc"
+            echo junk > "$p/tests/test_m.py"
+            echo junk > "$p/test/test_n.py"
+            echo junk > "$p/node_modules/x/y.py"
+            echo junk > "$p/README.md"
+            echo junk > "$p/notes.txt"
+          done
+          l="{{ test_tmp }}/lib"
+          lib="$l/ai-library"
+          mkdir -p "$lib"
+          cd "{{ test_repo }}/apps/skill-library"
+          python3 -B -m library --root "$lib" init >/dev/null
+          echo sentinel > "$lib/.ai-library-sentinel"
+          printf 'learn APA 7 reference formatting\n' > "$l/request.txt"
+          python3 -B -m forge --root "$lib" new "learn APA 7" --request-file "$l/request.txt" >/dev/null
+          ln -s "$lib" "$l/link"
+          mkdir -p "$l/nosentinel/35-forge"
+          mkdir -p "$l/linksentinel/35-forge" && ln -s "$lib/.ai-library-sentinel" "$l/linksentinel/.ai-library-sentinel"
+          mkdir -p "$l/noforge" && echo sentinel > "$l/noforge/.ai-library-sentinel"
+          mkdir -p "$l/linkforge" && echo sentinel > "$l/linkforge/.ai-library-sentinel" && ln -s "$lib/35-forge" "$l/linkforge/35-forge"
+          # An uninitialized "library" (sentinel and 35-forge only): K2's status refuses it (exit 2).
+          mkdir -p "$l/bare/35-forge" && echo sentinel > "$l/bare/.ai-library-sentinel"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Where the scratch library lives (its real mount; tests/run.sh checks it isn't /)
+      ansible.builtin.command:
+        argv: [findmnt, --noheadings, --first-only, --output, TARGET, --target, "{{ test_tmp }}"]
+      register: sd_test_mount
+      changed_when: false
+
+    - name: Point the role at the scratch dir, and the good values every refusal case starts from
+      ansible.builtin.set_fact:
+        skill_drafter_src_dir: "{{ test_tmp }}/src/skill-drafter"
+        skill_drafter_pkg_src: "{{ test_tmp }}/src/skill-drafter/skill_drafter"
+        skill_drafter_launcher_src: "{{ test_tmp }}/src/skill-drafter/skill-drafter"
+        skill_drafter_library_src_dir: "{{ test_tmp }}/src/skill-library"
+        skill_drafter_docker_defaults_file: "{{ test_repo }}/roles/docker/defaults/main.yml"
+        skill_drafter_searxng_defaults_file: "{{ test_repo }}/roles/searxng/defaults/main.yml"
+        skill_drafter_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        skill_drafter_root_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        skill_drafter_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
+        skill_drafter_library_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
+        skill_drafter_app_dir: "{{ test_tmp }}/opt/skill-drafter"
+        skill_drafter_config_dir: "{{ test_tmp }}/etc/skill-drafter"
+        skill_drafter_config_file: "{{ test_tmp }}/etc/skill-drafter/config.json"
+        skill_drafter_library_root: "{{ test_tmp }}/lib/ai-library"
+        skill_drafter_library_mount: "{{ sd_test_mount.stdout | trim }}"
+        # The scratch dir is under /tmp: allow /tmp here (the default forbids it).
+        skill_drafter_library_forbidden_re: '^/(home|root|run|proc|sys|dev|etc|usr|boot|bin|sbin|lib|lib64|opt|var)(/|$)'
+
+    # ---- 1. preflight -----------------------------------------------------------------------------------
+    - name: Preflight passes enabled, against the scratch library on its real mount
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+
+    - name: Preflight passes disabled with no library at all (the mount checks are enabled-only)
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+      vars:
+        skill_drafter_enabled: false
+        skill_drafter_library_root: "{{ test_tmp }}/lib/missing"
+
+    - name: The IP filter (deny any; ai-box's tailnet address, role docker's range minus SearXNG's subnet, the stub)
+      vars:
+        containers: >-
+          {{ ['172.16.0.0/13', '172.24.0.0/14', '172.28.0.0/16', '172.29.0.0/20', '172.29.16.16/28', '172.29.16.32/27',
+              '172.29.16.64/26', '172.29.16.128/25', '172.29.17.0/24', '172.29.18.0/23', '172.29.20.0/22',
+              '172.29.24.0/21', '172.29.32.0/19', '172.29.64.0/18', '172.29.128.0/17', '172.30.0.0/15'] }}
+      ansible.builtin.assert:
+        that:
+          - skill_drafter_docker_container_range == '172.16.0.0/12'
+          - skill_drafter_searxng_subnet == '172.29.16.0/28'
+          - skill_drafter_broker_ranges | sort == containers | sort
+          - skill_drafter_ip_allow == ['100.64.0.2/32'] + skill_drafter_broker_ranges + ['127.0.0.53/32']
+          - skill_drafter_ip_deny == ['any']
+        fail_msg: "{{ skill_drafter_broker_ranges }} / {{ skill_drafter_ip_allow }} / {{ skill_drafter_ip_deny }}"
+        quiet: true
+
+    - name: The broker ranges cover the container range except SearXNG's subnet, and nothing else
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -I
+          - -c
+          - |
+            import ipaddress, json, sys
+            ranges = [ipaddress.ip_network(r) for r in json.loads(sys.argv[1])]
+            whole, cut = ipaddress.ip_network("172.16.0.0/12"), ipaddress.ip_network("172.29.16.0/28")
+            assert all(r.subnet_of(whole) and not r.overlaps(cut) for r in ranges)
+            assert sum(r.num_addresses for r in ranges) == whole.num_addresses - cut.num_addresses
+            for i in range(len(ranges)):
+                for j in range(i + 1, len(ranges)):
+                    assert not ranges[i].overlaps(ranges[j])
+            assert not any(ipaddress.ip_address("172.29.16.2") in r for r in ranges)
+            assert any(ipaddress.ip_address("172.20.0.5") in r for r in ranges)
+          - "{{ skill_drafter_broker_ranges | to_json }}"
+      changed_when: false
+
+    - name: The good values the refusal cases start from
+      ansible.builtin.set_fact:
+        test_good:
+          tailnet_ip: "{{ tailnet_ip }}"
+          broker_ranges: "{{ skill_drafter_broker_ranges }}"
+          library_root: "{{ skill_drafter_library_root }}"
+          library_mount: "{{ skill_drafter_library_mount }}"
+          forbidden_re: "{{ skill_drafter_library_forbidden_re }}"
+          library_group: "{{ skill_drafter_library_group }}"
+          pkg_src: "{{ skill_drafter_pkg_src }}"
+          launcher_src: "{{ skill_drafter_launcher_src }}"
+          library_src_dir: "{{ skill_drafter_library_src_dir }}"
+
+    - name: Preflight refuses bad inputs
+      ansible.builtin.include_tasks: expect_preflight_refusal.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - name: the switch as a string
+          vars: {skill_drafter_enabled: "yes"}
+          task: Preflight | the switch is a boolean
+        # The broker and the unit's settings.
+        - name: no tailnet address
+          vars: {tailnet_ip: ""}
+          task: Preflight | the broker's address and the unit's settings
+        - name: a tailnet address that isn't on the tailnet
+          vars: {tailnet_ip: 192.0.2.20}
+          task: Preflight | the broker's address and the unit's settings
+        - name: a tailnet address in a short form
+          vars: {tailnet_ip: 100.64.2}
+          task: Preflight | the broker's address and the unit's settings
+        - name: a tailnet hostname
+          vars: {tailnet_ip: ai-box.example}
+          task: Preflight | the broker's address and the unit's settings
+        - name: broker port 0
+          vars: {skill_drafter_broker_port: 0}
+          task: Preflight | the broker's address and the unit's settings
+        - name: broker port 65536
+          vars: {skill_drafter_broker_port: 65536}
+          task: Preflight | the broker's address and the unit's settings
+        - name: a resolver stub off loopback
+          vars: {skill_drafter_dns_stub: 192.0.2.53}
+          task: Preflight | the broker's address and the unit's settings
+        - name: a library cap with a space (it goes into the unit)
+          vars: {skill_drafter_library_cap: "500 GB"}
+          task: Preflight | the broker's address and the unit's settings
+        - name: a MemoryMax without a unit
+          vars: {skill_drafter_memory_max: "256"}
+          task: Preflight | the broker's address and the unit's settings
+        - name: a RestartSec with a space
+          vars: {skill_drafter_restart_sec: "30 s"}
+          task: Preflight | the broker's address and the unit's settings
+        # K2's loader and the library's size parser (on the controller, before anything is written).
+        - name: a model name K2 refuses
+          vars: {skill_drafter_model: "assistant; rm"}
+          task: Preflight | K2's loader accepts the config, and the cap parses
+        - name: a poll interval below K2's range
+          vars: {skill_drafter_poll_interval: 1}
+          task: Preflight | K2's loader accepts the config, and the cap parses
+        - name: a context window above K2's range
+          vars: {skill_drafter_num_ctx: 1000000}
+          task: Preflight | K2's loader accepts the config, and the cap parses
+        - name: zero attempts
+          vars: {skill_drafter_max_attempts: 0}
+          task: Preflight | K2's loader accepts the config, and the cap parses
+        - name: a library cap the library can't parse
+          vars: {skill_drafter_library_cap: "500XB"}
+          task: Preflight | K2's loader accepts the config, and the cap parses
+        # The IP filter.
+        - name: a broker range that allows everything
+          vars: {skill_drafter_broker_ranges: ["0.0.0.0/0"]}
+          task: Preflight | the IP filter (deny any; allow the broker and the resolver stub only)
+        - name: a broker range that isn't a network
+          vars: {skill_drafter_broker_ranges: ["172.20.0.1/16"]}
+          task: Preflight | the IP filter (deny any; allow the broker and the resolver stub only)
+        - name: no broker range
+          vars: {skill_drafter_broker_ranges: []}
+          task: Preflight | the IP filter (deny any; allow the broker and the resolver stub only)
+        - name: a deny list that isn't any
+          vars: {skill_drafter_ip_deny: ["10.0.0.0/8"]}
+          task: Preflight | the IP filter (deny any; allow the broker and the resolver stub only)
+        - name: a broker range override that covers SearXNG's subnet (H5-1)
+          vars: {skill_drafter_broker_ranges: ["172.16.0.0/12"]}
+          task: Preflight | no broker range reaches SearXNG's subnet
+        - name: a broker range override that is a host inside SearXNG's subnet (H5-1)
+          vars: {skill_drafter_broker_ranges: ["172.20.3.0/24", "172.29.16.2/32"]}
+          task: Preflight | no broker range reaches SearXNG's subnet
+        - name: a broker range override that overlaps a moved SearXNG subnet (H5-1)
+          vars: {skill_drafter_broker_ranges: ["172.20.3.0/24"], searxng_subnet: 172.20.3.16/28}
+          task: Preflight | no broker range reaches SearXNG's subnet
+        - name: SearXNG's subnet resolving to empty (the overlap check can't pass on nothing; H5-1)
+          vars: {searxng_subnet: ""}
+          task: Preflight | no broker range reaches SearXNG's subnet
+        # The library paths and mount (enabled).
+        - name: a library under /home (ProtectHome hides it)
+          vars: {skill_drafter_library_root: /home/someone/library, skill_drafter_library_mount: /home/someone/library}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a library path with a space
+          vars: {skill_drafter_library_root: /mnt/ai library, skill_drafter_library_mount: /mnt/ai library}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a library path with a dot-dot
+          vars: {skill_drafter_library_root: /mnt/x/../etc, skill_drafter_library_mount: /mnt/x/../etc}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a library root that is only a name prefix of its mount
+          vars: {skill_drafter_library_root: /srv/ai-library2, skill_drafter_library_mount: /srv/ai-library, skill_drafter_library_forbidden_re: '^$'}
+          task: Preflight | the library root is the mount or below it
+        - name: the library root missing
+          vars: {skill_drafter_library_root: "{{ test_tmp }}/lib/missing"}
+          task: Preflight | the library root is a real directory
+        - name: the library root a symlink
+          vars: {skill_drafter_library_root: "{{ test_tmp }}/lib/link"}
+          task: Preflight | the library root is a real directory
+        - name: the library root an empty mount point (not on the declared mount)
+          vars: {skill_drafter_library_mount: "{{ test_tmp }}/lib/ai-library"}
+          task: Preflight | the library root is on the declared mount (not the disk under an empty mount point)
+        - name: no sentinel
+          vars: {skill_drafter_library_root: "{{ test_tmp }}/lib/nosentinel"}
+          task: Preflight | the sentinel is a regular file and 35-forge a real folder (an initialized library)
+        - name: the sentinel a symlink
+          vars: {skill_drafter_library_root: "{{ test_tmp }}/lib/linksentinel"}
+          task: Preflight | the sentinel is a regular file and 35-forge a real folder (an initialized library)
+        - name: no 35-forge
+          vars: {skill_drafter_library_root: "{{ test_tmp }}/lib/noforge"}
+          task: Preflight | the sentinel is a regular file and 35-forge a real folder (an initialized library)
+        - name: 35-forge a symlink
+          vars: {skill_drafter_library_root: "{{ test_tmp }}/lib/linkforge"}
+          task: Preflight | the sentinel is a regular file and 35-forge a real folder (an initialized library)
+        # Sources and the library's group.
+        - name: K2's package missing on the controller
+          vars: {skill_drafter_pkg_src: "{{ test_tmp }}/src/nothing-here"}
+          task: Preflight | require the app sources
+        - name: the launcher missing on the controller
+          vars: {skill_drafter_launcher_src: "{{ test_tmp }}/src/nope"}
+          task: Preflight | require the app sources
+        - name: the forge and library sources missing on the controller
+          vars: {skill_drafter_library_src_dir: "{{ test_tmp }}/src/nope"}
+          task: Preflight | require the app sources
+        - name: the library's group missing
+          vars: {skill_drafter_library_group: sd-test-no-such-group}
+          task: Preflight | require the library's group
+
+    # ---- 2. install -------------------------------------------------------------------------------------
+    - name: Install, first run
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Plant strays in the install (top level, inside packages, a cache dir)
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          a="{{ skill_drafter_app_dir }}"
+          echo stray > "$a/stray.py"
+          echo stray > "$a/config.example.json"
+          mkdir -p "$a/tests" && echo stray > "$a/tests/test_drafter.py"
+          mkdir -p "$a/old_pkg" "$a/library/__pycache__" "$a/skill_drafter/sub/tests"
+          echo stray > "$a/old_pkg/__init__.py"
+          echo stray > "$a/library/__pycache__/core.cpython-314.pyc"
+          echo stray > "$a/library/removed.py"
+          echo stray > "$a/forge/removed.py"
+          echo stray > "$a/skill_drafter/sub/tests/t.py"
+          echo stray > "$a/.hidden"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Install, second run (prunes the strays)
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Flush the restart requests of runs 1 and 2
+      ansible.builtin.meta: flush_handlers
+
+    - name: Count the restart requests so far
+      ansible.builtin.set_fact:
+        sd_test_restarts_install: "{{ sd_test_restarts }}"
+
+    - name: List the installed tree with inodes and mtimes
+      ansible.builtin.command:
+        argv: [find, "{{ skill_drafter_app_dir }}", -mindepth, "1", -printf, "%P|%i|%T@\n"]
+      register: sd_test_tree_before
+      changed_when: false
+
+    - name: Install, third run (no change)
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Flush any restart request of run 3
+      ansible.builtin.meta: flush_handlers
+
+    - name: List the installed tree
+      ansible.builtin.command:
+        argv: [find, "{{ skill_drafter_app_dir }}", -mindepth, "1", -printf, "%P|%m|%y\n"]
+      register: sd_test_tree
+      changed_when: false
+
+    - name: List the installed tree with inodes and mtimes again
+      ansible.builtin.command:
+        argv: [find, "{{ skill_drafter_app_dir }}", -mindepth, "1", -printf, "%P|%i|%T@\n"]
+      register: sd_test_tree_after
+      changed_when: false
+
+    - name: List what should be there (every *.py of the three sources, minus the never-deployed dirs)
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          s="{{ test_tmp }}/src"
+          echo "skill-drafter|755|f"
+          { cd "$s/skill-drafter" && find skill_drafter | sed 's|^|D:|'; cd "$s/skill-library" && find forge library | sed 's|^|L:|'; } \
+            | grep -Ev '(^|/)(__pycache__|tests?|node_modules)(/|$)' \
+            | while read -r e; do
+                case "$e" in D:*) base="$s/skill-drafter" ;; *) base="$s/skill-library" ;; esac
+                p="${e#?:}"
+                if [ -d "$base/$p" ]; then echo "$p|755|d"
+                else case "$p" in *.py) echo "$p|644|f" ;; esac; fi
+              done
+        executable: /bin/bash
+      register: sd_test_want
+      changed_when: false
+
+    - name: The install holds exactly the three packages' code plus the launcher, and run 3 touched nothing
+      ansible.builtin.assert:
+        that:
+          - sd_test_tree.stdout_lines | sort == sd_test_want.stdout_lines | sort
+          - sd_test_tree.stdout_lines | select('search', '(^|/)(__pycache__|tests?|node_modules|old_pkg)(/|$)|stray|removed|hidden') | list == []
+          - "'skill_drafter/sub/__init__.py|644|f' in sd_test_tree.stdout_lines"
+          - "'skill_drafter/config.py|644|f' in sd_test_tree.stdout_lines and 'library/core.py|644|f' in sd_test_tree.stdout_lines"
+          - "'forge/core.py|644|f' in sd_test_tree.stdout_lines"
+          - "'skill-drafter|755|f' in sd_test_tree.stdout_lines"
+          - sd_test_tree.stdout_lines | select('search', '^(config[.]example[.]json|README[.]md|tests)') | list == []
+          - sd_test_tree_before.stdout_lines | sort == sd_test_tree_after.stdout_lines | sort
+          # Runs 1 and 2 changed code (one restart per flush: handlers run once), run 3 asked for none.
+          - sd_test_restarts_install | int == 1
+          - sd_test_restarts | int == 1
+        fail_msg: >-
+          extra {{ sd_test_tree.stdout_lines | difference(sd_test_want.stdout_lines) }},
+          missing {{ sd_test_want.stdout_lines | difference(sd_test_tree.stdout_lines) }},
+          run 3 changed {{ sd_test_tree_after.stdout_lines | difference(sd_test_tree_before.stdout_lines) }}
+        quiet: true
+
+    - name: The installed launcher imports the installed copies only (forge found beside it, nothing from the repo)
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -I
+          - -B
+          - -c
+          - |
+            import os, runpy, sys
+            app = sys.argv[1]
+            sys.argv = [os.path.join(app, "skill-drafter"), "--help"]
+            try:
+                runpy.run_path(sys.argv[0], run_name="__main__")
+            except SystemExit:
+                pass
+            for name in ("skill_drafter", "forge", "library"):
+                path = os.path.realpath(sys.modules[name].__file__)
+                assert path.startswith(os.path.realpath(app) + os.sep), (name, path)
+            assert os.path.join(os.path.dirname(app), "skill-library") not in sys.path
+          - "{{ skill_drafter_app_dir }}"
+      changed_when: false
+
+    - name: Install refuses symlinked directories
+      ansible.builtin.include_tasks: expect_guard_refusal.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - {name: app-dir, root: "{{ test_tmp }}/g1/skill-drafter", link: "{{ test_tmp }}/g1/skill-drafter"}
+        - {name: drafter-package, root: "{{ test_tmp }}/g2/skill-drafter", link: "{{ test_tmp }}/g2/skill-drafter/skill_drafter"}
+        - {name: forge-package, root: "{{ test_tmp }}/g3/skill-drafter", link: "{{ test_tmp }}/g3/skill-drafter/forge"}
+        - {name: library-package, root: "{{ test_tmp }}/g4/skill-drafter", link: "{{ test_tmp }}/g4/skill-drafter/library"}
+        - {name: drafter-subpackage, root: "{{ test_tmp }}/g5/skill-drafter", link: "{{ test_tmp }}/g5/skill-drafter/skill_drafter/sub"}
+
+    # ---- 3. config ---------------------------------------------------------------------------------------
+    - name: Config, first run
+      ansible.builtin.include_tasks: ../tasks/config.yml
+
+    - name: Flush the config's restart request
+      ansible.builtin.meta: flush_handlers
+
+    - name: Count the restart requests after the first config
+      ansible.builtin.set_fact:
+        sd_test_restarts_config: "{{ sd_test_restarts }}"
+
+    - name: Stat config.json and the config dir
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: ["{{ skill_drafter_config_file }}", "{{ skill_drafter_config_dir }}"]
+      register: sd_test_cfg
+
+    - name: Config, second run (no change)
+      ansible.builtin.include_tasks: ../tasks/config.yml
+
+    - name: Flush any restart request of the second config
+      ansible.builtin.meta: flush_handlers
+
+    - name: Stat config.json again
+      ansible.builtin.stat:
+        path: "{{ skill_drafter_config_file }}"
+      register: sd_test_cfg2
+
+    - name: Config.json holds exactly K2's keys with the role's values, 0640 in 0750, unchanged by run 2
+      vars:
+        c: "{{ lookup('ansible.builtin.file', skill_drafter_config_file) | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - c.keys() | sort == ['broker_url', 'library_root', 'max_attempts', 'max_source_chars', 'model', 'num_ctx', 'poll_interval', 'timeout']
+          - c.library_root == skill_drafter_library_root
+          - c.broker_url == 'http://100.64.0.2:11434'
+          - c.model == 'assistant'
+          - c.poll_interval == 120 and c.max_source_chars == 16000 and c.num_ctx == 16384
+          - c.timeout == 1200 and c.max_attempts == 3
+          # JSON numbers, not strings or booleans (K2's loader refuses those).
+          - c.values() | select('integer') | list | length == 5
+          - sd_test_cfg.results[0].stat.mode == '0640'
+          - sd_test_cfg.results[1].stat.mode == '0750'
+          - sd_test_cfg.results[0].stat.inode == sd_test_cfg2.stat.inode
+          - sd_test_cfg.results[0].stat.mtime == sd_test_cfg2.stat.mtime
+          # A new config restarts the drafter; an unchanged one doesn't.
+          - sd_test_restarts_config | int == 2
+          - sd_test_restarts | int == 2
+        fail_msg: "{{ c | to_json }} restarts {{ sd_test_restarts_config }}/{{ sd_test_restarts }}"
+        quiet: true
+
+    - name: Bad configs for the deploy-time validator (K2's loader)
+      ansible.builtin.copy:
+        content: >-
+          {{ (lookup('ansible.builtin.file', skill_drafter_config_file) | from_json | dict2items
+              | rejectattr('key', 'equalto', item.drop | default('')) | items2dict)
+             | combine(item.patch | default({})) | to_json }}
+        dest: "{{ test_tmp }}/bad-{{ item.name }}.json"
+        mode: "0644"
+      loop:
+        - {name: extra-key, patch: {proxy: "http://192.0.2.1:3128"}}
+        - {name: no-broker, drop: broker_url}
+        - {name: no-root, drop: library_root}
+        - {name: broker-path, patch: {broker_url: "http://100.64.0.2:11434/api"}}
+        - {name: broker-userinfo, patch: {broker_url: "http://u:p@100.64.0.2:11434"}}
+        - {name: file-broker, patch: {broker_url: "file:///etc/passwd"}}
+        - {name: relative-root, patch: {library_root: "srv/ai-library"}}
+        - {name: timeout-string, patch: {timeout: "1200"}}
+        - {name: attempts-bool, patch: {max_attempts: true}}
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: The validator refuses each bad config
+      ansible.builtin.command:
+        cmd: "{{ skill_drafter_config_validate | replace('%s', test_tmp ~ '/bad-' ~ item ~ '.json') }}"
+      loop: [extra-key, no-broker, no-root, broker-path, broker-userinfo, file-broker, relative-root, timeout-string, attempts-bool]
+      register: sd_test_bad
+      changed_when: false
+      failed_when: sd_test_bad.rc == 0
+
+    - name: The validator accepts the rendered config
+      ansible.builtin.command:
+        cmd: "{{ skill_drafter_config_validate | replace('%s', skill_drafter_config_file) }}"
+      changed_when: false
+
+    - name: Config refuses a symlinked config directory
+      block:
+        - name: Config guard | a victim dir and the link
+          ansible.builtin.shell:
+            cmd: |
+              set -eu
+              v="{{ test_tmp }}/victim-config"
+              mkdir -p "$v" "{{ test_tmp }}/c1"
+              echo keep > "$v/sentinel"
+              chmod 0644 "$v/sentinel"
+              chmod 0700 "$v"
+              ln -sfn "$v" "{{ test_tmp }}/c1/skill-drafter"
+            executable: /bin/bash
+          changed_when: true
+
+        - name: Config guard | config.yml through the link
+          ansible.builtin.include_tasks: ../tasks/config.yml
+          vars:
+            skill_drafter_config_dir: "{{ test_tmp }}/c1/skill-drafter"
+            skill_drafter_config_file: "{{ test_tmp }}/c1/skill-drafter/config.json"
+
+        - name: Config guard | not reached
+          ansible.builtin.set_fact:
+            sd_test_config_guard_by: ""
+      rescue:
+        - name: Config guard | note which task refused
+          ansible.builtin.set_fact:
+            sd_test_config_guard_by: "{{ ansible_failed_task.name }}"
+
+    - name: Config guard | read the victim
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          v="{{ test_tmp }}/victim-config"
+          find "$v" -printf '%P|%m|%y\n' | LC_ALL=C sort
+          cat "$v/sentinel"
+        executable: /bin/bash
+      register: sd_test_config_victim
+      changed_when: false
+
+    - name: Config guard | refused by the guard, victim untouched
+      ansible.builtin.assert:
+        that:
+          - sd_test_config_guard_by == 'Guard | each pruned directory is absent or a real directory (never a symlink)'
+          - sd_test_config_victim.stdout_lines == ['sentinel|644|f', '|700|d', 'keep']
+        fail_msg: "refused by '{{ sd_test_config_guard_by }}'; victim: {{ sd_test_config_victim.stdout_lines }}"
+        quiet: true
+
+    # ---- 4. the unit -------------------------------------------------------------------------------------
+    - name: Unit, default broker ranges
+      ansible.builtin.include_tasks: units_case.yml
+      vars:
+        skill_drafter_app_dir: /opt/skill-drafter
+        skill_drafter_config_dir: /etc/skill-drafter
+        skill_drafter_config_file: /etc/skill-drafter/config.json
+        skill_drafter_library_root: /srv/ai-library
+        sd_case: default
+        sd_expect_allow: "{{ (['100.64.0.2/32'] + test_good.broker_ranges + ['127.0.0.53/32']) | join(' ') }}"
+
+    - name: Unit, a narrowed broker range and another tailnet address (the allow line follows the inventory)
+      ansible.builtin.include_tasks: units_case.yml
+      vars:
+        skill_drafter_app_dir: /opt/skill-drafter
+        skill_drafter_config_dir: /etc/skill-drafter
+        skill_drafter_config_file: /etc/skill-drafter/config.json
+        skill_drafter_library_root: /srv/ai-library
+        tailnet_ip: 100.64.0.9
+        skill_drafter_broker_ranges: [172.20.3.0/24]
+        sd_case: narrowed
+        sd_expect_allow: 100.64.0.9/32 172.20.3.0/24 127.0.0.53/32
+
+    # ---- 5. verify ---------------------------------------------------------------------------------------
+    - name: A config pointing at a folder that isn't an initialized library (K2's status exits 2)
+      ansible.builtin.copy:
+        content: >-
+          {{ lookup('ansible.builtin.file', skill_drafter_config_file) | from_json
+             | combine({'library_root': test_tmp ~ '/lib/bare'}) | to_json }}
+        dest: "{{ test_tmp }}/bare-config.json"
+        mode: "0644"
+
+    - name: Verify cases
+      ansible.builtin.include_tasks: verify_case.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - name: a steady unit and a good status
+          unit: steady
+          config: "{{ skill_drafter_config_file }}"
+          refused_by: ""
+        - name: a unit that never becomes active
+          unit: failed
+          config: "{{ skill_drafter_config_file }}"
+          refused_by: Verify | skill-drafter is active
+        - name: a unit that restarts during the check
+          unit: flapping
+          config: "{{ skill_drafter_config_file }}"
+          refused_by: Verify | still active, no restart in between
+        - name: a status that exits 2 (not an initialized library)
+          unit: steady
+          config: "{{ test_tmp }}/bare-config.json"
+          refused_by: Verify | the status check exited 0

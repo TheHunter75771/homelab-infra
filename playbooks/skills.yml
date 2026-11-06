@@ -1,0 +1,9 @@
+---
+# Skill drafter on ai-box (docs/CONTRACTS.md §12.19). Run as the operator account `claude`, after ai-library.yml,
+# research.yml (creates rgate) and the AI stack. Drafts skills only from Noah-approved sources; never decides.
+- name: Skill drafter on ai-box
+  hosts: ai_servers
+  become: true
+  gather_facts: false
+  roles:
+    - role: skill_drafter

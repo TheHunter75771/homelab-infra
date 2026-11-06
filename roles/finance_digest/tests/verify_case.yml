@@ -1,0 +1,52 @@
+---
+# One verify.yml run against the fake systemd-run (tests/bin) and the fake digest (test_finance_digest.yml):
+# fd_mode good must pass; fail (exit 2) and nofresh (no freshness line) must be refused by the assert.
+- name: Verify case | the fake digest's mode is {{ fd_mode }}
+  ansible.builtin.copy:
+    content: "{{ fd_mode }}\n"
+    dest: "{{ test_tmp }}/fake/mode"
+    mode: "0644"
+
+- name: Verify case | verify.yml in mode {{ fd_mode }}
+  block:
+    - name: Verify case | run verify.yml ({{ fd_mode }})
+      ansible.builtin.include_tasks: ../tasks/verify.yml
+      vars:
+        finance_digest_launcher: "{{ test_tmp }}/fake/finance-digest"
+
+    - name: Verify case | passed ({{ fd_mode }})
+      ansible.builtin.set_fact:
+        fd_test_verify_by: ""
+  rescue:
+    - name: Verify case | note which task refused ({{ fd_mode }})
+      ansible.builtin.set_fact:
+        fd_test_verify_by: "{{ ansible_failed_task.name }}"
+
+- name: Verify case | the outcome matches the mode ({{ fd_mode }})
+  ansible.builtin.assert:
+    that: >-
+      fd_test_verify_by == ('' if fd_mode == 'good' else 'Verify | the dry run exited 0 and printed the freshness line')
+    fail_msg: "mode {{ fd_mode }}: refused by '{{ fd_test_verify_by }}'"
+    quiet: true
+
+- name: Verify case | the arguments the fake systemd-run got ({{ fd_mode }})
+  ansible.builtin.command:
+    argv: [cat, "{{ lookup('ansible.builtin.env', 'FD_TEST_RUN_ARGS') }}"]
+  register: fd_test_run_args
+  changed_when: false
+
+- name: Verify case | a waited, piped, collected oneshot with every sandbox property, then the dry run ({{ fd_mode }})
+  vars:
+    got: "{{ fd_test_run_args.stdout_lines }}"
+    sep: "{{ 7 + finance_digest_sandbox | length }}"
+  ansible.builtin.assert:
+    that:
+      - got[:6] == ['--wait', '--pipe', '--collect', '--quiet', '--service-type=oneshot', '--description=finance-digest dry run (Ansible verify)']
+      - got[6] == '--property=TimeoutStartSec=10min'
+      - got[7:sep | int] == finance_digest_sandbox | map('regex_replace', '^', '--property=') | list
+      - got[sep | int] == '--'
+      - "'--property=IPAddressDeny=any' in got"
+      - got[sep | int + 1:] == ['/usr/bin/python3', '-I', '-B', test_tmp ~ '/fake/finance-digest', '--config',
+                                finance_digest_config_file, 'run', '--dry-run']
+    fail_msg: "{{ got }}"
+    quiet: true

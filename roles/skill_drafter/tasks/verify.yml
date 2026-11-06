@@ -1,0 +1,61 @@
+---
+# Enabled and not in check mode (tasks/main.yml).
+# 1. The unit's RequiresMountsFor/Assert* and K2's start-up (config load) have passed when it is active and stays
+#    so through a start-up and its first pass without restarting.
+# 2. `skill-drafter status` as sdraft in a transient service with exactly the unit's sandbox and IP filter
+#    (skill_drafter_sandbox) exits 0: K2 opens the mounted library (Library.open checks the layout) and reads
+#    35-forge/ through the real ProtectSystem/ReadWritePaths/PrivateTmp. status never calls the broker; the
+#    broker's reachability through the filter is the Integrator's check (README, "Host checks").
+- name: Verify | skill-drafter is active
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=ActiveState, --property=NRestarts, "{{ skill_drafter_service }}"]
+  register: skill_drafter_state1
+  changed_when: false
+  until: skill_drafter_state1.stdout is search('(?m)^ActiveState=active$')
+  retries: "{{ skill_drafter_verify_retries }}"
+  delay: "{{ skill_drafter_verify_delay }}"
+
+- name: Verify | let it run through a start-up and its first pass
+  ansible.builtin.wait_for:
+    timeout: "{{ skill_drafter_verify_delay | int * 5 }}"
+
+- name: Verify | read the state again
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=ActiveState, --property=NRestarts, "{{ skill_drafter_service }}"]
+  register: skill_drafter_state2
+  changed_when: false
+
+- name: Verify | still active, no restart in between
+  vars:
+    s1: "{{ dict(skill_drafter_state1.stdout_lines | map('split', '=', 1)) }}"
+    s2: "{{ dict(skill_drafter_state2.stdout_lines | map('split', '=', 1)) }}"
+  ansible.builtin.assert:
+    that:
+      - s2.ActiveState == 'active'
+      - s2.NRestarts == s1.NRestarts
+    fail_msg: >-
+      skill-drafter is {{ s2.ActiveState }} after {{ s2.NRestarts }} restarts (was {{ s1.NRestarts }}):
+      journalctl -u skill-drafter -n 50.
+    quiet: true
+
+- name: Verify | skill-drafter status as sdraft in the unit's sandbox
+  ansible.builtin.command:
+    argv: >-
+      {{ ['systemd-run', '--wait', '--pipe', '--collect', '--quiet', '--service-type=oneshot',
+          '--description=skill-drafter status (Ansible verify)',
+          '--property=TimeoutStartSec=' ~ skill_drafter_verify_timeout]
+         + (skill_drafter_sandbox | map('regex_replace', '^', '--property=') | list)
+         + ['--'] + skill_drafter_argv + ['status'] }}
+  register: skill_drafter_status_run
+  changed_when: false
+  failed_when: false
+
+- name: Verify | the status check exited 0
+  ansible.builtin.assert:
+    that: skill_drafter_status_run.rc == 0
+    fail_msg: >-
+      skill-drafter status (as {{ skill_drafter_user }}, in the unit's sandbox) exited {{ skill_drafter_status_run.rc }};
+      stderr tail: {{ skill_drafter_status_run.stderr_lines[-5:] | default([]) }}
+    success_msg: >-
+      skill-drafter status exited 0 ({{ skill_drafter_status_run.stdout_lines | length }} request line(s)).
+    quiet: true

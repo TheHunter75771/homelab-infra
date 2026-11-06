@@ -96,9 +96,10 @@ class ForgeTestCase(unittest.TestCase):
 
     def ingest(self, rid=RID, url=URL, forge_key=None, topic="pdf"):
         src = self.base / "fetched.md"
-        meta = {"title": "Docs page", "source": url, "forge": forge_key or rid}
+        meta = {"title": "Docs page", "source": url}
         src.write_text(fm.render(meta, "\nfetched text\n"), encoding="utf-8")
-        res = self.lib.file(src, topic, source=url)
+        # Only Library.file(extra=...) may set forge: (L-2); the research gate files this way.
+        res = self.lib.file(src, topic, source=url, extra={"forge": forge_key or rid})
         return res.item
 
     def to_review(self, rid=RID):
@@ -308,6 +309,26 @@ class SourcesTest(ForgeTestCase):
             with self.assertRaisesRegex(LibraryError, msg):
                 self.forge.record_ingest(RID, url, path)
         self.assertEqual(self.text(f"35-forge/{RID}/state.md"), before)
+
+    def test_hand_filed_forge_header_does_not_count_as_an_ingest(self):
+        # L-2 end to end: a Markdown file that claims `forge: <rid>` and the ticked `source:` in
+        # its own header, filed without `extra`, must not pass as the research gate's fetch.
+        self.to_sources()
+        src = self.base / "forged.md"
+        src.write_text(fm.render({"title": "Docs page", "source": URL, "forge": RID,
+                                  "fetched": "2026-10-26T09:00:00Z"}, "\nnot fetched by the gate\n"),
+                       encoding="utf-8")
+        before = self.text(f"35-forge/{RID}/state.md")
+        for kwargs in ({}, {"source": URL}):
+            item = self.lib.file(src, "pdf", **kwargs).item
+            filed = self.meta(item)
+            self.assertEqual(filed["source"], URL)  # the claimed URL survives ...
+            self.assertNotIn("forge", filed)        # ... but the provenance keys do not
+            self.assertNotIn("fetched", filed)
+            with self.assertRaisesRegex(LibraryError, "forge:"):
+                self.forge.record_ingest(RID, URL, item)
+        self.assertEqual(self.text(f"35-forge/{RID}/state.md"), before)
+        self.assertEqual(self.meta(f"35-forge/{RID}/state.md")["ingested"], [])
 
 
 class CanonicalUrlTest(unittest.TestCase):

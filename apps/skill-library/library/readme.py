@@ -28,9 +28,12 @@ People and the AI follow the same ones.
 | `20-notes/<topic>/` | Notes written about sources or a subject. |
 | `30-skills/<skill>/` | Skills an AI can follow: a `SKILL.md`, supporting files, any code in `code/`. |
 | `35-forge/` | The Skill Forge's open requests (managed by `python3 -m forge`). |
-| `40-writing/samples/` | Finished writing by Noah, kept as examples of his voice. |
+| `40-writing/samples/` | Finished writing by Noah, kept as examples of his voice (`.docx` files keep his own names). |
 | `40-writing/drafts/` | Work in progress. |
+| `40-writing/samples-text/` | Written by the voice-profile tool: one cleaned `<slug>.md` per kept sample, plus `MANIFEST.md`. |
+| `40-writing/` (files) | `style-stats.md`, `voice-profile.md`, `voice-profile.next.md` (voice-profile tool) and Noah's `include.txt`. |
 | `50-finance/log/` | Finance logs. No passwords or full account numbers. |
+| `50-finance/payday-runs/` | Saved payday runs, written by the Payday tool: `YYYY-MM-DD_1st.md` or `YYYY-MM-DD_15th.md`. |
 | `90-archive/` | Retired items, under the same folder path they came from. `inbox-log.md` records every inbox move. |
 | `95-shelf/` | Skills Noah denied, kept with their draft and sources so they can be revived. |
 
@@ -46,7 +49,8 @@ Topics and skills are folders inside those sections, one level deep (no folders 
   Windows sees `Notes.md` and `notes.md` as one file).
 - Exceptions: this `README.md`, `INDEX.md`, `90-archive/inbox-log.md`, every Markdown page at the
   top of a skill folder (`SKILL.md`, `rules.md`, `examples.md`, ...; these still need the header),
-  anything in a skill's `code/` folder, and the forge's own folders `35-forge/` and `95-shelf/`.
+  anything in a skill's `code/` folder, the forge's own folders `35-forge/` and `95-shelf/`, and the
+  `40-writing/` and `50-finance/payday-runs/` files named in the table above.
 
 ## The header (front-matter)
 

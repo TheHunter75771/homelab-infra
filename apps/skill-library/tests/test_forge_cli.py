@@ -70,8 +70,8 @@ class ForgeCliTest(unittest.TestCase):
         self.assertEqual(self.run_cli("authorize", "url", RID, URL)[0], 0)
         self.assertEqual(self.run_cli("authorize", "url", RID, URL + "/")[0], 1)
 
-        fetched = self.write("fetched.md", fm.render({"title": "Page", "source": URL, "forge": RID}, "\nbody\n"))
-        item = Library.open(self.root, clock=lambda: NOW).file(fetched, "pdf", source=URL).item
+        fetched = self.write("fetched.md", fm.render({"title": "Page", "source": URL}, "\nbody\n"))
+        item = Library.open(self.root, clock=lambda: NOW).file(fetched, "pdf", source=URL, extra={"forge": RID}).item
         code, out, err = self.run_cli("record-ingest", RID, URL, item)
         self.assertEqual(code, 0, err)
         code, _, err = self.run_cli("record-ingest", RID, "https://example.com/other", item)
