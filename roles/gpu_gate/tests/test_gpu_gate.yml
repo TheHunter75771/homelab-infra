@@ -173,7 +173,13 @@
             argv: [systemd-analyze, verify, "{{ gpu_gate_src_dir }}/gpu-gate.service"]
           register: gate_test_verify
           changed_when: false
-          failed_when: gate_test_verify.rc != 0 or gate_test_verify.stderr | length > 0
+          # Any stderr line fails, except systemd's warnings about the machine's own unit files (ubuntu-latest's newer systemd:
+          # "<host unit dir>/x.service:26: Support for option CPUAccounting= has been removed") that name no unit verified here.
+          failed_when: >-
+            gate_test_verify.rc != 0
+            or gate_test_verify.stderr_lines | reject('match', '(/usr/lib|/lib|/etc|/run)/systemd/[^:]+:[0-9]+: ') | list | length > 0
+            or gate_test_verify.stderr_lines | select('search', gate_test_verify.cmd[2:] | map('basename') | map('regex_escape') | join('|'))
+            | list | length > 0
       always:
         - name: Remove the scratch directory
           ansible.builtin.file:

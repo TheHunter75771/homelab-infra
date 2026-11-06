@@ -678,8 +678,14 @@
       ansible.builtin.assert:
         that:
           - escaped.rc != 0 or escaped.stdout == share.mount_unit
-          - ai_stack_test_analyze.rc == 127 or ai_stack_test_analyze.rc is undefined
-            or (ai_stack_test_analyze.rc == 0 and ai_stack_test_analyze.stderr == '')
+          # Any stderr line fails, except systemd's warnings about the machine's own unit files (ubuntu-latest's newer systemd:
+          # "<host unit dir>/x.service:26: Support for option CPUAccounting= has been removed") that name no unit verified here.
+          - >-
+            ai_stack_test_analyze.rc == 127 or ai_stack_test_analyze.rc is undefined
+            or (ai_stack_test_analyze.rc == 0
+            and ai_stack_test_analyze.stderr_lines | reject('match', '(/usr/lib|/lib|/etc|/run)/systemd/[^:]+:[0-9]+: ') | list | length == 0
+            and ai_stack_test_analyze.stderr_lines | select('search', ai_stack_test_analyze.cmd[2:] | map('basename') | map('regex_escape')
+            | join('|')) | list | length == 0)
           - ('What=' ~ share.what) in mount_lines
           - ('Where=' ~ share.view) in mount_lines
           - "'Type=cifs' in mount_lines"

@@ -20,7 +20,13 @@
     argv: [systemd-analyze, verify, "{{ test_tmp }}/units-{{ fa_case }}/forge-api.socket", "{{ test_tmp }}/units-{{ fa_case }}/forge-api.service"]
   register: fa_test_verify
   changed_when: false
-  failed_when: fa_test_verify.rc != 0 or fa_test_verify.stderr | length > 0
+  # Any stderr line fails, except systemd's warnings about the machine's own unit files (ubuntu-latest's newer systemd:
+  # "<host unit dir>/x.service:26: Support for option CPUAccounting= has been removed") that name no unit verified here.
+  failed_when: >-
+    fa_test_verify.rc != 0
+    or fa_test_verify.stderr_lines | reject('match', '(/usr/lib|/lib|/etc|/run)/systemd/[^:]+:[0-9]+: ') | list | length > 0
+    or fa_test_verify.stderr_lines | select('search', fa_test_verify.cmd[2:] | map('basename') | map('regex_escape') | join('|'))
+    | list | length > 0
 
 # Reviewer M (M-1, role voice_profile): the expected unit is spelled out here, every line in order, NOT derived
 # from the role's vars, so deleting, adding, reordering or widening any line of either unit fails this test. Only

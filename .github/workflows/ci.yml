@@ -230,7 +230,7 @@ jobs:
           mkdir -p .venv/bin
           ln -sfn "$(command -v python3)" .venv/bin/python
           ln -sfn "$(command -v ansible-playbook)" .venv/bin/ansible-playbook
-          .venv/bin/python -c 'import yaml, cryptography'   # what the tests run with it need
+          .venv/bin/python -I -c 'import yaml, cryptography'   # as the tests run it (-I), with what they need
           .venv/bin/ansible-playbook --version
       - name: Unprivileged user namespaces for the offline role tests
         # mission_control's and ai_control's guard checks (unshare --map-auto --map-root-user --net) and ai_backup's
@@ -245,6 +245,8 @@ jobs:
             sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$me"
           fi
           unshare --map-auto --map-root-user --net true
+          # ...and inside it, an unprivileged uid 1000 (guard_netns.py drops to it with setpriv).
+          unshare --map-auto --map-root-user setpriv --reuid=1000 --regid=1000 --clear-groups true
           unshare -rm true
       - name: mission_control role (offline)
         run: TMPDIR=/dev/shm ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass roles/mission_control/tests/run.sh
@@ -253,7 +255,7 @@ jobs:
       - name: ai_backup role (offline)
         # /tmp stands in for the backup drive, so it must be a tmpfs mountpoint; the runner's /tmp is a directory on /.
         run: |
-          if ! findmnt -n --mountpoint /tmp >/dev/null; then
+          if [ "$(findmnt -n -o FSTYPE --mountpoint /tmp 2>/dev/null)" != tmpfs ]; then
             sudo mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /tmp
             printf 'dummy\n' > /tmp/vault-pass   # the mount hid the one made above; later steps use it too
           fi
