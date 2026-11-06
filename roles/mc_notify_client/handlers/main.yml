@@ -1,0 +1,7 @@
+---
+# System scope: the system manager; user scope: the connecting user's manager (its bus via XDG_RUNTIME_DIR).
+- name: Reload systemd for mc-notify
+  ansible.builtin.systemd_service:
+    scope: "{{ 'system' if mc_notify_client_system | bool else 'user' }}"
+    daemon_reload: true
+  environment: "{{ mc_notify_client_systemd_env }}"

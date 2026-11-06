@@ -1,0 +1,48 @@
+# Ansible managed
+# Failure notice through Mission Control (B2-CONTRACT.md §5, role mc_notify_client). Never enabled by itself: a unit
+# opts in with
+#   OnFailure=notify-failure@%n.service
+# (a drop-in is enough), and each failure of it starts notify-failure@<that unit>.service once, which runs
+# `mc-notify --unit=<that unit>`: title "<unit> failed", body "journalctl -u <unit>", tag unit-<unit> (the "=" keeps
+# a name like -.mount from reading as an option). It has no OnFailure= of its own, so a failed push never loops; its
+# own journal (SyslogIdentifier=mc-notify) says why. Never name it from a catch-all drop-in (service.d/): that would
+# give notify-failure@ itself an OnFailure= and loop.
+[Unit]
+Description=Push "%i failed" to the phone through Mission Control
+Documentation=file:///usr/local/bin/mc-notify
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment="MC_NOTIFY_CONFIG=/etc/mc-notify/config.json"
+ExecStart=/usr/local/bin/mc-notify --unit=%i
+TimeoutStartSec=60
+SyslogIdentifier=mc-notify
+# Root without capabilities: it reads only its own root 0600 config and token and opens one HTTPS connection.
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
