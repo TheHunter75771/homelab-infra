@@ -1,0 +1,41 @@
+---
+# The destination and each folder between it and the drive mount (/mnt/backup/ai-box, .../openwebui). /mnt/backup
+# itself belongs to the desktop user, who could plant a folder there first. So an existing folder must be a real
+# directory (never a symlink), owned by root and not group/other-writable, or the play refuses (Reviewer X-7);
+# a missing one is created root 0700 (they hold chats, uploads and WEBUI_SECRET_KEY). The pull script repeats
+# the check on every run.
+- name: Dest | guard the destination folders (no symlinks)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    ai_backup_guard_dirs: "{{ ai_backup_pull_dest_chain }}"
+
+- name: Dest | look at the owner and mode of existing folders
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: false
+  loop: "{{ ai_backup_pull_dest_chain }}"
+  register: ai_backup_dest_stat
+
+- name: Dest | existing folders are owned by root and not group/other-writable
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or item.stat.pw_name == ai_backup_owner
+      - not item.stat.exists or not (item.stat.wgrp or item.stat.woth)
+    fail_msg: >-
+      {{ item.item }} is owned by {{ item.stat.pw_name | default('?') }} with mode {{ item.stat.mode | default('?') }}.
+      It must be {{ ai_backup_owner }}'s and not group/other-writable: someone else may have created it. Check what
+      is in it, then fix it by hand.
+    quiet: true
+  loop: "{{ ai_backup_dest_stat.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Dest | folders (root 0700)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ ai_backup_owner }}"
+    group: "{{ ai_backup_owner }}"
+    mode: "0700"
+  loop: "{{ ai_backup_pull_dest_chain }}"

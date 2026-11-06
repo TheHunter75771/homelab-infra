@@ -1,0 +1,13 @@
+---
+- name: Units | pull service and timer, restore-check service
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ ai_backup_unit_dir }}/{{ item }}"
+    owner: "{{ ai_backup_owner }}"
+    group: "{{ ai_backup_owner }}"
+    mode: "0644"
+  loop:
+    - "{{ ai_backup_pull_service }}"
+    - "{{ ai_backup_pull_timer }}"
+    - "{{ ai_backup_restore_service }}"
+  notify: Reload systemd for ai-backup

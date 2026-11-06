@@ -1,0 +1,87 @@
+---
+# The five units, rendered by the role's own task files into test_tmp/units: systemd-analyze verify must be clean,
+# and each [Service] section is exactly the role's sandbox list plus its fixed keys (nothing more, nothing less).
+- name: Units | systemd-analyze verify
+  ansible.builtin.command:
+    argv: >-
+      {{ ['systemd-analyze', 'verify']
+         + ([ai_backup_stage_service, ai_backup_stage_timer, ai_backup_pull_service, ai_backup_pull_timer,
+             ai_backup_restore_service] | map('regex_replace', '^', ai_backup_unit_dir ~ '/') | list) }}
+  register: test_verify
+  changed_when: false
+  failed_when: test_verify.rc != 0 or test_verify.stderr | length > 0
+
+- name: Units | the [Service] sections are exactly the sandbox plus the fixed keys
+  vars:
+    unit: "{{ lookup('ansible.builtin.file', ai_backup_unit_dir ~ '/' ~ item.name) }}"
+    service: "{{ unit | regex_search('(?ms)^\\[Service\\]$(.*)', '\\1') | first }}"
+  ansible.builtin.assert:
+    that:
+      - (service.splitlines() | reject('match', '^(#|$)') | list | sort)
+        == ((item.sandbox + ['Type=oneshot', 'ExecStart=' ~ (item.argv | join(' ')),
+             'TimeoutStartSec=' ~ item.timeout, 'SyslogIdentifier=' ~ (item.name | regex_replace('\\.service$', ''))]
+            + item.extra | default([])) | sort)
+      - unit is not search('(?m)^\[Install\]')
+      - unit is not search('(?m)^(User|Environment|EnvironmentFile|PassEnvironment)=')
+      - unit is search('(?m)^ProtectSystem=strict$') and unit is search('(?m)^NoNewPrivileges=yes$')
+      - unit | regex_findall('(?m)^ReadWritePaths=.*$') == ['ReadWritePaths=' ~ item.rw]
+      - unit is search('(?m)^RequiresMountsFor=')
+    fail_msg: "{{ item.name }}: {{ service }}"
+    quiet: true
+  loop:
+    - {name: "{{ ai_backup_stage_service }}", sandbox: "{{ ai_backup_stage_sandbox }}", argv: "{{ ai_backup_stage_argv }}",
+       timeout: 1h, rw: "{{ ai_backup_stage_dir }}"}
+    - {name: "{{ ai_backup_pull_service }}", sandbox: "{{ ai_backup_pull_sandbox }}", argv: "{{ ai_backup_pull_argv }}",
+       timeout: 2h, rw: "{{ ai_backup_pull_dest }}", extra: [Restart=on-failure, RestartSec=5min, RestartPreventExitStatus=2]}
+    - {name: "{{ ai_backup_restore_service }}", sandbox: "{{ ai_backup_restore_sandbox }}", argv: "{{ ai_backup_restore_argv }}",
+       timeout: 1h, rw: "{{ ai_backup_pull_dest }}"}
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Units | stage specifics (no network, read-only volume and .env, the contract's arguments)
+  vars:
+    unit: "{{ lookup('ansible.builtin.file', ai_backup_unit_dir ~ '/' ~ ai_backup_stage_service) }}"
+  ansible.builtin.assert:
+    that:
+      - unit is search('(?m)^PrivateNetwork=yes$') and unit is search('(?m)^IPAddressDeny=any$')
+      - unit is search('(?m)^RestrictAddressFamilies=AF_UNIX$')
+      - unit is search('(?m)^CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_CHOWN$')
+      - unit is search('(?m)^ReadOnlyPaths=' ~ ai_backup_volume_dir ~ ' ' ~ ai_backup_env_file ~ '$')
+      - unit is search('(?m)^ExecStart=/usr/bin/python3 -I -B ' ~ ai_backup_script ~ ' stage --volume ' ~ ai_backup_volume_dir
+        ~ ' --env ' ~ ai_backup_env_file ~ ' --out ' ~ ai_backup_stage_dir ~ ' --group ' ~ ai_backup_group ~ ' --keep 3 ')
+    quiet: true
+
+- name: Units | pull and restore-check specifics
+  vars:
+    pull: "{{ lookup('ansible.builtin.file', ai_backup_unit_dir ~ '/' ~ ai_backup_pull_service) }}"
+    rc: "{{ lookup('ansible.builtin.file', ai_backup_unit_dir ~ '/' ~ ai_backup_restore_service) }}"
+  ansible.builtin.assert:
+    that:
+      - pull is search('(?m)^IPAddressDeny=any$') and pull is search('(?m)^IPAddressAllow=100\.64\.0\.10$')
+      - pull is search('(?m)^RestrictAddressFamilies=AF_INET AF_UNIX$')
+      - pull is search('(?m)^CapabilityBoundingSet=$')
+      - pull is not search('(?m)^PrivateNetwork=')
+      - pull is search(' pull --source ' ~ ai_backup_account ~ '@100\.64\.0\.10:[ ]')
+      - pull is search(' --dest /tmp/' ~ test_name ~ '/openwebui --keep 14 --max-age-hours 48 --max-remote 5 --max-new 5'
+        ~ ' --max-size 8G --min-free-mb 20480 --max-future-minutes 60 --mount /tmp --subdir '
+        ~ test_name ~ '/openwebui --fstype=tmpfs$', multiline=true)
+      # X-8: a failed boot catch-up is retried, a refusal (exit 2) never; bounded starts.
+      - pull is search('(?m)^StartLimitIntervalSec=2h$') and pull is search('(?m)^StartLimitBurst=4$')
+      - pull is search('(?m)^RestartPreventExitStatus=2$')
+      - pull is search('(?m)^LimitFSIZE=8G$')
+      - rc is not search('(?m)^Restart=')
+      - rc is search('(?m)^PrivateNetwork=yes$') and rc is search('(?m)^IPAddressDeny=any$')
+      - rc is search(' restore-check --dir /tmp/' ~ test_name ~ '/openwebui --mount /tmp --subdir ')
+    quiet: true
+
+- name: Units | timers at the contract's times, Persistent, each for its own service
+  vars:
+    stage_t: "{{ lookup('ansible.builtin.file', ai_backup_unit_dir ~ '/' ~ ai_backup_stage_timer) }}"
+    pull_t: "{{ lookup('ansible.builtin.file', ai_backup_unit_dir ~ '/' ~ ai_backup_pull_timer) }}"
+  ansible.builtin.assert:
+    that:
+      - stage_t is search('(?m)^OnCalendar=\*-\*-\* 03:45:00$') and stage_t is search('(?m)^Persistent=true$')
+      - stage_t is search('(?m)^Unit=ai-openwebui-backup\.service$') and stage_t is search('(?m)^WantedBy=timers\.target$')
+      - pull_t is search('(?m)^OnCalendar=\*-\*-\* 06:30:00$') and pull_t is search('(?m)^Persistent=true$')
+      - pull_t is search('(?m)^Unit=ai-openwebui-pull\.service$') and pull_t is search('(?m)^WantedBy=timers\.target$')
+    quiet: true

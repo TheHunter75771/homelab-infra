@@ -1,0 +1,59 @@
+---
+# The private half from ai-box (root 0600, no_log) and a known_hosts pinned to ai-box's host key at its tailnet
+# address (StrictHostKeyChecking=yes in the script: no trust-on-first-use).
+# Only this task (and its twin in preflight) looks at the key itself; the rest use the boolean.
+- name: Pull key | was a key handed over by the ai-box play
+  ansible.builtin.set_fact:
+    ai_backup_pull_key_given: "{{ ai_backup_pull_private_key | length > 0 }}"
+  no_log: true
+
+- name: Pull key | guard the key dir
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    ai_backup_guard_dirs:
+      - "{{ ai_backup_pull_key_dir }}"
+
+- name: Pull key | root-only key dir
+  ansible.builtin.file:
+    path: "{{ ai_backup_pull_key_dir }}"
+    state: directory
+    owner: "{{ ai_backup_owner }}"
+    group: "{{ ai_backup_owner }}"
+    mode: "0700"
+
+- name: Pull key | private half (root 0600)
+  ansible.builtin.copy:
+    dest: "{{ ai_backup_pull_key_file }}"
+    content: "{{ ai_backup_pull_private_key }}"
+    owner: "{{ ai_backup_owner }}"
+    group: "{{ ai_backup_owner }}"
+    mode: "0600"
+    follow: false
+  diff: false
+  no_log: true
+  when: ai_backup_pull_key_given | bool
+
+- name: Pull key | known_hosts pinned to ai-box's host key
+  ansible.builtin.copy:
+    dest: "{{ ai_backup_pull_known_hosts }}"
+    content: "{{ ai_backup_pull_host }} {{ ai_backup_pull_host_pubkey }}\n"
+    owner: "{{ ai_backup_owner }}"
+    group: "{{ ai_backup_owner }}"
+    mode: "0644"
+    follow: false
+  when: ai_backup_pull_host_pubkey | length > 0
+
+- name: Pull key | owner and mode of kept files (never the content)
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: file
+    follow: false
+    owner: "{{ ai_backup_owner }}"
+    group: "{{ ai_backup_owner }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ ai_backup_pull_key_file }}", mode: "0600", given: "{{ ai_backup_pull_key_given }}"}
+    - {path: "{{ ai_backup_pull_known_hosts }}", mode: "0644", given: "{{ ai_backup_pull_host_pubkey | length > 0 }}"}
+  loop_control:
+    label: "{{ item.path }}"
+  when: not item.given | bool and not ansible_check_mode
