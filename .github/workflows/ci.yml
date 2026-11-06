@@ -142,6 +142,12 @@ jobs:
           pip install "pywebpush==$PIN"
           AIOHTTP=$(python3 -c 'import yaml;v=yaml.safe_load(open("inventory/group_vars/all/versions.yml"));print(v["python_packages"]["aiohttp"])')
           pip install "aiohttp==$AIOHTTP"  # Mission Control server (§12.29)
+          # gpu-broker's runtime, for ai_stack render's `python -m gpu_broker --check`: every pin in its lock, exactly (its
+          # aiohttp must be the one above). No --require-hashes: the lock was generated for CPython 3.14 (the image's Python)
+          # and this job runs 3.13.
+          BROKER_AIOHTTP=$(sed -nE 's/^aiohttp==([^ ]+).*/\1/p' apps/gpu-broker/requirements.lock)
+          [ "$BROKER_AIOHTTP" = "$AIOHTTP" ] || { echo "gpu-broker's lock pins aiohttp $BROKER_AIOHTTP, versions.yml $AIOHTTP"; exit 1; }
+          pip install $(grep -oE '^[A-Za-z0-9_.-]+==[^ ]+' apps/gpu-broker/requirements.lock)
       - name: shellcheck
         run: shellcheck roles/*/files/*.sh roles/*/tests/*.sh terraform/cloudflare/*.sh terraform/cloudflare/tests/*.sh
       - name: backups
@@ -194,6 +200,15 @@ jobs:
           ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/ollama_rocm/tests/test_render.yml
       - name: gpu_gate deploy
         run: ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/gpu_gate/tests/test_gpu_gate.yml
+      - name: gpu-broker .venv shim for ai_stack render
+        # ai_stack's test_render.yml validates every broker config it renders with apps/gpu-broker/.venv/bin/python -m
+        # gpu_broker --check: a developer's venv, made from apps/gpu-broker/requirements.lock. The Tools step installed that
+        # lock's pins into the runner's Python, so a symlink to it stands in (git-ignored: .venv/).
+        working-directory: apps/gpu-broker
+        run: |
+          mkdir -p .venv/bin
+          ln -sfn "$(command -v python3)" .venv/bin/python
+          .venv/bin/python -B -m gpu_broker --config config.example.json --check   # imports everything the test's --check does
       - name: ai_stack render
         run: ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/ai_stack/tests/test_render.yml
       - name: operator_account render
