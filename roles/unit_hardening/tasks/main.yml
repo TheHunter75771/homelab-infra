@@ -1,0 +1,23 @@
+---
+# Role unit_hardening (docs/CONTRACTS.md §12.30, H15; Reviewer Q, Q2-1). README.md has the order and the reasons.
+# With nothing declared (the default) only the inputs are checked; nothing on the host is read or changed.
+- name: Inputs
+  ansible.builtin.include_tasks: inputs.yml
+
+- name: Harden the declared units
+  when: unit_hardening_units | length > 0 or unit_hardening_remove | length > 0
+  block:
+    - name: Preflight
+      ansible.builtin.include_tasks: preflight.yml
+
+    - name: Install the drop-ins
+      ansible.builtin.include_tasks: install.yml
+
+    - name: Reload systemd and restart what needs it
+      ansible.builtin.include_tasks: apply.yml
+
+    # Check mode: the reads and the preflight run (check_mode: false), the writes show their diff, nothing is
+    # reloaded or restarted, so the live verify is skipped.
+    - name: Verify
+      ansible.builtin.include_tasks: verify.yml
+      when: not ansible_check_mode

@@ -1,0 +1,127 @@
+---
+# Fixed by the contract (§12.30, H15). The tests override the paths with set_fact.
+
+# Every path the role touches is under this prefix ("" on a real host; a scratch dir in the tests).
+unit_hardening_root: ""
+unit_hardening_unit_dir: /etc/systemd/system
+unit_hardening_dropin_name: 50-no-tailscaled.conf
+# What the drop-in hides. "-": no error if missing (it isn't: see unit_hardening_tmpfiles below).
+unit_hardening_hidden_paths:
+  - -/run/tailscale
+  - -/var/run/tailscale
+# tailscaled's runtime dir and socket (the in-namespace paths the verify checks through /proc/<MainPID>/root).
+unit_hardening_tailscale_dir: /run/tailscale
+unit_hardening_socket: /run/tailscale/tailscaled.sock
+
+# Keep /run/tailscale in place for the life of the boot. Proven offline (unshare, 2026-10-29): when the host
+# removes a directory that is a mount point in a unit's namespace, the kernel detaches that mount, so after
+# `rm -rf /run/tailscale; mkdir /run/tailscale` the unit sees the new socket again. tailscaled.service has
+# RuntimeDirectory=tailscale with RuntimeDirectoryPreserve=no, so every tailscaled stop or restart (an upgrade)
+# would undo the hiding in every running unit. So:
+#   - tailscaled.service gets RuntimeDirectoryPreserve=yes (its own drop-in): systemd keeps the directory, and
+#     tailscaled only unlinks and recreates the socket inside it, which the hidden mount keeps covering;
+#   - tmpfiles.d creates /run/tailscale at boot (before any service), so a unit that starts before tailscaled
+#     (research-gate has no ordering on it) still hides it ("-" would skip a missing path).
+unit_hardening_tailscaled_unit: tailscaled.service
+unit_hardening_tailscaled_dropin_name: 50-unit-hardening-keep-rundir.conf
+unit_hardening_tmpfiles: /etc/tmpfiles.d/unit-hardening-tailscale.conf
+
+# Root units (Reviewer Q, Q6-1): a root process can open /proc/<pid>/root of any other root process whose
+# capabilities are a subset of its own (and of PID 1 with full capabilities), and that process still sees the
+# socket. So a root unit's drop-in also sets PrivatePIDs=yes: its own PID namespace, with a /proc that shows only
+# its processes. A unit is root when User= is empty, "root" or "0" (and DynamicUser is off).
+unit_hardening_root_users: ["", root, "0"]
+# Code that can't run in a private PID namespace (matched, ignoring case, against a root unit's directives and
+# every file the scan reads): systemd's own clients over /run/systemd/private (systemctl, systemd-run: the peer
+# check fails, ENODATA, when PID 1 has no pid in the namespace), tools that look up or signal host processes, and
+# /proc/<pid>/ paths. `systemctl` alone is accepted for units in unit_hardening_systemctl_via_bus.
+unit_hardening_pidns_re: >-
+  (?<![\w.-])(?:systemctl|systemd-run|pgrep|pkill|pidof|killall|nsenter)(?![\w-])|/proc/[0-9]+/|os\.kill\(|psutil
+# Root units' /run (Reviewer Q, Q8-1): a root process can still reach tailscaled without its socket, through other
+# root-trusting services under /run: D-Bus StartTransientUnit (polkit lets uid 0 start an unsandboxed unit),
+# docker/containerd/podman/libvirt sockets (a container with a host mount), systemd's varlink sockets. So a root
+# unit's /run is an empty read-only tmpfs with only its run_allow entries bound in read-only (the ai_control /
+# mission_control pattern). These may never be allowed (they hand root to whoever connects, or other units'
+# secrets): matched anywhere in an entry (ignore case). Reviewer Q, Q9-1 added snapd (root on snapd runs
+# unconfined hooks), /run/credentials (every unit's credentials) and udev's control socket.
+unit_hardening_run_deny_re: >-
+  tailscale|docker|containerd|podman|libvirt|crio|lxd|incus|snapd|/run/systemd/private|/run/systemd/io\.systemd|/run/systemd/userdb|^/run/user(/|\Z)|^/run/credentials(/|\Z)|^/run/udev/control(/|\Z)
+# Q9-1: a bind of a directory brings everything below it, so an entry may also not be one of these paths or any
+# directory above one (/run/systemd holds private and the varlink sockets; /run/udev holds control). Prefixes such
+# as /run/systemd/io.systemd. stand for every socket that starts with them.
+unit_hardening_run_deny_paths:
+  - /run/tailscale/tailscaled.sock
+  - /run/docker.sock
+  - /run/docker
+  - /run/containerd/containerd.sock
+  - /run/podman/podman.sock
+  - /run/libvirt/libvirt-sock
+  - /run/crio/crio.sock
+  - /run/snapd.socket
+  - /run/snapd-snap.socket
+  - /run/systemd/private
+  - /run/systemd/io.systemd.
+  - /run/systemd/userdb
+  - /run/user
+  - /run/credentials
+  - /run/udev/control
+# An allowlist entry: an absolute path under /run, plain segments (no "." or ".." segment, no "//"). \Z, not $:
+# "$" would also accept the entry with a trailing newline (Q9-1).
+unit_hardening_run_allow_re: '^/run(/(?![.]{1,2}(/|\Z))[A-Za-z0-9._@:+-]+)+\Z'
+# The system bus socket: a root unit that keeps it is only ADVISORY (StartTransientUnit stays possible).
+unit_hardening_bus_socket: /run/dbus/system_bus_socket
+# What systemctl as root needs over the bus: the socket, and /run/systemd/system ("booted with systemd").
+unit_hardening_bus_needs: [/run/dbus/system_bus_socket, /run/systemd/system]
+
+# Units whose restart may unload work (Q6-4): restart: true needs a URL in unit_hardening_busy_urls.
+unit_hardening_busy_required: [ollama.service]
+# The local passwd file the verify's same-uid sweep reads (under unit_hardening_root; the pwd module is the fallback).
+unit_hardening_passwd: /etc/passwd
+
+unit_hardening_owner: root
+unit_hardening_group: root
+unit_hardening_systemctl: systemctl
+unit_hardening_python: /usr/bin/python3
+unit_hardening_proc: /proc
+
+# The unit names the role accepts: a plain service (no template, no instance; the verify needs one MainPID).
+unit_hardening_unit_re: '^[A-Za-z0-9][A-Za-z0-9:_.-]*[.]service$'
+
+# "Uses tailscaled's local API": the socket or its directory, the local API's URL path, the Go client package,
+# the CLI by path, the CLI as a quoted argv[0] ("tailscale", 'tailscale', `tailscale`) or as `tailscale <cmd>`.
+# Matched (ignore case) against the unit's own directives and against every file the scan reads (files/scan_exec.py).
+# `After=tailscaled.service` and the word "tailscaled" don't match: ordering on tailscaled needs no socket.
+unit_hardening_uses_re: >-
+  tailscaled\.sock|/run/tailscale(?![\w-])|localapi|local-api|tailscale\.com/client|/s?bin/tailscale(?![\w-])|["'`]tailscale["'`\s]|(?<![\w./-])tailscale\s+(?:ip|status|serve|funnel|up|down|set|cert|whois|ping|nc|file|web|debug|netcheck|login|logout|switch|lock|drive|configure|exit-node|dns|bugreport|version|metrics|update|syspolicy)(?![\w-])
+
+# Directories the scan never walks (only the named file is read): shared bin/lib trees. Top-level directories
+# (/opt, /etc, /srv, ...) are never walked either (scan_exec.py).
+unit_hardening_scan_broad:
+  - /usr/bin
+  - /usr/sbin
+  - /usr/local/bin
+  - /usr/local/sbin
+  - /usr/lib
+  - /usr/lib64
+  - /usr/local/lib
+  - /usr/libexec
+  - /usr/share
+  - /var/lib
+  - /var/backups
+  - /etc/default
+  - /etc/systemd
+  - /etc/systemd/system
+unit_hardening_scan_max_files: 4000
+unit_hardening_scan_max_bytes: 268435456
+
+# Units the preflight refuses by name, before the scan (README, "Needs table"): they need the socket, or their own
+# role already hides /run.
+unit_hardening_excluded:
+  - unit: tailscaled.service
+    reason: it owns the socket (/run/tailscale/tailscaled.sock)
+  - unit: homelab-heartbeat.service
+    reason: role heartbeat runs `tailscale ping` (edge-vps)
+  - unit: ai-control.service
+    reason: role ai_control already hides /run (TemporaryFileSystem=/run:ro); its own guard covers it
+  - unit: mission-control.service
+    reason: role mission_control already hides /run (TemporaryFileSystem=/run:ro); its own guard covers it

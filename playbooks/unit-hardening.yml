@@ -1,0 +1,18 @@
+---
+# §12.30: hide tailscaled's local API (/run/tailscale) from sandboxed service units (role unit_hardening).
+# Run as the operator account `claude`, AFTER the playbooks that install those units (research, finance, skills,
+# voice, ai-backup, gaming-pc-ai, ai-control): the role's preflight refuses units that aren't installed yet.
+# Restarting ollama unloads models, so run it while the GPU is idle.
+- name: Unit hardening (ai-box)
+  hosts: ai_servers
+  become: true
+  gather_facts: false
+  roles:
+    - unit_hardening
+
+- name: Unit hardening (gaming PC)
+  hosts: workstations_root
+  become: true
+  gather_facts: false
+  roles:
+    - unit_hardening
