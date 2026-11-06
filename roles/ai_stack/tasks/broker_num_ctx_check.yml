@@ -1,0 +1,16 @@
+---
+# ai_stack_broker_gpu_num_ctx (apps/gpu-broker `gpu_num_ctx`): null, or an integer the broker accepts
+# (NUM_CTX_MIN-NUM_CTX_MAX in gpu_broker/config.py). A quoted "32768" or a boolean would reach the JSON as a
+# string or true, which the broker refuses only at the config's --check; this stops the play before anything
+# changes. Jinja's `integer` test is false for booleans. Its own file so tests/test_render.yml runs it.
+- name: Preflight | ai_stack_broker_gpu_num_ctx is null or an integer 2048-262144
+  ansible.builtin.assert:
+    that:
+      - >-
+        ai_stack_broker_gpu_num_ctx is none
+        or (ai_stack_broker_gpu_num_ctx is integer
+            and ai_stack_broker_gpu_num_ctx >= 2048 and ai_stack_broker_gpu_num_ctx <= 262144)
+    fail_msg: >-
+      ai_stack_broker_gpu_num_ctx {{ ai_stack_broker_gpu_num_ctx | to_json }} must be null or an integer from 2048 to
+      262144 (unquoted in YAML, so it reaches gpu-broker.json as a number).
+    quiet: true

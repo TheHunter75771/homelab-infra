@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+# Role ai_stack (docs/CONTRACTS.md §12.19): runs {{ ai_stack_skills_reconcile_unit }} 30 s after boot (or
+# after this timer is started) and then every {{ ai_stack_skills_reconcile_every }}, so the read-only skills mount follows the gaming
+# PC: mounted while it answers on {{ ai_stack_skills_reconcile_port }}, lazily unmounted while it doesn't.
+[Unit]
+Description=Reconcile the AI Library read-only share mounts
+
+[Timer]
+OnBootSec={{ ai_stack_skills_reconcile_first }}
+OnActiveSec={{ ai_stack_skills_reconcile_first }}
+OnUnitActiveSec={{ ai_stack_skills_reconcile_every }}
+AccuracySec=10s
+Unit={{ ai_stack_skills_reconcile_unit }}
+
+[Install]
+WantedBy=timers.target

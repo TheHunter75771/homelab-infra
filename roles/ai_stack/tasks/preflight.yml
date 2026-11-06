@@ -14,17 +14,37 @@
     that:
       - ai_cpu_model is undefined or (ai_cpu_model is string and ai_cpu_model is match(ai_stack_model_re))
       - ai_gpu_model is undefined or (ai_gpu_model is string and ai_gpu_model is match(ai_stack_model_re))
-    fail_msg: ai_cpu_model and ai_gpu_model must each be unset or a model name such as qwen3:4b (no spaces or quotes).
+      - ai_embed_model is undefined or (ai_embed_model is string and ai_embed_model is match(ai_stack_model_re))
+    fail_msg: >-
+      ai_cpu_model, ai_gpu_model and ai_embed_model must each be unset or a model name such as qwen3:4b
+      (no spaces or quotes).
     quiet: true
   vars:
     ai_stack_model_re: '^[A-Za-z0-9][A-Za-z0-9._:/-]*$'
 
-- name: Preflight | the broker alias name is a plain name
+- name: Preflight | the embedding model is on the gaming PC too
+  ansible.builtin.import_tasks: embed_pc.yml
+
+- name: Preflight | pinned Hugging Face models and the expected reranker
+  ansible.builtin.import_tasks: hf_preflight.yml
+
+- name: Preflight | ai_stack_ollama_env leaves the compose file's fixed keys alone
+  ansible.builtin.import_tasks: ollama_env_check.yml
+
+- name: Preflight | the broker's fixed GPU context is null or an integer 2048-262144
+  ansible.builtin.import_tasks: broker_num_ctx_check.yml
+
+- name: Preflight | the broker alias names are plain names, and distinct
   ansible.builtin.assert:
     that:
       - ai_stack_alias_name is string
       - ai_stack_alias_name is match('^[A-Za-z0-9][A-Za-z0-9._:-]*$')
-    fail_msg: ai_stack_alias_name must be a plain model-like name.
+      - ai_stack_embed_alias is string
+      - ai_stack_embed_alias is match('^[A-Za-z0-9][A-Za-z0-9._:-]*$')
+      - ai_stack_embed_alias != ai_stack_alias_name
+    fail_msg: >-
+      ai_stack_alias_name and ai_stack_embed_alias must be plain model-like names, and different (the broker
+      would otherwise map one name to two models).
     quiet: true
 
 # Both published ports bind tailnet_ip. Catch a host_vars typo (or tailscale down) before compose tries.
@@ -43,3 +63,12 @@
       {{ tailnet_ip }} (tailnet_ip) is not on this host. Is tailscale up, and does host_vars tailnet_ip match
       `tailscale ip -4`?
     quiet: true
+
+# Memory budget (docs/CONTRACTS.md §12.18b). Its own file so tests/test_render.yml runs the same tasks.
+- name: Preflight | memory budget
+  ansible.builtin.import_tasks: memory_budget.yml
+
+# The skills mount (§12.19) needs role ai_library_share's client (credentials, tailnet wait unit). Its own
+# file so tests/test_render.yml runs the same tasks against scratch files.
+- name: Preflight | AI Library client prerequisites for the skills mount
+  ansible.builtin.import_tasks: skills_prereqs.yml

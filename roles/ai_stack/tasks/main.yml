@@ -1,9 +1,11 @@
 ---
 # Role ai_stack (docs/CONTRACTS.md §12.10): the ai-box compose project `ai`.
-# Order: checks -> layout and the Open WebUI secret -> broker image (built only when its source changed) ->
-# broker config (validated by the image's own --check) -> compose file -> boot helper script ->
-# [stack lock] up --wait [unlock] -> heal missing tailnet bindings (the helper, under the same lock) ->
-# assert the bindings -> boot helper unit -> model.
+# Order: checks (incl. the memory budget) -> layout and the Open WebUI secret -> broker image (built only
+# when its source changed) -> broker config (validated by the image's own --check) -> Tika config ->
+# networks (the pinned `ai` network, role-owned; read-only checks for `extract`) ->
+# compose file -> boot helper script -> [stack lock] up --wait [unlock] -> heal missing tailnet bindings
+# (the helper, under the same lock) -> assert the bindings -> boot helper unit -> model -> extraction checks
+# (read-only: OCR through Tika, Open WebUI's effective document settings).
 # A re-run reports changed=0: the build is gated on a source hash, the secret is created once, and
 # community.docker.docker_compose_v2 (state present) only acts on a real difference.
 
@@ -68,6 +70,34 @@
       --mount type=bind,source=%s,target=/etc/gpu-broker/config.json,readonly
       {{ local_images.gpu_broker }} --check
 
+# Tika's server config (OCR for images and scanned PDFs, §12.18b). Its sha256 is a label on the tika
+# container, so a change recreates it in the same `compose up`.
+- name: Tika config
+  ansible.builtin.copy:
+    content: "{{ ai_stack_tika_config_content }}"
+    dest: "{{ ai_stack_tika_config_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: python3 -c 'import sys, xml.etree.ElementTree as e; e.parse(sys.argv[1])' %s
+
+- name: Networks (the pinned `ai` network; checks for `extract`)
+  ansible.builtin.import_tasks: networks.yml
+
+# §12.23: the broker's pinned address, for the roles that narrow their egress filter to it. As a host fact
+# too, so a later play can read hostvars[<ai-box>].ai_stack_broker_ip.
+- name: Export the broker's pinned address for other roles
+  ansible.builtin.set_fact:
+    ai_stack_broker_ip: "{{ ai_stack_broker_ip }}"
+    cacheable: true
+
+- name: Skills view (§12.19; the local directory open-webui binds, and its systemd bind mount)
+  ansible.builtin.import_tasks: skills.yml
+
+# Before the Compose definition and compose up: open-webui binds each model folder read-only (§12.30, R16-1).
+- name: Pre-seeded Hugging Face rerankers (root's host folder, bound read-only into open-webui)
+  ansible.builtin.import_tasks: hf_models.yml
+
 - name: Compose definition
   ansible.builtin.template:
     src: compose.yaml.j2
@@ -77,6 +107,28 @@
     mode: "0644"
     validate: docker compose --project-directory {{ ai_stack_dir }} -f %s config --quiet
 
+# Every compose call of this role names compose.yaml alone (-f / files:), so an override file is never
+# merged. One lying in the stack dir is still refused: someone put it there expecting it to apply (R13-1).
+- name: Stack | look for Compose override files in the stack dir
+  ansible.builtin.find:
+    paths: "{{ ai_stack_dir }}"
+    patterns: ["compose.override.yml", "compose.override.yaml", "docker-compose.override.yml",
+               "docker-compose.override.yaml", "docker-compose.yml", "docker-compose.yaml", "compose.yml"]
+    file_type: any
+    hidden: true
+  register: ai_stack_compose_overrides
+  check_mode: false
+
+- name: Stack | no other Compose file in the stack dir
+  ansible.builtin.assert:
+    that:
+      - ai_stack_compose_overrides.files | length == 0
+    fail_msg: >-
+      {{ ai_stack_compose_overrides.files | map(attribute='path') | join(', ') }} in {{ ai_stack_dir }}: this role
+      runs compose.yaml alone and never merges another file. Remove it (its settings would not apply, and it
+      could undo OLLAMA_NO_CLOUD or the pinned addresses if someone ran `docker compose up` there by hand).
+    quiet: true
+
 - name: Boot helper (script and unit; the playbook's heal step uses the same script)
   ansible.builtin.import_tasks: boot_helper.yml
 
@@ -85,3 +137,15 @@
 
 - name: Models
   ansible.builtin.import_tasks: models.yml
+
+- name: Skills are read-only inside open-webui (its own mount table)
+  ansible.builtin.import_tasks: verify_skills.yml
+
+- name: Document extraction works (Tika OCR, Open WebUI's effective settings)
+  ansible.builtin.import_tasks: verify_extraction.yml
+
+- name: Document search settings (report; assert once ai_stack_verify_search_settings)
+  ansible.builtin.import_tasks: verify_search.yml
+
+- name: Broker management is locked down (/api/push via the published port is 403)
+  ansible.builtin.import_tasks: verify_broker.yml

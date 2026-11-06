@@ -2,17 +2,29 @@
 # Derived values (not meant to be overridden).
 
 # The broker's alias map: rendered only when both model variables are set (§12.10), else {}.
+# The embed alias (§12.22) is added whenever ai_embed_model is set, independent of the chat models.
 ai_stack_aliases: >-
-  {{ {ai_stack_alias_name: {'gpu': ai_gpu_model, 'cpu': ai_cpu_model}}
-     if (ai_gpu_model is defined and ai_cpu_model is defined) else {} }}
+  {{ ({ai_stack_alias_name: {'gpu': ai_gpu_model, 'cpu': ai_cpu_model}}
+      if (ai_gpu_model is defined and ai_cpu_model is defined) else {})
+     | combine({ai_stack_embed_alias: {'gpu': ai_embed_model, 'cpu': ai_embed_model}}
+               if ai_embed_model is defined else {}) }}
+# Models pulled into ollama-cpu (tasks/models.yml): the CPU chat model and the embedding model, when set.
+ai_stack_cpu_pull_models: >-
+  {{ [ai_cpu_model | default(none), ai_embed_model | default(none)] | select | unique | list }}
 
 # /etc/homelab-ai/gpu-broker.json. Keys are the broker's own (apps/gpu-broker/gpu_broker/config.py); the
-# three URLs are its only required keys, everything else keeps the broker's defaults.
+# three URLs are its only required keys, everything else keeps the broker's defaults. gpu_num_ctx is a JSON
+# number (ai_gpu_num_ctx) or null (unset); cpu_num_ctx is never set.
 ai_stack_broker_config:
   gate_url: "http://{{ gaming_pc_tailnet_ip }}:{{ ai_stack_gate_port }}"
   gpu_url: "http://{{ gaming_pc_tailnet_ip }}:{{ ai_stack_gpu_ollama_port }}"
   cpu_url: http://ollama-cpu:11434
   aliases: "{{ ai_stack_aliases }}"
+  # §12.23: model management (pull, create, copy, delete, blobs) only from open-webui's pinned address;
+  # /api/push is refused for everyone (apps/gpu-broker).
+  management_clients: ["{{ ai_stack_webui_ip }}"]
+  # The fixed GPU context (apps/gpu-broker README, "Fixed context"); the preflight checks its type and range.
+  gpu_num_ctx: "{{ ai_stack_broker_gpu_num_ctx }}"
 ai_stack_broker_config_content: "{{ ai_stack_broker_config | to_nice_json(indent=2) }}\n"
 # Stamped on the gpu-broker container as a label, so a config change recreates the container in the same
 # `compose up` (the broker reads its config only at start, and a replaced file is a new inode that an
@@ -41,3 +53,164 @@ ai_stack_tailnet_publishes:
 # The helper prints "RECREATE <services>" ("WOULD-RECREATE" in a dry run) when it recreates (would
 # recreate) something; the playbook's heal step is changed exactly then.
 ai_stack_heal_changed_re: '^(WOULD-)?RECREATE '
+
+# ---- Document extraction (docs/CONTRACTS.md §12.18b) ----
+# Open WebUI reaches Tika by service name on the internal `extract` network.
+ai_stack_tika_url: http://tika:9998
+# Open WebUI's "Tika Server Version": 3 selects PUT /tika/text (JSON); 4 would call /tika/json/md, which
+# Tika 3.x doesn't have. Must match the major version of images.tika (the test checks it).
+ai_stack_tika_server_version: "3"
+ai_stack_tika_config_template: "{{ role_path }}/templates/tika-config.xml.j2"
+ai_stack_tika_config_content: "{{ lookup('ansible.builtin.template', ai_stack_tika_config_template) }}"
+# Stamped on the tika container as a label, so a config change recreates it (Tika reads it only at start).
+ai_stack_tika_config_hash: "{{ ai_stack_tika_config_content | hash('sha256') }}"
+
+# What Open WebUI's effective settings must be (tasks/verify_extraction.yml): key -> expected value.
+ai_stack_webui_extraction_expected:
+  rag.content_extraction_engine: tika
+  rag.tika_server_url: "{{ ai_stack_tika_url }}"
+  rag.tika_server_version: "{{ ai_stack_tika_server_version }}"
+  rag.file.max_size: "{{ ai_webui_rag_file_max_size_mb | int }}"
+  rag.content_extraction.supported_media_mime_types: "{{ ai_webui_extraction_media_types }}"
+
+# Document search (§12.22, tasks/verify_search.yml): what Open WebUI's effective settings must be. rag.top_k
+# is a minimum, checked against the number of passages Open WebUI really keeps (if hybrid search is on:
+# min(top_k, top_k_reranker)).
+ai_stack_webui_search_expected:
+  rag.embedding_engine: ollama
+  rag.embedding_model: "{{ ai_stack_embed_alias }}"
+  rag.ollama.base_url: http://gpu-broker:11434
+  rag.top_k: "{{ ai_stack_rag_top_k | int }}"
+  # §12.30: the hybrid search and reranker state the inventory expects (today: off, none).
+  rag.enable_hybrid_search: "{{ ai_stack_expect_hybrid_search | bool }}"
+  rag.reranking_model: "{{ ai_stack_expect_reranker_model }}"
+# What the one settings exec checks (tasks/verify_extraction.yml): extraction always, search with an
+# embedding model.
+ai_stack_webui_settings_expected: >-
+  {{ ai_stack_webui_extraction_expected
+     | combine((ai_stack_webui_search_expected | combine(ai_stack_webui_search_report)) if ai_embed_model is defined else {}) }}
+# Reported with the above, never asserted (the admin's choices; README, "Search settings").
+ai_stack_webui_search_report:
+  rag.embedding_batch_size: "{{ ai_stack_rag_embedding_batch_size | int }}"
+  rag.embedding_concurrent_requests: "{{ ai_stack_rag_embedding_concurrent_requests | int }}"
+  task.model.default: "{{ ai_stack_alias_name }}"
+
+# ---- Memory budget (MiB), checked in tasks/preflight.yml ----
+# Every container limit on this host (this stack's plus ai_stack_mem_other_containers), in MiB.
+ai_stack_mem_containers_mb: >-
+  {%- set out = {} -%}
+  {%- for name, size in (ai_stack_mem_limits | combine(ai_stack_mem_other_containers)).items() -%}
+  {%- set _ = out.update({name: (size | string | upper | ansible.builtin.human_to_bytes) // 1048576}) -%}
+  {%- endfor -%}
+  {{ out }}
+ai_stack_mem_host_reserve_mb: >-
+  {{ ai_stack_mem_host_services.values() | map('string') | map('upper') | map('ansible.builtin.human_to_bytes')
+     | map('int') | sum // 1048576 }}
+# MemTotal (MiB) from the facts; tasks/preflight.yml gathers them if the play didn't.
+ai_stack_host_memtotal_mb: "{{ ansible_facts.memtotal_mb }}"
+ai_stack_mem_needed_mb: "{{ ai_stack_mem_containers_mb.values() | sum + ai_stack_mem_host_reserve_mb | int }}"
+
+# ---- Skills view (docs/CONTRACTS.md §12.19) ----
+# systemd's unit name for the view's mount point (systemd-escape --path --suffix=mount; tests compare).
+ai_stack_skills_unit_base: >-
+  {{ ai_stack_skills_view.strip('/') | replace('-', ai_stack_systemd_escaped_dash) | replace('/', '-') }}
+ai_stack_skills_mount_unit: "{{ ai_stack_skills_unit_base }}.mount"
+ai_stack_payday_mount_unit: >-
+  {{ ai_stack_payday_view.strip('/') | replace('-', ai_stack_systemd_escaped_dash) | replace('/', '-') }}.mount
+ai_stack_writing_mount_unit: >-
+  {{ ai_stack_writing_view.strip('/') | replace('-', ai_stack_systemd_escaped_dash) | replace('/', '-') }}.mount
+# Every read-only AI Library share open-webui gets (§12.19 skills, §12.21 writing). One design for all:
+# templates/homelab-ai-share.mount.j2, the compose binds, tasks/skills.yml, tasks/verify_skills.yml and the
+# reconcile service iterate over this list.
+ai_stack_ro_shares:
+  - name: skills
+    what: "{{ ai_stack_skills_cifs_source }}"
+    view: "{{ ai_stack_skills_view }}"
+    target: "{{ ai_stack_skills_target }}"
+    marker: "{{ ai_stack_skills_unavailable_marker }}"
+    mount_unit: "{{ ai_stack_skills_mount_unit }}"
+    description: AI Library skills
+    mode: ro
+  - name: writing
+    what: "{{ ai_stack_writing_cifs_source }}"
+    view: "{{ ai_stack_writing_view }}"
+    target: "{{ ai_stack_writing_target }}"
+    marker: "{{ ai_stack_writing_unavailable_marker }}"
+    mount_unit: "{{ ai_stack_writing_mount_unit }}"
+    description: AI Library writing samples and voice profile
+    mode: ro
+  # §12.27: the one read-write entry (the list keeps its name; `mode` says which is which).
+  - name: payday-runs
+    what: "{{ ai_stack_payday_cifs_source }}"
+    view: "{{ ai_stack_payday_view }}"
+    target: "{{ ai_stack_payday_target }}"
+    marker: "{{ ai_stack_payday_unavailable_marker }}"
+    mount_unit: "{{ ai_stack_payday_mount_unit }}"
+    description: AI Library payday runs (read-write)
+    mode: rw
+# The read-write shares' CIFS options: the read-only ones with ro -> rw and the modes 0640/0750
+# (nosuid,nodev,noexec, the owner root and everything else unchanged).
+ai_stack_share_rw_mount_options: >-
+  {{ ai_stack_skills_mount_options | map('regex_replace', '^ro$', 'rw')
+     | map('regex_replace', '^file_mode=0440$', 'file_mode=0640')
+     | map('regex_replace', '^dir_mode=0550$', 'dir_mode=0750') | list }}
+ai_stack_skills_timer_unit: homelab-ai-skills-reconcile.timer
+ai_stack_skills_reconcile_unit: homelab-ai-skills-reconcile.service
+# A literal backslash, x, 2, d (YAML single quotes keep it as is).
+ai_stack_systemd_escaped_dash: '\x2d'
+# Who must own ai_stack_skills_credentials_file (tests point it at their own user).
+ai_stack_skills_credentials_owner: root
+
+# ---- The embedding model on the gaming PC (§12.22, Reviewer L, L-5) ----
+# The gaming PC's root host (role ollama_rocm runs there); '' when it isn't in the inventory.
+ai_stack_pc_host: "{{ groups['workstations_root'] | default([]) | first | default('') }}"
+# Its ollama_rocm_extra_models, read through hostvars (as roles/ai_control's preflight reads the PC's vars).
+ai_stack_pc_extra_models: >-
+  {{ (hostvars[ai_stack_pc_host].ollama_rocm_extra_models | default([])) if ai_stack_pc_host | length > 0 else [] }}
+# Both in the form /api/tags lists models, the same normalisation as role ollama_rocm's
+# ollama_rocm_pull_listed: lower case, no default registry or library/ prefix, :latest when untagged.
+ai_stack_pc_extra_listed: >-
+  {{ ai_stack_pc_extra_models | map('string') | map('lower') | map('regex_replace', '^registry[.]ollama[.]ai/', '')
+     | map('regex_replace', '^library/', '') | map('regex_replace', '^([^:]*)\Z', '\1:latest') | list }}
+ai_stack_embed_model_listed: >-
+  {{ [ai_embed_model | default('')] | map('lower') | map('regex_replace', '^registry[.]ollama[.]ai/', '')
+     | map('regex_replace', '^library/', '') | map('regex_replace', '^([^:]*)\Z', '\1:latest') | first }}
+
+# ---- Pinned addresses on `ai` (§12.23), by container name ----
+ai_stack_pinned_ips:
+  ollama-cpu: "{{ ai_stack_ollama_cpu_ip }}"
+  gpu-broker: "{{ ai_stack_broker_ip }}"
+  open-webui: "{{ ai_stack_webui_ip }}"
+
+# The marker each share's local view directory holds while it isn't mounted (tasks/skills.yml sets
+# ai_stack_marker_for to the share). The read-only shares' text is unchanged from before §12.27.
+ai_stack_share_marker_text: |
+  The AI Library's {{ ai_stack_marker_for.name }} folder is not mounted on ai-box, so it is not available.
+  (Role ai_stack: {{ ai_stack_marker_for.mount_unit }} mounts {{ ai_stack_marker_for.what }} here
+  {{ ai_stack_share_mode_words[ai_stack_marker_for.mode] }} while the gaming PC is reachable; {{ ai_stack_skills_timer_unit }} checks every minute.)
+ai_stack_share_mode_words: {ro: read-only, rw: read-write}
+
+# ---- Pre-seeded Hugging Face models (§12.30, tasks/hf_models.yml) ----
+# models--<org>--<name>, the HF cache's folder for a repo.
+ai_stack_hf_model_dirs: >-
+  {{ ai_stack_hf_models | map(attribute='repo') | map('regex_replace', '/', '--') | map('regex_replace', '^', 'models--') | list }}
+# Every pinned file, flattened: {repo, revision, dir (models--<org>--<name>), name, sha256, path on the host}.
+ai_stack_hf_files: >-
+  {%- set out = [] -%}
+  {%- for m in ai_stack_hf_models -%}
+  {%- set dir = 'models--' ~ (m.repo | replace('/', '--')) -%}
+  {%- for f in m.files -%}
+  {%- set _ = out.append({'repo': m.repo, 'revision': m.revision, 'dir': dir, 'name': f.name, 'sha256': f.sha256,
+                          'path': ai_stack_hf_seed_dir ~ '/' ~ dir ~ '/snapshots/' ~ m.revision ~ '/' ~ f.name}) -%}
+  {%- endfor -%}
+  {%- endfor -%}
+  {{ out }}
+# Every folder the seeding creates or writes into, parent first: the seed folder's parent, the seed folder,
+# then per model its folder, refs, snapshots and the pinned snapshot. None may be a symlink.
+ai_stack_hf_dirs: >-
+  {%- set out = [ai_stack_hf_seed_dir | dirname, ai_stack_hf_seed_dir] -%}
+  {%- for m in ai_stack_hf_models -%}
+  {%- set d = ai_stack_hf_seed_dir ~ '/models--' ~ (m.repo | replace('/', '--')) -%}
+  {%- set _ = out.extend([d, d ~ '/refs', d ~ '/snapshots', d ~ '/snapshots/' ~ m.revision]) -%}
+  {%- endfor -%}
+  {{ out }}

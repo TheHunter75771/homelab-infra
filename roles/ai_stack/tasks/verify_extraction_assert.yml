@@ -1,0 +1,44 @@
+---
+# Input: ai_stack_webui_extraction (the one settings exec's registered result). See verify_extraction.yml.
+# rc 2 / source "unsupported": the checker couldn't read the settings (database locked or missing, no config
+# table, an unreadable row). That says nothing about the settings themselves, so the message differs.
+- name: Extraction | Open WebUI's settings could be read
+  vars:
+    ai_stack_cfg: "{{ ai_stack_webui_extraction.stdout | default('') | regex_search('^\\{.*\\}$') | default('{}', true) | from_json }}"
+  ansible.builtin.assert:
+    that:
+      - ai_stack_webui_extraction.rc | default(-1) in [0, 1]
+      - ai_stack_cfg.settings | default(none) is mapping
+    fail_msg: >-
+      Can't tell which document settings Open WebUI uses (rc {{ ai_stack_webui_extraction.rc | default('none') }}:
+      {{ ai_stack_cfg.error | default(ai_stack_webui_extraction.msg | default('')) }}
+      {{ ai_stack_webui_extraction.stderr | default('') }}). Nothing was changed. Check them by hand: Admin
+      Panel > Settings > Documents should show Content Extraction Engine = Tika, Tika Server URL =
+      {{ ai_stack_tika_url }}, Tika Server Version = Tika 3.x, Supported Media MIME Types =
+      {{ ai_webui_extraction_media_types | join(', ') }}, Max Upload Size = {{ ai_webui_rag_file_max_size_mb }}.
+      If the database was just busy, re-run the playbook.
+    quiet: true
+
+- name: Extraction | Open WebUI uses Tika with the configured settings
+  vars:
+    ai_stack_cfg: "{{ ai_stack_webui_extraction.stdout | default('') | regex_search('^\\{.*\\}$') | default('{}', true) | from_json }}"
+    # Only the extraction keys: the search keys in the same result are tasks/verify_search.yml's.
+    ai_stack_cfg_bad_items: >-
+      {{ ai_stack_cfg.settings | default({}) | dict2items | rejectattr('value.ok')
+         | selectattr('key', 'in', ai_stack_webui_extraction_expected.keys() | list) | list }}
+    ai_stack_cfg_bad: "{{ ai_stack_cfg_bad_items | map(attribute='key') | list }}"
+  ansible.builtin.assert:
+    that:
+      - ai_stack_webui_extraction.rc in [0, 1]
+      - ai_stack_cfg.settings | default(none) is mapping
+      - ai_stack_webui_extraction_expected.keys() | difference(ai_stack_cfg.settings.keys() | list) | length == 0
+      - ai_stack_cfg_bad | length == 0
+    fail_msg: >-
+      Open WebUI's stored document settings differ from the role's: {{ ai_stack_cfg_bad | join(', ') }}
+      ({{ ai_stack_cfg_bad_items | map(attribute='value') | map(attribute='effective') | list | to_json }} stored). Open WebUI keeps
+      these in its database and the database beats the environment, so set them once by hand. Fix: Admin
+      Panel > Settings > Documents, Content Extraction Engine = Tika; Tika Server URL = {{ ai_stack_tika_url }};
+      Tika Server Version = Tika 3.x; Supported Media MIME Types = {{ ai_webui_extraction_media_types | join(', ') }};
+      Max Upload Size = {{ ai_webui_rag_file_max_size_mb }}; Save. Then re-run the playbook (README, "Document
+      extraction settings").
+    success_msg: "Open WebUI document settings ({{ ai_stack_cfg.source }}): engine tika, all as configured."

@@ -48,9 +48,12 @@
 
     # The broker is never pulled (local image, built above); pull missing only fetches the two pinned
     # images the first time. A broker config change recreates the broker here (its config-hash label).
+    # files: compose.yaml only. Without it, Compose would also merge a compose.override.yaml from the stack
+    # dir (R13-1), which could undo what compose.yaml fixes (OLLAMA_NO_CLOUD, the pins).
     - name: Stack is up and healthy
       community.docker.docker_compose_v2:
         project_src: "{{ ai_stack_dir }}"
+        files: [compose.yaml]
         state: present
         pull: missing
         build: never

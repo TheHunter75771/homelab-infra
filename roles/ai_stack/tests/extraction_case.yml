@@ -1,0 +1,28 @@
+---
+# One extraction-settings case for test_render.yml: runs the role's tasks/verify_extraction_assert.yml
+# against a sample result of the one settings exec, and checks it passes or fails as expected.
+- name: Extraction case | the role's checks
+  block:
+    - name: Extraction case | tasks/verify_extraction_assert.yml
+      ansible.builtin.include_tasks: "{{ ai_stack_test_role }}/tasks/verify_extraction_assert.yml"
+      vars:
+        ai_stack_webui_extraction:
+          rc: "{{ extraction_case.rc }}"
+          stdout: "{{ (extraction_case.out | to_json) if extraction_case.out else '' }}"
+          stderr: ""
+
+    - name: Extraction case | it passed
+      ansible.builtin.set_fact:
+        extraction_case_failed: false
+  rescue:
+    - name: Extraction case | it failed
+      ansible.builtin.set_fact:
+        extraction_case_failed: true
+  always:
+    - name: Extraction case | outcome is as expected
+      ansible.builtin.assert:
+        that:
+          - extraction_case_failed is defined
+          - (not extraction_case_failed) == (extraction_case.ok | bool)
+        fail_msg: "{{ extraction_case.name }}: expected {{ 'pass' if extraction_case.ok | bool else 'fail' }}."
+        quiet: true

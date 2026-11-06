@@ -1,24 +1,26 @@
 ---
-# Models are Noah's decision (§12.10): with ai_cpu_model unset nothing is pulled. When set, it is pulled into
-# ollama-cpu only if `ollama show` can't find it, so a re-run is changed=0 (and never re-downloads).
-# ai_gpu_model is pulled on the gaming PC (role ollama_rocm), never here.
+# Models are the operator's decision (§12.10, §12.22): ai_cpu_model (chat) and ai_embed_model (embeddings) are pulled
+# into ollama-cpu when set, each only if `ollama show` can't find it, so a re-run is changed=0 (and never
+# re-downloads). Unset: nothing. ai_gpu_model (and the GPU copy of the embedding model) are pulled on the
+# gaming PC (role ollama_rocm), never here.
 
-- name: Models | is the CPU model already in ollama-cpu?
+- name: Models | are the CPU models already in ollama-cpu?
   community.docker.docker_container_exec:
     container: ollama-cpu
-    argv: [ollama, show, "{{ ai_cpu_model }}"]
+    argv: [ollama, show, "{{ item }}"]
+  loop: "{{ ai_stack_cpu_pull_models }}"
   register: ai_stack_cpu_model_show
   changed_when: false
   failed_when: false
   check_mode: false
-  when: ai_cpu_model is defined
 
 # Multi-GB on the HDD: this can take a while. Skipped in check mode (the module has no check mode).
-- name: Models | pull the CPU model (missing)
+- name: Models | pull the missing CPU models
   community.docker.docker_container_exec:
     container: ollama-cpu
-    argv: [ollama, pull, "{{ ai_cpu_model }}"]
+    argv: [ollama, pull, "{{ item.item }}"]
+  loop: "{{ ai_stack_cpu_model_show.results }}"
+  loop_control:
+    label: "{{ item.item }}"
   changed_when: true
-  when:
-    - ai_cpu_model is defined
-    - ai_stack_cpu_model_show.rc | default(1) != 0
+  when: item.rc | default(1) != 0

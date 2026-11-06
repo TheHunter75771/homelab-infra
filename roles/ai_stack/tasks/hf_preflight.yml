@@ -1,0 +1,47 @@
+---
+# The pinned Hugging Face models (§12.30) are well-formed, and the expected reranker is one of them (the
+# container is offline: it can only use a pre-seeded model). Its own file so tests/test_render.yml runs it.
+- name: Preflight | pinned Hugging Face models are well-formed
+  ansible.builtin.assert:
+    that:
+      - item.repo is match('^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$')
+      - "'..' not in item.repo"
+      - item.revision is match('^[0-9a-f]{40}$')
+      - item.files | length > 0
+      - item.files | map(attribute='name') | select('match', '^[A-Za-z0-9][A-Za-z0-9._-]*$') | list | length == item.files | length
+      - item.files | map(attribute='sha256') | select('match', '^[0-9a-f]{64}$') | list | length == item.files | length
+      - item.files | map(attribute='name') | unique | list | length == item.files | length
+      - "'config.json' in item.files | map(attribute='name')"
+      - "'model.safetensors' in item.files | map(attribute='name')"
+    fail_msg: "ai_stack_hf_models entry {{ item.repo | default('?') }} is malformed: {{ item | to_json }}"
+    quiet: true
+  loop: "{{ ai_stack_hf_models }}"
+  loop_control:
+    label: "{{ item.repo | default('?') }}"
+
+- name: Preflight | the expected search settings are possible offline
+  ansible.builtin.assert:
+    that:
+      - ai_stack_expect_hybrid_search | bool in [true, false]
+      - ai_stack_expect_reranker_model is string
+      - ai_stack_expect_reranker_model == '' or ai_stack_expect_reranker_model in (ai_stack_hf_models | map(attribute='repo'))
+      - ai_stack_hf_models | map(attribute='repo') | unique | list | length == ai_stack_hf_models | length
+    fail_msg: >-
+      ai_stack_expect_reranker_model {{ ai_stack_expect_reranker_model | to_json }} must be empty or one of the
+      pre-seeded models ({{ ai_stack_hf_models | map(attribute='repo') | join(', ') }}): open-webui runs with
+      HF_HUB_OFFLINE=1 and can't download one.
+    quiet: true
+
+# R16-1: the host seeds only its own folder, never Docker's volumes; the paths are plain (no '.' or '..'
+# component, no trailing slash) and the seed folder has a parent below / (its owner and mode are checked too).
+- name: Preflight | the seed folder (outside Docker's) and the container's HF cache are plain absolute paths
+  ansible.builtin.assert:
+    that:
+      - ai_stack_hf_seed_dir is match('^(/[A-Za-z0-9][A-Za-z0-9._-]*){2,}$')
+      - ai_stack_hf_seed_dir is not match('^/var/lib/docker(/|$)')
+      - ai_stack_hf_container_cache is match('^(/[A-Za-z0-9][A-Za-z0-9._-]*)+$')
+    fail_msg: >-
+      ai_stack_hf_seed_dir {{ ai_stack_hf_seed_dir | to_json }} must be a plain absolute path with a parent below /
+      and outside /var/lib/docker; ai_stack_hf_container_cache {{ ai_stack_hf_container_cache | to_json }} a plain
+      absolute path.
+    quiet: true
