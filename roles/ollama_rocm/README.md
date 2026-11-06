@@ -15,7 +15,8 @@ Native Ollama (ROCm) on the gaming PC for ai-box's gpu-broker (`docs/CONTRACTS.m
 
 Inputs (host_vars, git-ignored): `gaming_pc_tailnet_ip`, `ai_box_tailnet_ip`, `ai_box_tailnet_ip6`. The
 ai-box addresses must be single addresses (asserted: no prefix length, no range). `ai_gpu_model` has **no
-default**; unset, null or empty means nothing is pulled.
+default**; unset, null or empty means it isn't pulled. `ollama_rocm_extra_models` (default `[]`) lists more
+models to pull the same way (CONTRACTS §12.22).
 
 ## Install (staged, then atomic swaps)
 1. Both tarballs (`ollama-linux-amd64.tar.zst`, then `-rocm`) are downloaded with `get_url` and their pinned
@@ -56,8 +57,8 @@ Decided by Noah after the live check in CONTRACTS §12.9, "§12.7 risk CONFIRMED
   Asserted:
   - it's a mapping;
   - names match `^[A-Za-z_][A-Za-z0-9_]*$` and aren't the role's own (`HOME`, `OLLAMA_HOST`,
-    `OLLAMA_KEEP_ALIVE`, `OLLAMA_MAX_LOADED_MODELS`, `OLLAMA_MODELS`), so it can't widen the
-    tailnet-only bind;
+    `OLLAMA_KEEP_ALIVE`, `OLLAMA_MAX_LOADED_MODELS`, `OLLAMA_MODELS`, `OLLAMA_NO_CLOUD`), so it can't
+    widen the tailnet-only bind or turn the cloud passthrough back on;
   - values are strings or numbers with no whitespace, control character (NUL included: systemd ends
     the line there, so it could inject a directive), quote, backslash or `%`, so nothing can add a
     directive or change how systemd parses the line.
@@ -74,18 +75,43 @@ Decided by Noah after the live check in CONTRACTS §12.9, "§12.7 risk CONFIRMED
   `dnf` command.
 
 ## Model pull
-Only when `ai_gpu_model` is set (not null or empty) and the model isn't listed yet.
-- **Name form:** `ai_gpu_model` must be a plain name, `[host/][namespace/]model[:tag]`, with no digest
-  and no registry port (asserted).
+The models are `ai_gpu_model` when it's set (not null or empty), then each of `ollama_rocm_extra_models`.
+Each one is pulled only if it isn't listed yet. When both are empty, nothing is pulled and the server isn't
+contacted.
+- **Name form:** `ai_gpu_model` and every `ollama_rocm_extra_models` entry must be a plain name,
+  `[host/][namespace/]model[:tag]`, with no digest and no registry port (asserted). `ai_gpu_model` is
+  trimmed first; extra entries aren't.
+- **Extra models (asserted):** a list (not a string, mapping or null) of at most 8 strings, no model
+  listed twice, and not `ai_gpu_model` again. "Twice" and "again" compare in the `/api/tags` form below,
+  so `qwen3` and `library/qwen3:latest` are the same model. Removing an entry doesn't delete the model.
 - **"Already pulled":** the name is compared, in lower case, in the short form that `/api/tags` lists:
   without `registry.ollama.ai/` and `library/`, and with `:latest` added when there is no tag. So a
   fully qualified or untagged name doesn't re-pull on every converge.
-- **Wait for the server:** up to 3 min for the server to answer on the tailnet.
-- **Bound the pull:** one `ollama pull` under `timeout --kill-after=30 {{ ollama_rocm_pull_timeout }}`
-  (default 7200 s). Both bounds must be positive whole seconds (asserted; 0 is refused).
+- **Wait for the server:** up to 3 min for the server to answer on the tailnet, once per run.
+- **Bound the pull:** for each missing model, one `ollama pull` under
+  `timeout --kill-after=30 {{ ollama_rocm_pull_timeout }}` (default 7200 s, per model). Both bounds must
+  be positive whole seconds (asserted; 0 is refused).
 - **On timeout:** the run fails with "was still running after N s and was stopped". That covers TERM
   (rc 124) and KILL (rc -9/137). The next run resumes the partial download.
 - **Other errors:** report the rc and stderr.
+- **A failed pull** ends the run, so the models after it are pulled on the next one.
+
+## Keep-alive and loaded models
+Both are rendered into `Environment=` lines as they are, so both are asserted:
+- **`ollama_rocm_keep_alive`** (default `5m`) must be `-1`, `0` or a whole number with an optional
+  `ms`/`s`/`m`/`h` unit (`^(-1|0|[0-9]+(ms|s|m|h)?)\Z`). A string or an integer, never a bool.
+- **`ollama_rocm_max_loaded_models`** (default `1`; the gaming PC's inventory sets `2`) must be an
+  integer from 1 to 8. Not a string, a float or a bool.
+
+## No cloud: `ollama_rocm_no_cloud` (default `true`)
+Ollama 0.40.11 passes a chat, show or `/v1/*` request that names a `*:cloud` model on to ollama.com,
+signed with the server's key (CONTRACTS §12.23, Reviewer N's N-1). `OLLAMA_NO_CLOUD=1` turns that off,
+and web search with it.
+- `true` renders `Environment=OLLAMA_NO_CLOUD=1`; `false` leaves the line out.
+- It must be a bool (asserted): the strings `"false"` and `"yes"`, `0`, `1` and `null` are refused.
+- `ollama_rocm_extra_env` can't set `OLLAMA_NO_CLOUD` (reserved).
+- Changing it rewrites the unit, so Ollama restarts. The first converge after this change restarts it
+  on the gaming PC.
 
 ## Binding at boot
 `OLLAMA_HOST` is the tailnet IPv4. Ollama can't bind it until tailscaled has configured the address,
@@ -129,6 +155,26 @@ rule family="ipv6" source NOT address="<ai_box_tailnet_ip6>" port port="11434" p
 rule family="ipv6" source NOT address="<ai_box_tailnet_ip6>" port port="11500" protocol="tcp" reject
 ```
 Each rule names its tcp port, so no other port is affected.
+
+**More ports (`ollama_rocm_policy_extra_ports`, default `[]`).**
+- **Same treatment:** each listed port gets the same two rules (IPv4 and IPv6) after 11434 and 11500,
+  and its zone rich rules are pruned as legacy, like theirs. An example is `[11510]` for the AI Control
+  host agent (CONTRACTS §12.15.7).
+- **Validated:** each entry is an integer from 1024 to 65535, listed once, and isn't 11434 or 11500.
+  Ports below 1024 are refused because listing 22 would lock SSH and Ansible out for everyone but
+  ai-box.
+- **Removal:** taking a port off the list removes its rules (the converge removes any policy rule that
+  isn't declared).
+- **Privileged ports (`ollama_rocm_policy_privileged_ports`, default `[]`).** These are ports below 1024,
+  for example `[445]` for the AI Library's Samba share (CONTRACTS §12.17.1). They get the same rules,
+  zone pruning and add-then-remove converge as the extra ports.
+  - **Allowlist:** each entry must be in the fixed allowlist `ollama_rocm_privileged_allowlist` (`[445]`,
+    in `vars/main.yml`). Changing it is a contract change, and 22 must never be added.
+  - **Uniqueness:** each entry is listed once, and isn't also in `ollama_rocm_policy_extra_ports` or the
+    Ollama or gate port.
+  - **Extra-port guard unchanged:** the 1024 floor still applies to `ollama_rocm_policy_extra_ports`.
+- **Rule count:** `2 × (2 + len(extra) + len(privileged))`. That's 4 by default, 6 with the inventory's
+  `[11510]`, and 8 with `[11510]` plus `[445]`.
 
 **Why it runs before `trusted`'s ACCEPT.** Source: firewalld **2.4.4**, the version installed here
 (`python3-firewall`), file paths under `firewall/core/`:
@@ -196,21 +242,47 @@ video`. `MemoryDenyWriteExecute=` is left out until it's proven with the ROCm ru
 - **`test_render`** renders the unit for `vulkan` (with its exact `Environment=` list) and `rocm`, and
   runs `systemd-analyze verify` on both (any warning fails). It also checks:
   - that `ollama_rocm_extra_env` overrides a backend variable;
-  - `tasks/validate.yml`, 48 cases, each must pass or fail with the right message:
+  - `OLLAMA_NO_CLOUD=1` in the default vulkan and rocm units, and no such line with
+    `ollama_rocm_no_cloud: false` (that unit is verified too);
+  - `tasks/validate.yml`, 158 cases, each must pass or fail with the right message:
     - backends: `cuda`, `VULKAN` and `""` fail, as do an i686-only `vulkan-loader` and a missing
       `mesa-vulkan-drivers`;
-    - `ollama_rocm_extra_env`: non-mappings, the five reserved names, bad names (including one with a
+    - `ollama_rocm_extra_env`: non-mappings, the six reserved names, bad names (including one with a
       newline), and values with a newline-injected `ExecStartPre=`, a space, a tab, quotes, a backslash,
-      `%`, a bool or a list;
+      `%`, a bool or a list; `OLLAMA_NO_CLOUD` set to `"0"`, `""` or `"1"`;
+    - `ollama_rocm_no_cloud`: `true` and `false` pass; `"false"`, `"yes"`, 0, 1, `null` and `""` fail;
+    - keep-alive: `5m`, `-1`, 0, 300, `30s`, `500ms` and `24h` pass; a newline-injected
+      `ExecStartPre=`, a trailing newline, spaces, `""`, `1d`, `-5m`, `1.5h`, `%h`, `true`, `null` and a
+      list fail;
+    - loaded models: 1, 2 and 8 pass; 0, 9, -1, `"2"`, a newline-injected string, 2.0, `true` and
+      `null` fail;
     - pull bounds: 0, negative, 1.5, `"2h"` and `true`;
-    - model names: a digest, a registry port, a space, `../`;
+    - model names: a digest, a registry port, a space, `../`, a leading `-` (`--insecure`);
+    - `ollama_rocm_extra_models`: 8 entries pass and 9 fail; a string, a mapping, `null` and a number
+      fail; entries with a space, `../`, a leading `-`, a digest, a registry port, surrounding
+      whitespace, `""`, `null`, a number or a list fail; `ai_gpu_model` again fails (also fully qualified, mixed-case, or with
+      `ai_gpu_model` padded); a duplicate fails (also `qwen3` vs `library/qwen3:latest`, and mixed case);
   - `tasks/backend_installed.yml`: the library is present, missing, or a directory, and rocm needs none;
-  - the short-name normalisation;
+  - the short-name normalisation, and that `ai_gpu_model` joins the pull list (first) only when it's
+    set;
+  - `tasks/main.yml`'s "Pull the models" `when:`, copied verbatim with a recorder in place of the
+    include: it fires when `ai_gpu_model` or an extra model is set (an extra model alone too), and not
+    when both are unset, null, empty or blank;
   - `tasks/pull.yml` against a stub `/api/tags` server with a recording client: fully qualified,
-    untagged, `library/` and mixed-case names that are listed don't pull, and unlisted ones do;
+    untagged, `library/` and mixed-case names that are listed don't pull, and unlisted ones do. With
+    `ollama_rocm_extra_models`, each model gets the same check, in order, and an unset `ai_gpu_model`
+    isn't pulled;
   - `tasks/pull_model.yml` with stand-in clients: success, failure (rc and stderr), a hang (rc 124) and
     a TERM-ignoring hang (KILL);
-  - the exact rich-rule strings;
+  - the exact rich-rule strings, for `[]` and `[11510]` extra ports;
+  - the converge ops for adding 11510 to a converged policy, removing it again, and staying converged;
+  - the legacy-zone finder picking up a zone rule on 11510 but not on 11511, 115100 or 211510;
+  - privileged ports: 6 rules with `[11510]` and `[]`, 8 with `[445]`; adding 445, removing it, and
+    staying converged; a zone rule on 445 is pruned, but not 4450 or 1445. Refused: a non-list, 22,
+    139, 446, 11510, `"445"`, 445.0, `true`, a duplicate 445, and 445 in both lists. 445 stays
+    refused in `extra_ports`;
+  - extra-port validation: a non-list, a string port, 22, 1023, 1, 0, -1, 65536, 11510.0, `true`,
+    `null`, a duplicate, 11434 and 11500 are refused;
   - `ollama_rocm_policy_ops` for a new, a converged, a drifted and a runtime policy (order included);
   - the legacy-rule finder across zones (ports and protocols that only look alike are ignored);
   - the single-address assert.

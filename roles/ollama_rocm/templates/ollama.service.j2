@@ -32,6 +32,10 @@ Environment=OLLAMA_HOST={{ ollama_rocm_listen }}
 Environment=OLLAMA_KEEP_ALIVE={{ ollama_rocm_keep_alive }}
 Environment=OLLAMA_MAX_LOADED_MODELS={{ ollama_rocm_max_loaded_models }}
 Environment=OLLAMA_MODELS={{ ollama_rocm_models_dir }}
+{# ollama_rocm_no_cloud: no :cloud passthrough to ollama.com (remote inference, web search). #}
+{% if ollama_rocm_no_cloud %}
+Environment=OLLAMA_NO_CLOUD=1
+{% endif %}
 {% for key, value in ollama_rocm_env | dictsort %}
 Environment={{ key }}={{ value }}
 {% endfor %}

@@ -76,6 +76,7 @@
               - "'Environment=OLLAMA_KEEP_ALIVE=5m' in lines"
               - "'Environment=OLLAMA_MAX_LOADED_MODELS=1' in lines"
               - "'Environment=OLLAMA_MODELS=/var/lib/ollama/models' in lines"
+              - "'Environment=OLLAMA_NO_CLOUD=1' in lines"
               - "'Environment=HSA_OVERRIDE_GFX_VERSION=11.0.2' in lines"
               - "'After=tailscaled.service network-online.target' in lines"
               - "'User=ollama' in lines"
@@ -107,6 +108,7 @@
                   'Environment=OLLAMA_KEEP_ALIVE=5m',
                   'Environment=OLLAMA_MAX_LOADED_MODELS=1',
                   'Environment=OLLAMA_MODELS=/var/lib/ollama/models',
+                  'Environment=OLLAMA_NO_CLOUD=1',
                   'Environment=HIP_VISIBLE_DEVICES=-1',
                   'Environment=HSA_OVERRIDE_GFX_VERSION=11.0.2',
                   'Environment=OLLAMA_VULKAN=1',
@@ -119,9 +121,9 @@
             path: "{{ t }}/{{ item }}"
             state: directory
             mode: "0755"
-          loop: [rocm, vulkan-override]
+          loop: [rocm, vulkan-override, cloud-allowed]
 
-        - name: Render the unit for rocm, and for vulkan with an extra_env override
+        - name: Render the unit for rocm, for vulkan with an extra_env override, and with no_cloud off
           ansible.builtin.template:
             src: "{{ playbook_dir | dirname }}/templates/ollama.service.j2"
             dest: "{{ t }}/{{ item.name }}/ollama.service"
@@ -129,15 +131,18 @@
           vars:
             ollama_backend: "{{ item.backend }}"
             ollama_rocm_extra_env: "{{ item.extra }}"
+            ollama_rocm_no_cloud: "{{ item.no_cloud | default(true) }}"
           loop:
             - {name: rocm, backend: rocm, extra: {}}
             - {name: vulkan-override, backend: vulkan, extra: {OLLAMA_VULKAN: "0"}}
+            - {name: cloud-allowed, backend: vulkan, extra: {}, no_cloud: false}
           loop_control:
             label: "{{ item.name }}"
 
-        - name: Verify the rocm unit
+        - name: Verify the rocm and no_cloud-off units
           ansible.builtin.command:
-            argv: [systemd-analyze, verify, "{{ t }}/rocm/ollama.service"]
+            argv: [systemd-analyze, verify, "{{ t }}/{{ item }}/ollama.service"]
+          loop: [rocm, cloud-allowed]
           register: render_test_verify_rocm
           changed_when: false
           failed_when: render_test_verify_rocm.rc != 0 or render_test_verify_rocm.stderr | length > 0
@@ -145,7 +150,7 @@
         - name: Read the variant units
           ansible.builtin.slurp:
             src: "{{ t }}/{{ item }}/ollama.service"
-          loop: [rocm, vulkan-override]
+          loop: [rocm, vulkan-override, cloud-allowed]
           register: render_test_variant_units
 
         - name: The rocm unit has no backend variables; an extra_env key overrides the backend's
@@ -160,6 +165,18 @@
               - "'DeviceAllow=char-drm rw' in rocm"
               - override | select('match', '^Environment=OLLAMA_VULKAN=') | list == ['Environment=OLLAMA_VULKAN=0']
             fail_msg: "{{ rocm | to_json }}"
+            quiet: true
+
+        - name: OLLAMA_NO_CLOUD=1 is on by default (rocm too), and absent with ollama_rocm_no_cloud false
+          vars:
+            rocm: "{{ (render_test_variant_units.results[0].content | b64decode).splitlines() }}"
+            allowed: "{{ (render_test_variant_units.results[2].content | b64decode).splitlines() }}"
+          ansible.builtin.assert:
+            that:
+              - rocm | select('search', 'NO_CLOUD') | list == ['Environment=OLLAMA_NO_CLOUD=1']
+              - allowed | select('search', 'NO_CLOUD') | list == []
+              - "'Environment=OLLAMA_MODELS=/var/lib/ollama/models' in allowed"
+            fail_msg: "{{ allowed | select('match', '^Environment=') | list | to_json }}"
             quiet: true
 
         - name: Scratch release trees for the backend library check
@@ -195,6 +212,19 @@
             - {extra_env: {OLLAMA_KEEP_ALIVE: "-1"}, error: 'entry "OLLAMA_KEEP_ALIVE"'}
             - {extra_env: {OLLAMA_MAX_LOADED_MODELS: "3"}, error: 'entry "OLLAMA_MAX_LOADED_MODELS"'}
             - {extra_env: {OLLAMA_MODELS: /tmp/m}, error: 'entry "OLLAMA_MODELS"'}
+            # OLLAMA_NO_CLOUD is the role's (ollama_rocm_no_cloud): extra_env can't turn it off, or on
+            - {extra_env: {OLLAMA_NO_CLOUD: "0"}, error: 'entry "OLLAMA_NO_CLOUD"="0" refused'}
+            - {extra_env: {OLLAMA_NO_CLOUD: ""}, error: 'entry "OLLAMA_NO_CLOUD"'}
+            - {no_cloud: true, extra_env: {OLLAMA_NO_CLOUD: "1"}, error: 'entry "OLLAMA_NO_CLOUD"'}
+            # ollama_rocm_no_cloud: a bool only
+            - {no_cloud: true, error: ""}
+            - {no_cloud: false, error: ""}
+            - {no_cloud: "false", error: 'ollama_rocm_no_cloud must be true or false, not "false"'}
+            - {no_cloud: "yes", error: "ollama_rocm_no_cloud must be true or false"}
+            - {no_cloud: 0, error: "ollama_rocm_no_cloud must be true or false, not 0"}
+            - {no_cloud: 1, error: "ollama_rocm_no_cloud must be true or false"}
+            - {no_cloud: null, error: "ollama_rocm_no_cloud must be true or false, not null"}
+            - {no_cloud: "", error: "ollama_rocm_no_cloud must be true or false"}
             - {extra_env: {"1BAD": "x"}, error: 'entry "1BAD"'}
             - {extra_env: {"BAD KEY": "x"}, error: 'entry "BAD KEY"'}
             - {extra_env: {"BAD-KEY": "x"}, error: 'entry "BAD-KEY"'}
@@ -216,6 +246,40 @@
             - {extra_env: {FOO: "a\n"}, error: 'entry "FOO"'}
             - {extra_env: {"FOO\n": "x"}, error: 'entry "FOO\n"'}
             - {extra_env: {X: [1]}, error: 'entry "X"'}
+            # keep-alive: Ollama durations only
+            - {keep_alive: "5m", error: ""}
+            - {keep_alive: "-1", error: ""}
+            - {keep_alive: -1, error: ""}
+            - {keep_alive: 0, error: ""}
+            - {keep_alive: 300, error: ""}
+            - {keep_alive: "30s", error: ""}
+            - {keep_alive: "500ms", error: ""}
+            - {keep_alive: "24h", error: ""}
+            - {keep_alive: "5m\nExecStartPre=/bin/id", error: 'ollama_rocm_keep_alive must be -1, 0, or a whole number'}
+            - {keep_alive: "5m\n", error: 'not "5m\n"'}
+            - {keep_alive: "5m ", error: "ollama_rocm_keep_alive must be"}
+            - {keep_alive: " 5m", error: "ollama_rocm_keep_alive must be"}
+            - {keep_alive: "5 m", error: "ollama_rocm_keep_alive must be"}
+            - {keep_alive: "", error: "ollama_rocm_keep_alive must be"}
+            - {keep_alive: "1d", error: "ollama_rocm_keep_alive must be"}
+            - {keep_alive: "-5m", error: "ollama_rocm_keep_alive must be"}
+            - {keep_alive: "1.5h", error: "ollama_rocm_keep_alive must be"}
+            - {keep_alive: "%h", error: "ollama_rocm_keep_alive must be"}
+            - {keep_alive: true, error: "ollama_rocm_keep_alive must be"}
+            - {keep_alive: null, error: "ollama_rocm_keep_alive must be"}
+            - {keep_alive: [5m], error: "ollama_rocm_keep_alive must be"}
+            # loaded models: an integer from 1 to 8 (the inventory sets 2)
+            - {max_loaded: 1, error: ""}
+            - {max_loaded: 2, error: ""}
+            - {max_loaded: 8, error: ""}
+            - {max_loaded: 0, error: "ollama_rocm_max_loaded_models must be an integer from 1 to 8, not 0"}
+            - {max_loaded: 9, error: "ollama_rocm_max_loaded_models must be an integer from 1 to 8, not 9"}
+            - {max_loaded: -1, error: "ollama_rocm_max_loaded_models must be"}
+            - {max_loaded: "2", error: 'ollama_rocm_max_loaded_models must be an integer from 1 to 8, not "2"'}
+            - {max_loaded: "2\nExecStartPre=/bin/id", error: "ollama_rocm_max_loaded_models must be"}
+            - {max_loaded: 2.0, error: "ollama_rocm_max_loaded_models must be"}
+            - {max_loaded: true, error: "ollama_rocm_max_loaded_models must be an integer from 1 to 8, not true"}
+            - {max_loaded: null, error: "ollama_rocm_max_loaded_models must be"}
             # pull bounds
             - {timeout: "7200", kill_after: 1, error: ""}
             - {timeout: 0, error: "ollama_rocm_pull_timeout must be a positive whole number"}
@@ -226,6 +290,44 @@
             - {kill_after: 0, error: "ollama_rocm_pull_kill_after must be a positive whole number"}
             - {kill_after: "30\n", error: "ollama_rocm_pull_kill_after must be a positive whole number"}
             - {timeout: "7200\n", error: "ollama_rocm_pull_timeout must be"}
+            # extra policy ports (CONTRACTS §12.15.7)
+            - {extra_ports: [], error: ""}
+            - {extra_ports: [11510], error: ""}
+            - {extra_ports: [11510, 1024, 65535, 30000], error: ""}
+            # lockout guard: SSH or any privileged port would be reachable from ai-box only
+            - {extra_ports: [22], error: "ollama_rocm_policy_extra_ports entry 22 refused"}
+            - {extra_ports: [11510, 22], error: "ollama_rocm_policy_extra_ports entry 22 refused"}
+            - {extra_ports: [1023], error: "ollama_rocm_policy_extra_ports entry 1023 refused"}
+            - {extra_ports: [1], error: "ollama_rocm_policy_extra_ports entry 1 refused"}
+            - {extra_ports: 11510, error: "ollama_rocm_policy_extra_ports must be a list"}
+            - {extra_ports: "11510", error: "ollama_rocm_policy_extra_ports must be a list"}
+            - {extra_ports: {11510: true}, error: "ollama_rocm_policy_extra_ports must be a list"}
+            - {extra_ports: ["11510"], error: 'ollama_rocm_policy_extra_ports entry "11510" refused'}
+            - {extra_ports: [0], error: "ollama_rocm_policy_extra_ports entry 0 refused"}
+            - {extra_ports: [-1], error: "ollama_rocm_policy_extra_ports entry -1 refused"}
+            - {extra_ports: [65536], error: "ollama_rocm_policy_extra_ports entry 65536 refused"}
+            - {extra_ports: [11510.0], error: "ollama_rocm_policy_extra_ports entry 11510.0 refused"}
+            - {extra_ports: [true], error: "ollama_rocm_policy_extra_ports entry true refused"}
+            - {extra_ports: [null], error: "ollama_rocm_policy_extra_ports entry null refused"}
+            - {extra_ports: [11510, 11510], error: "ollama_rocm_policy_extra_ports entry 11510 refused"}
+            - {extra_ports: [11434], error: "not the Ollama (11434) or gate (11500) port"}
+            - {extra_ports: [11500], error: "ollama_rocm_policy_extra_ports entry 11500 refused"}
+            # privileged policy ports (CONTRACTS §12.17.1): allowlist {445} only
+            - {privileged_ports: [], error: ""}
+            - {privileged_ports: [445], extra_ports: [11510], error: ""}
+            - {privileged_ports: 445, error: "ollama_rocm_policy_privileged_ports must be a list"}
+            - {privileged_ports: "445", error: "ollama_rocm_policy_privileged_ports must be a list"}
+            - {privileged_ports: [22], error: "ollama_rocm_policy_privileged_ports entry 22 refused"}
+            - {privileged_ports: [139], error: "ollama_rocm_policy_privileged_ports entry 139 refused"}
+            - {privileged_ports: [446], error: "ollama_rocm_policy_privileged_ports entry 446 refused"}
+            - {privileged_ports: [11510], error: "ollama_rocm_policy_privileged_ports entry 11510 refused"}
+            - {privileged_ports: ["445"], error: 'ollama_rocm_policy_privileged_ports entry "445" refused'}
+            - {privileged_ports: [445.0], error: "ollama_rocm_policy_privileged_ports entry 445.0 refused"}
+            - {privileged_ports: [true], error: "ollama_rocm_policy_privileged_ports entry true refused"}
+            - {privileged_ports: [445, 445], error: "ollama_rocm_policy_privileged_ports entry 445 refused"}
+            - {privileged_ports: [445], extra_ports: [445], error: "ollama_rocm_policy_privileged_ports entry 445 refused"}
+            # the extra_ports guard is unchanged: 445 is still refused there
+            - {extra_ports: [445], error: "ollama_rocm_policy_extra_ports entry 445 refused"}
             # model names
             - {model: "qwen3:8b", error: ""}
             - {model: "registry.ollama.ai/library/qwen3:8b", error: ""}
@@ -238,6 +340,38 @@
             # surrounding whitespace is trimmed before the check (and the pull uses the trimmed name)
             - {model: " qwen3:8b\n", error: ""}
             - {model: "qwen3\nx", error: "isn't a model name"}
+            # a leading - would reach `ollama pull` as an option
+            - {model: "--insecure", error: 'ai_gpu_model "--insecure" isn''t a model name'}
+            # ollama_rocm_extra_models (CONTRACTS §12.22): the same name form, at most 8, unique, not ai_gpu_model
+            - {extra_models: [], error: ""}
+            - {model: "qwen3.5:9b", extra_models: ["nomic-embed-text:v1.5"], error: ""}
+            - extra_models: ["nomic-embed-text:v1.5", "hf.co/bartowski/x-GGUF:Q4_K_M", "registry.ollama.ai/library/all-minilm"]
+              error: ""
+            - {extra_models: [a, b, c, d, e, f, g, h], error: ""}
+            - {extra_models: [a, b, c, d, e, f, g, h, i], error: "ollama_rocm_extra_models must be a list of at most 8"}
+            - {extra_models: "nomic-embed-text:v1.5", error: "ollama_rocm_extra_models must be a list"}
+            - {extra_models: {nomic-embed-text: v1.5}, error: "ollama_rocm_extra_models must be a list"}
+            - {extra_models: null, error: "ollama_rocm_extra_models must be a list"}
+            - {extra_models: 1, error: "ollama_rocm_extra_models must be a list"}
+            - {extra_models: ["a b"], error: 'ollama_rocm_extra_models entry "a b" isn''t a model name'}
+            - {extra_models: [qwen3, "../x"], error: 'ollama_rocm_extra_models entry "../x" isn''t'}
+            - {extra_models: ["qwen3@sha256:0123abcd"], error: 'ollama_rocm_extra_models entry "qwen3@sha256:0123abcd" isn''t'}
+            - {extra_models: ["registry.local:5000/ns/m:1"], error: 'ollama_rocm_extra_models entry "registry.local:5000/ns/m:1" isn''t'}
+            - {extra_models: [" qwen3"], error: 'ollama_rocm_extra_models entry " qwen3" isn''t'}
+            - {extra_models: ["qwen3\n"], error: 'ollama_rocm_extra_models entry "qwen3\n" isn''t'}
+            - {extra_models: [""], error: 'ollama_rocm_extra_models entry "" isn''t'}
+            - {extra_models: ["-v"], error: 'ollama_rocm_extra_models entry "-v" isn''t'}
+            - {extra_models: [null], error: "ollama_rocm_extra_models entry null isn't"}
+            - {extra_models: [1], error: "ollama_rocm_extra_models entry 1 isn't"}
+            - {extra_models: [[qwen3]], error: 'ollama_rocm_extra_models entry ["qwen3"] isn''t'}
+            - {model: "qwen3.5:9b", extra_models: ["qwen3.5:9b"], error: 'lists ai_gpu_model ("qwen3.5:9b") again'}
+            # equal once compared as /api/tags lists them (ai_gpu_model is trimmed first)
+            - {model: qwen3, extra_models: [all-minilm, "registry.ollama.ai/library/qwen3:latest"], error: "lists ai_gpu_model"}
+            - {model: " qwen3:8b\n", extra_models: ["QWEN3:8b"], error: 'lists ai_gpu_model ("qwen3:8b") again'}
+            - {extra_models: [qwen3, qwen3], error: "ollama_rocm_extra_models lists a model twice"}
+            - {model: "qwen3.5:9b", extra_models: [all-minilm, x, all-minilm], error: "lists a model twice"}
+            - {extra_models: [qwen3, "library/qwen3:latest"], error: "lists a model twice"}
+            - {extra_models: ["Qwen3:8B", "qwen3:8b"], error: "lists a model twice"}
             # the backend's library in the installed tree (tasks/backend_installed.yml)
             - {tasks: backend_installed.yml, lib: "{{ t }}/lib-ok", error: ""}
             - {tasks: backend_installed.yml, lib: "{{ t }}/lib-novulkan", error: "Ollama would fall back to the CPU"}
@@ -263,6 +397,79 @@
             - [library/qwen3, "qwen3:latest"]
             - [registry.ollama.ai/someone/m, "someone/m:latest"]
             - [hf.co/bartowski/x-GGUF:Q4_K_M, "hf.co/bartowski/x-gguf:q4_k_m"]
+
+        # main.yml includes pull.yml only when ollama_rocm_pull_models isn't empty
+        - name: The GPU model is pulled only when set, ahead of ollama_rocm_extra_models
+          vars:
+            ai_gpu_model: "{{ item.0 }}"
+            ollama_rocm_extra_models: "{{ item.1 }}"
+          ansible.builtin.assert:
+            that:
+              - ollama_rocm_pull_models == item.2
+              - ollama_rocm_pull_listed == item.3
+            fail_msg: "{{ item.0 | to_json }} + {{ item.1 | to_json }} -> {{ ollama_rocm_pull_models | to_json }} / {{ ollama_rocm_pull_listed | to_json }}"
+            quiet: true
+          loop:
+            - [null, [], [], []]
+            - ["", [], [], []]
+            - [" ", [], [], []]
+            - ["qwen3.5:9b", [], ["qwen3.5:9b"], ["qwen3.5:9b"]]
+            - [null, ["nomic-embed-text:v1.5"], ["nomic-embed-text:v1.5"], ["nomic-embed-text:v1.5"]]
+            - [" Qwen3 ", [library/all-minilm, "HF.co/a/b:Q4"], [Qwen3, library/all-minilm, "HF.co/a/b:Q4"],
+               ["qwen3:latest", "all-minilm:latest", "hf.co/a/b:q4"]]
+
+        # main.yml's "Pull the models" task, its `when:` verbatim, with the include swapped for a
+        # recorder: run for each case, it must fire exactly for the cases that have something to pull.
+        - name: Copy main.yml's pull gate with a recorder in place of the include
+          vars:
+            render_test_gate: >-
+              {{ lookup('file', '../tasks/main.yml') | from_yaml | selectattr('name', 'defined')
+                 | selectattr('name', 'eq', 'Pull the models') | list }}
+          block:
+            - name: Main.yml has one "Pull the models" task, and it includes pull.yml
+              ansible.builtin.assert:
+                that:
+                  - render_test_gate | length == 1
+                  - render_test_gate[0]['ansible.builtin.include_tasks'] | default('') == 'pull.yml'
+                  - render_test_gate[0].when is defined
+                quiet: true
+
+            - name: Write the gate with the recorder
+              ansible.builtin.copy:
+                content: >-
+                  {{ [render_test_gate[0] | dict2items | rejectattr('key', 'eq', 'ansible.builtin.include_tasks')
+                      | items2dict | combine({'ansible.builtin.set_fact':
+                        {'render_test_gate_runs': '{{ render_test_gate_runs + [gate_case_index] }}'}})] | to_nice_yaml }}
+                dest: "{{ t }}/gate.yml"
+                mode: "0644"
+
+        - name: No gate has fired yet
+          ansible.builtin.set_fact:
+            render_test_gate_runs: []
+
+        - name: Run the gate
+          ansible.builtin.include_tasks: "{{ t }}/gate.yml"
+          vars:
+            ai_gpu_model: "{{ gate_case.0 }}"
+            ollama_rocm_extra_models: "{{ gate_case.1 }}"
+          loop:
+            - [null, []]
+            - ["", []]
+            - [" ", []]
+            - ["qwen3.5:9b", []]
+            - [null, ["nomic-embed-text:v1.5"]]
+            - ["", ["nomic-embed-text:v1.5"]]
+            - ["qwen3.5:9b", ["nomic-embed-text:v1.5"]]
+          loop_control:
+            loop_var: gate_case
+            index_var: gate_case_index
+
+        - name: The gate fires when ai_gpu_model or an extra model is set, and only then
+          ansible.builtin.assert:
+            that:
+              - render_test_gate_runs == [3, 4, 5, 6]
+            fail_msg: "the pull gate fired for cases {{ render_test_gate_runs | to_json }}, expected [3, 4, 5, 6]"
+            quiet: true
 
         # --- tasks/pull.yml against a stub /api/tags: pull only what isn't listed
         - name: Stub server, its model list and the recording client
@@ -334,9 +541,15 @@
             - {model: someone/m, pulls: []}
             - {model: "qwen3:14b", pulls: ["pull qwen3:14b"]}
             - {model: qwen3, pulls: ["pull qwen3"]}
+            # ollama_rocm_extra_models: the same check per model, in order; ai_gpu_model only when set
+            - {model: "qwen3:8b", extra: ["nomic-embed-text:v1.5", llama3.2], pulls: ["pull nomic-embed-text:v1.5"]}
+            - {model: "qwen3:14b", extra: ["nomic-embed-text:v1.5"], pulls: ["pull qwen3:14b", "pull nomic-embed-text:v1.5"]}
+            - {model: "qwen3:14b", extra: [someone/m, "HF.co/bartowski/x-GGUF:Q4_K_M"], pulls: ["pull qwen3:14b"]}
+            - {extra: ["nomic-embed-text:v1.5", all-minilm], pulls: ["pull nomic-embed-text:v1.5", "pull all-minilm"]}
+            - {model: "", extra: ["registry.ollama.ai/library/llama3.2:latest", "qwen3:8b"], pulls: []}
           loop_control:
             loop_var: case
-            label: "{{ case.model }}"
+            label: "{{ case.model | default(none) }} + {{ case.extra | default([]) }}"
 
         # --- the bounded pull (tasks/pull_model.yml) with stand-in clients
         - name: Pull with a client that succeeds, one that fails and one that hangs
@@ -363,6 +576,139 @@
                   'rule family="ipv6" source NOT address="2001:db8::10" port port="11500" protocol="tcp" reject']
             fail_msg: "{{ ollama_rocm_rich_rules }}"
             quiet: true
+
+        - name: Extra policy ports get the same per-family rules, after the Ollama and gate ports
+          vars:
+            ollama_rocm_policy_extra_ports: [11510]
+          ansible.builtin.assert:
+            that:
+              - ollama_rocm_firewall_ports == [11434, 11500, 11510]
+              - ollama_rocm_rich_rules == [
+                  'rule family="ipv4" source NOT address="192.0.2.10" port port="11434" protocol="tcp" reject',
+                  'rule family="ipv4" source NOT address="192.0.2.10" port port="11500" protocol="tcp" reject',
+                  'rule family="ipv4" source NOT address="192.0.2.10" port port="11510" protocol="tcp" reject',
+                  'rule family="ipv6" source NOT address="2001:db8::10" port port="11434" protocol="tcp" reject',
+                  'rule family="ipv6" source NOT address="2001:db8::10" port port="11500" protocol="tcp" reject',
+                  'rule family="ipv6" source NOT address="2001:db8::10" port port="11510" protocol="tcp" reject']
+            fail_msg: "{{ ollama_rocm_rich_rules | to_json }}"
+            quiet: true
+
+        - name: Remember the default rule set and the two rules 11510 adds
+          ansible.builtin.set_fact:
+            render_test_rules_base: "{{ ollama_rocm_rich_rules }}"
+            render_test_new_11510:
+              - rule family="ipv4" source NOT address="192.0.2.10" port port="11510" protocol="tcp" reject
+              - rule family="ipv6" source NOT address="2001:db8::10" port port="11510" protocol="tcp" reject
+
+        - name: Adding 11510 to a converged policy adds its two rules; dropping it again removes them
+          vars:
+            ollama_rocm_policy_extra_ports: "{{ item.ports }}"
+            ollama_rocm_policy_current:
+              priority: "-100"
+              target: CONTINUE
+              ingress: [ANY]
+              egress: [HOST]
+              rules: "{{ item.current }}"
+          ansible.builtin.assert:
+            that:
+              - ollama_rocm_policy_ops == item.ops
+            fail_msg: "{{ ollama_rocm_policy_ops | to_json }}"
+            quiet: true
+          loop:
+            # [] -> [11510]
+            - ports: [11510]
+              current: "{{ render_test_rules_base }}"
+              ops: "{{ render_test_new_11510 | map('regex_replace', '^', '--add-rich-rule=') | list }}"
+            # [11510] -> []
+            - ports: []
+              current: "{{ render_test_rules_base + render_test_new_11510 }}"
+              ops: "{{ render_test_new_11510 | map('regex_replace', '^', '--remove-rich-rule=') | list }}"
+            # [11510] converged
+            - ports: [11510]
+              current: "{{ render_test_rules_base + render_test_new_11510 }}"
+              ops: []
+          loop_control:
+            label: "{{ item.ports | to_json }}"
+
+        - name: With 11510 listed, a zone rule on it counts as legacy; lookalikes (11511, 115100, 211510) don't
+          vars:
+            ollama_rocm_policy_extra_ports: [11510]
+            ollama_rocm_zone_rules:
+              results:
+                - item: public
+                  stdout_lines:
+                    - rule family="ipv4" source address="192.0.2.0/24" port port="11510" protocol="tcp" accept
+                    - rule family="ipv4" source address="192.0.2.0/24" port port="11511" protocol="tcp" accept
+                    - rule family="ipv4" source address="192.0.2.0/24" port port="115100" protocol="tcp" accept
+                    - rule family="ipv4" source address="192.0.2.0/24" port port="211510" protocol="tcp" accept
+          ansible.builtin.assert:
+            that:
+              - ollama_rocm_zone_stale | map(attribute='1') | list
+                == ['rule family="ipv4" source address="192.0.2.0/24" port port="11510" protocol="tcp" accept']
+            fail_msg: "{{ ollama_rocm_zone_stale | to_json }}"
+            quiet: true
+
+        - name: With the inventory's [11510], [] privileged ports gives 6 rules and [445] gives 8
+          vars:
+            ollama_rocm_policy_extra_ports: [11510]
+            ollama_rocm_policy_privileged_ports: "{{ item.privileged }}"
+          ansible.builtin.assert:
+            that:
+              - ollama_rocm_rich_rules | length == item.count
+              - ollama_rocm_rich_rules == (['ipv4', 'ipv6'] | product(item.ports)
+                  | map('join', ' ') | map('regex_replace', '^ipv4 (.*)$',
+                      'rule family="ipv4" source NOT address="192.0.2.10" port port="\\1" protocol="tcp" reject')
+                  | map('regex_replace', '^ipv6 (.*)$',
+                      'rule family="ipv6" source NOT address="2001:db8::10" port port="\\1" protocol="tcp" reject')
+                  | list)
+            fail_msg: "{{ ollama_rocm_rich_rules | to_json }}"
+            quiet: true
+          loop:
+            - {privileged: [], count: 6, ports: ["11434", "11500", "11510"]}
+            - {privileged: [445], count: 8, ports: ["11434", "11500", "11510", "445"]}
+          loop_control:
+            label: "{{ item.privileged | to_json }}"
+
+        - name: Adding 445 adds its two rules; dropping it removes them; a lookalike zone rule is left alone
+          vars:
+            ollama_rocm_policy_extra_ports: [11510]
+            rules445:
+              - rule family="ipv4" source NOT address="192.0.2.10" port port="445" protocol="tcp" reject
+              - rule family="ipv6" source NOT address="2001:db8::10" port port="445" protocol="tcp" reject
+            ollama_rocm_policy_current:
+              priority: "-100"
+              target: CONTINUE
+              ingress: [ANY]
+              egress: [HOST]
+              rules: "{{ render_test_rules_base + render_test_new_11510 + (rules445 if item.had445 else []) }}"
+            ollama_rocm_policy_privileged_ports: "{{ item.privileged }}"
+            ollama_rocm_zone_rules:
+              results:
+                - item: public
+                  stdout_lines:
+                    - rule family="ipv4" source address="192.0.2.0/24" port port="445" protocol="tcp" accept
+                    - rule family="ipv4" source address="192.0.2.0/24" port port="4450" protocol="tcp" accept
+                    - rule family="ipv4" source address="192.0.2.0/24" port port="1445" protocol="tcp" accept
+          ansible.builtin.assert:
+            that:
+              - ollama_rocm_policy_ops == item.ops
+              - ollama_rocm_zone_stale | map(attribute='1') | list
+                == (['rule family="ipv4" source address="192.0.2.0/24" port port="445" protocol="tcp" accept']
+                    if 445 in item.privileged else [])
+            fail_msg: "{{ ollama_rocm_policy_ops | to_json }} / {{ ollama_rocm_zone_stale | to_json }}"
+            quiet: true
+          loop:
+            - privileged: [445]
+              had445: false
+              ops: "{{ rules445 | map('regex_replace', '^', '--add-rich-rule=') | list }}"
+            - privileged: []
+              had445: true
+              ops: "{{ rules445 | map('regex_replace', '^', '--remove-rich-rule=') | list }}"
+            - privileged: [445]
+              had445: true
+              ops: []
+          loop_control:
+            label: "{{ item.privileged | to_json }} (445 present: {{ item.had445 }})"
 
         - name: Policy ops for a new, a converged, a drifted and a runtime (no priority/target) policy
           vars:

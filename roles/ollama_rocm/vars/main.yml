@@ -54,16 +54,28 @@ ollama_rocm_env_key_re: '^[A-Za-z_][A-Za-z0-9_]*\Z'
 # % (specifiers) and every control character (NUL ends the line for systemd: it injected a directive).
 ollama_rocm_env_value_bad_re: '[\s"''\\%\x00-\x1f\x7f]'
 ollama_rocm_seconds_re: '^[1-9][0-9]*\Z'
+# OLLAMA_KEEP_ALIVE: -1 (forever), 0 (unload at once), or whole seconds with an optional unit.
+ollama_rocm_keep_alive_re: '^(-1|0|[0-9]+(ms|s|m|h)?)\Z'
 # The role's own Environment= lines; ollama_rocm_extra_env may not set these (asserted).
-ollama_rocm_env_reserved: [HOME, OLLAMA_HOST, OLLAMA_KEEP_ALIVE, OLLAMA_MAX_LOADED_MODELS, OLLAMA_MODELS]
+ollama_rocm_env_reserved: [HOME, OLLAMA_HOST, OLLAMA_KEEP_ALIVE, OLLAMA_MAX_LOADED_MODELS, OLLAMA_MODELS, OLLAMA_NO_CLOUD]
 
-# ai_gpu_model as written (null/empty = none), and the form Ollama's /api/tags lists it in:
-# lower case, without the default registry and namespace, with a tag (latest when none is given).
+# ai_gpu_model as written (null/empty = none). ollama_rocm_extra_models entries must match the same
+# regex; they aren't trimmed.
 ollama_rocm_model: "{{ ai_gpu_model | default('', true) | string | trim }}"
 ollama_rocm_model_re: '^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*){0,2}(:[A-Za-z0-9_][A-Za-z0-9._-]*)?\Z'
-ollama_rocm_model_short: >-
-  {{ ollama_rocm_model | lower | regex_replace('^registry[.]ollama[.]ai/', '') | regex_replace('^library/', '') }}
-ollama_rocm_model_listed: "{{ ollama_rocm_model_short if ':' in ollama_rocm_model_short else ollama_rocm_model_short ~ ':latest' }}"
+# The most ollama_rocm_extra_models may list (asserted). Each one is up to ollama_rocm_pull_timeout
+# of download on a converge.
+ollama_rocm_extra_models_max: 8
+# Every model the role pulls, as written: ai_gpu_model when set, then ollama_rocm_extra_models.
+ollama_rocm_pull_models: "{{ ([ollama_rocm_model] if ollama_rocm_model | length > 0 else []) + ollama_rocm_extra_models }}"
+# The same names, in the same order, in the form Ollama's /api/tags lists them: lower case, without
+# the default registry and namespace, with a tag (latest when none is given). Duplicates and the
+# "already pulled" check compare in this form.
+ollama_rocm_pull_listed: >-
+  {{ ollama_rocm_pull_models | map('lower') | map('regex_replace', '^registry[.]ollama[.]ai/', '')
+     | map('regex_replace', '^library/', '') | map('regex_replace', '^([^:]*)\Z', '\1:latest') | list }}
+# ai_gpu_model in that form ('' when unset).
+ollama_rocm_model_listed: "{{ ollama_rocm_pull_listed[0] if ollama_rocm_model | length > 0 else '' }}"
 # package_facts' result; the tests override it.
 ollama_rocm_installed_packages: "{{ ansible_facts.packages | default({}) }}"
 ollama_rocm_listen: "{{ gaming_pc_tailnet_ip }}:{{ ollama_rocm_port }}"
@@ -81,9 +93,11 @@ ollama_rocm_ai_box_addrs_ok: >-
      and ai_box_tailnet_ip6 | default('') is match(ollama_rocm_ipv6_re)
      and ':' in ai_box_tailnet_ip6 | default('') }}
 ollama_rocm_policy_priority: -100
-ollama_rocm_firewall_ports:
-  - "{{ ollama_rocm_port }}"
-  - "{{ ollama_rocm_gate_port }}"
+# The only ports below 1024 that ollama_rocm_policy_privileged_ports may list. Adding one is a
+# contract change (CONTRACTS §12.17.1); 22 must never be here (it would lock SSH and Ansible out).
+ollama_rocm_privileged_allowlist: [445]
+ollama_rocm_firewall_ports: >-
+  {{ [ollama_rocm_port, ollama_rocm_gate_port] + ollama_rocm_policy_extra_ports + ollama_rocm_policy_privileged_ports }}
 # One REJECT per port and family for every source except ai-box. Each matches only its own tcp port.
 # Spelled exactly as firewalld prints them (--list-rich-rules), so they compare as strings.
 ollama_rocm_rich_rules: >-

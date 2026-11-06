@@ -34,7 +34,8 @@ class _BrokerRequestHandler(web.RequestHandler):
     Requests the HTTP parser rejects (`GET *`, `GET host:80`, bad headers) never reach the app, so the
     app's middleware and response hooks can't touch them. aiohttp logs each one as ERROR with a
     traceback and answers text/plain. Here a client-caused parse error (4xx HttpProcessingError) is one
-    WARNING line and a JSON `{"error"}` 400 with `X-Backend: broker`. Everything else (5xx) keeps
+    WARNING line (the error class only, never request bytes) and a JSON `{"error"}` 400 with
+    `X-Backend: broker`. Everything else (5xx) keeps
     aiohttp's handling and only gains the header.
     """
 
@@ -49,7 +50,9 @@ class _BrokerRequestHandler(web.RequestHandler):
             detail = " ".join(str(exc.message).split()) or type(exc).__name__
             # A non-HTTP first line (TLS, scanners) is noise: debug, as aiohttp itself does.
             level = logging.DEBUG if isinstance(exc, BadHttpMethod) else logging.WARNING
-            log.log(level, "unparseable request from %s: %s: %s", request.remote, type(exc).__name__, detail)
+            # The parser's message quotes the offending bytes, which can be prompt text (a malformed
+            # chunked body): the log gets only the error class. The client still gets the detail.
+            log.log(level, "unparseable request from %s: %s (request bytes not logged)", request.remote, type(exc).__name__)
             resp: web.StreamResponse = web.json_response({"error": f"gpu-broker: bad request: {detail}"}, status=status)
             resp.force_close()
         else:

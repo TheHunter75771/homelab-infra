@@ -3,7 +3,7 @@
 # its tailnet IPv4 only, reachable (firewalld policy) only from ai-box's tailnet addresses.
 # Host vars (inventory/host_vars/<gaming PC>.yml, git-ignored): gaming_pc_tailnet_ip,
 # ai_box_tailnet_ip, ai_box_tailnet_ip6. Version + sha256: versions.yml -> ollama_release.
-# ai_gpu_model (Noah's choice) has NO default: unset means nothing is pulled.
+# ai_gpu_model (Noah's choice) has NO default: unset means it isn't pulled.
 
 # Install layout: <prefix>/bin/ollama and <prefix>/lib/ollama (what the upstream installer uses).
 ollama_rocm_prefix: /usr/local
@@ -18,8 +18,23 @@ ollama_rocm_models_dir: "{{ ollama_rocm_home }}/models"
 ollama_rocm_port: 11434
 # gpu-gate's port (role gpu_gate). Restricted by this role's firewalld rules too.
 ollama_rocm_gate_port: 11500
+# More TCP ports on this PC that only ai-box may reach, guarded by the same firewalld policy as the
+# two above (e.g. [11510] for the AI Control host agent, CONTRACTS §12.15.7). Ints 1024-65535 (never
+# 22: that would lock SSH and Ansible out for everyone but ai-box), no
+# duplicates, not the Ollama or gate port (asserted). Removing a port removes its rules.
+ollama_rocm_policy_extra_ports: []
+# Ports below 1024 that only ai-box may reach, from a fixed allowlist (ollama_rocm_privileged_allowlist
+# in vars/main.yml; today only 445 for the AI Library's Samba share, CONTRACTS §12.17.1). Never 22.
+# No duplicates, no overlap with the ports above (asserted). Removing a port removes its rules.
+ollama_rocm_policy_privileged_ports: []
+# Rendered into the unit as OLLAMA_KEEP_ALIVE / OLLAMA_MAX_LOADED_MODELS (asserted): keep_alive is -1,
+# 0 or a whole number with an optional ms/s/m/h unit; max_loaded_models an integer from 1 to 8.
 ollama_rocm_keep_alive: 5m
 ollama_rocm_max_loaded_models: 1
+# OLLAMA_NO_CLOUD=1 in the unit (CONTRACTS §12.23, Reviewer N's N-1): without it a chat or show naming a
+# `*:cloud` model is signed with the server's key and sent to ollama.com. A bool (asserted); false
+# leaves the line out. ollama_rocm_extra_env can't set it either way (reserved).
+ollama_rocm_no_cloud: true
 # GPU backend (docs/CONTRACTS.md §12.9, "§12.7 risk CONFIRMED live"): vulkan | rocm. Noah chose vulkan:
 # ROCm compute runs on /dev/kfd user queues, which DRM fdinfo never accounts, so gpu-gate's
 # ollama_share stayed 0; under Vulkan (Mesa RADV) drm-engine-compute advances. rocm is ~9% faster.
@@ -27,8 +42,13 @@ ollama_backend: vulkan
 # Extra Environment= lines for ollama.service, e.g. {HSA_OVERRIDE_GFX_VERSION: "11.0.2"}. Empty by default.
 # Merged over the backend's own variables (a key here wins).
 ollama_rocm_extra_env: {}
-# Upper bound for one `ollama pull` of ai_gpu_model (seconds). A pull that runs longer is killed and
+# Upper bound for one `ollama pull` (seconds). A pull that runs longer is killed and
 # fails the run; the partial download is resumed by the next run.
 ollama_rocm_pull_timeout: 7200
 # Grace after the TERM at the limit before the client is KILLed (seconds).
 ollama_rocm_pull_kill_after: 30
+# More models to pull besides ai_gpu_model (CONTRACTS §12.22), e.g. [nomic-embed-text:v1.5] for the
+# broker's embed alias. Same name form as ai_gpu_model, at most 8, no duplicates and not ai_gpu_model
+# itself (all compared as /api/tags lists them; asserted). Each is pulled like ai_gpu_model: only when
+# it isn't listed, bounded by the two settings above. Removing one doesn't delete it.
+ollama_rocm_extra_models: []

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
+
+IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
 DEFAULTS: dict[str, Any] = {
     "listen_host": "0.0.0.0",
@@ -32,8 +36,19 @@ DEFAULTS: dict[str, Any] = {
     "shutdown_timeout": 10.0,
     "log_level": "INFO",
     "aliases": {},
+    # One fixed Ollama context (options.num_ctx) for alias requests to /api/chat and /api/generate on that
+    # backend, whatever the client asked for. null = the client's value passes through (Ollama reloads a
+    # loaded model whenever num_ctx changes; see README "Fixed context").
+    "gpu_num_ctx": None,
+    "cpu_num_ctx": None,
+    # TCP peer addresses allowed to use model management (pull, create, copy, delete, blobs) through the
+    # broker (CONTRACTS 12.23). Empty = nobody. /api/push is refused for everyone regardless.
+    "management_clients": [],
 }
 REQUIRED = ("gate_url", "gpu_url", "cpu_url")
+# gpu_num_ctx / cpu_num_ctx bounds: the range skill-drafter and voice-profile accept for their own num_ctx.
+NUM_CTX_MIN = 2048
+NUM_CTX_MAX = 262144
 
 
 class ConfigError(ValueError):
@@ -68,6 +83,13 @@ class Config:
     shutdown_timeout: float = DEFAULTS["shutdown_timeout"]
     log_level: str = DEFAULTS["log_level"]
     aliases: dict[str, Alias] = field(default_factory=dict)
+    management_clients: frozenset[IPAddress] = frozenset()
+    gpu_num_ctx: int | None = DEFAULTS["gpu_num_ctx"]
+    cpu_num_ctx: int | None = DEFAULTS["cpu_num_ctx"]
+
+    def num_ctx_for(self, backend: str) -> int | None:
+        """The context forced on alias generation requests sent to `backend`, or None (pass-through)."""
+        return self.gpu_num_ctx if backend == "gpu" else self.cpu_num_ctx
 
 
 def _url(raw: dict[str, Any], key: str) -> str:
@@ -84,6 +106,48 @@ def _number(raw: dict[str, Any], key: str, *, allow_none: bool = False, minimum:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value < minimum:
         raise ConfigError(f"{key} must be a number >= {minimum}")
     return float(value)
+
+
+def _num_ctx(raw: dict[str, Any], key: str) -> int | None:
+    """gpu_num_ctx / cpu_num_ctx: null, or an integer NUM_CTX_MIN-NUM_CTX_MAX (never a bool, float or string)."""
+    value = raw.get(key, DEFAULTS[key])
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not NUM_CTX_MIN <= value <= NUM_CTX_MAX:
+        raise ConfigError(f"{key} must be null or an integer {NUM_CTX_MIN}-{NUM_CTX_MAX}")
+    return value
+
+
+# One address, optionally with the single-host prefix (/32 or /128) and nothing else: no scope (%eth0),
+# no netmask form (/255.255.255.255), no whitespace.
+_CLIENT = re.compile(r"(?P<addr>[0-9A-Fa-f.:]+)(?:/(?P<prefix>[0-9]+))?")
+
+
+def _management_clients(raw: dict[str, Any]) -> frozenset[IPAddress]:
+    """management_clients: a list of IPv4/IPv6 literals, each optionally /32 or /128 (one host, never a range)."""
+    value = raw.get("management_clients", DEFAULTS["management_clients"])
+    if not isinstance(value, list):
+        raise ConfigError('management_clients must be a list of IP addresses (e.g. ["172.30.0.3"])')
+    out: set[IPAddress] = set()
+    for entry in value:
+        where = f"management_clients entry {entry!r}"
+        match = _CLIENT.fullmatch(entry) if isinstance(entry, str) else None
+        if match is None:
+            raise ConfigError(f"{where} must be one IPv4 or IPv6 address, optionally /32 or /128")
+        try:
+            addr = ipaddress.ip_address(match["addr"])
+        except ValueError:
+            raise ConfigError(f"{where} is not an IP address") from None
+        if match["prefix"] is not None and match["prefix"] != str(addr.max_prefixlen):
+            raise ConfigError(f"{where}: only a single host is allowed (/{addr.max_prefixlen}), never a range")
+        if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+            raise ConfigError(f"{where}: write the IPv4 form ({addr.ipv4_mapped})")
+        if addr.is_unspecified or addr.is_multicast or addr == ipaddress.IPv4Address("255.255.255.255"):
+            raise ConfigError(f"{where} can never be a client address")
+        if addr in out:
+            raise ConfigError(f"{where} is listed twice")
+        out.add(addr)
+    return frozenset(out)
 
 
 def from_dict(raw: dict[str, Any]) -> Config:
@@ -144,6 +208,9 @@ def from_dict(raw: dict[str, Any]) -> Config:
         shutdown_timeout=_number(raw, "shutdown_timeout") or 0.0,
         log_level=str(raw.get("log_level", DEFAULTS["log_level"])).upper(),
         aliases=aliases,
+        management_clients=_management_clients(raw),
+        gpu_num_ctx=_num_ctx(raw, "gpu_num_ctx"),
+        cpu_num_ctx=_num_ctx(raw, "cpu_num_ctx"),
     )
 
 

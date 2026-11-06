@@ -7,6 +7,9 @@
   "connect_timeout": 3,
   "gpu_first_byte_timeout": null,
   "failover_statuses": [500, 502, 503, 504],
+  "management_clients": [],
+  "gpu_num_ctx": 32768,
+  "cpu_num_ctx": null,
   "aliases": {
     "chat": {"gpu": "qwen3:8b", "cpu": "qwen3:1.7b"},
     "embed": {"gpu": "nomic-embed-text", "cpu": "nomic-embed-text"}

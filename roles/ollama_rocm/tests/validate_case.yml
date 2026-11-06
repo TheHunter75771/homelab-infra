@@ -10,9 +10,15 @@
         ollama_backend: "{{ case.backend | default('vulkan') }}"
         ollama_rocm_installed_packages: "{{ case.packages | default(render_test_packages) }}"
         ollama_rocm_extra_env: "{{ case.extra_env | default({}) }}"
+        ollama_rocm_no_cloud: "{{ case.no_cloud | default(true) }}"
+        ollama_rocm_keep_alive: "{{ case.keep_alive | default('5m') }}"
+        ollama_rocm_max_loaded_models: "{{ case.max_loaded | default(1) }}"
         ollama_rocm_pull_timeout: "{{ case.timeout | default(7200) }}"
         ollama_rocm_pull_kill_after: "{{ case.kill_after | default(30) }}"
         ai_gpu_model: "{{ case.model | default(none) }}"
+        ollama_rocm_extra_models: "{{ case.extra_models | default([]) }}"
+        ollama_rocm_policy_extra_ports: "{{ case.extra_ports | default([]) }}"
+        ollama_rocm_policy_privileged_ports: "{{ case.privileged_ports | default([]) }}"
         ollama_rocm_lib: "{{ case.lib | default(t ~ '/no-lib') }}"
 
     - name: Passed

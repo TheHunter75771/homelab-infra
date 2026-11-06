@@ -22,7 +22,7 @@
     fail_msg: The distro 'ollama' package is installed; remove it first (this role installs the pinned upstream release).
     quiet: true
 
-- name: Check the role's inputs (backend, extra env, pull bounds, model name)
+- name: Check the role's inputs (backend, extra env, ports, pull bounds, model names)
   ansible.builtin.include_tasks: validate.yml
 
 - name: Extraction tools are installed
@@ -117,9 +117,10 @@
     enabled: true
     state: started
 
-# --- Model (Noah's choice; no default, so an unset, null or empty ai_gpu_model pulls nothing)
-- name: Pull the GPU model
+# --- Models (Noah's choice; no default, so an unset, null or empty ai_gpu_model isn't pulled, and
+# nothing is when ollama_rocm_extra_models is empty too)
+- name: Pull the models
   ansible.builtin.include_tasks: pull.yml
   when:
-    - ollama_rocm_model | length > 0
+    - ollama_rocm_pull_models | length > 0
     - not ansible_check_mode

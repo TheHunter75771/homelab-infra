@@ -48,7 +48,12 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     logging.getLogger("gpu_broker").info(
-        "gpu-broker %s starting (%d aliases, status_ttl=%ss)", __version__, len(config.aliases), config.status_ttl
+        "gpu-broker %s starting (%d aliases, status_ttl=%ss, gpu_num_ctx=%s, cpu_num_ctx=%s)",
+        __version__,
+        len(config.aliases),
+        config.status_ttl,
+        config.gpu_num_ctx,
+        config.cpu_num_ctx,
     )
     asyncio.run(serve(config))
     return 0
