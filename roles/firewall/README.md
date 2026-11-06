@@ -6,10 +6,16 @@ UFW plus a DOCKER-USER guard (docs/CONTRACTS.md §7, module A).
 `vars/main.yml` builds the whole rule set (`firewall_rules`), each rule written exactly the way
 `ufw show added` prints it:
 - the inbound allow rules from **`firewall_allow_rules`** (group_vars, docs/CONTRACTS.md §12.2),
-  items `{port, proto, iface, from (optional), comment}`, rendered by `filter_plugins/homelab_ufw.py`
-  to `allow in on IFACE [from FROM ]to any port PORT proto PROTO comment 'homelab: COMMENT'`. The filter
+  items `{port, proto, iface, from (optional), to (optional), comment}`, rendered by
+  `filter_plugins/homelab_ufw.py` to `allow in on IFACE [from FROM ]to TO|any port PORT proto PROTO comment 'homelab: COMMENT'`.
+  `iface` may be left out only when both `from` and `to` are given; the rule is then
+  `allow from FROM to TO port PORT proto PROTO comment 'homelab: COMMENT'` and matches on any interface
+  (e.g. open-webui's pinned address to the `ai` bridge gateway, whose `br-<id>` name isn't pinned; §12.25).
+  `to` is one host address, IPv4 or IPv6, the same version as `from`: no range or network, not `any`,
+  never `0.0.0.0` or `::`, and not IPv4-mapped, loopback, broadcast, multicast or link-local. `from` may not be
+  any in disguise (`0.0.0.0/0`, `::/0`, `0.0.0.0`, `::`) or IPv4-mapped. The filter
   rejects unknown keys, a port outside 1-65535, a proto other than tcp/udp, whitespace or quotes in
-  iface/from, quotes in the comment and two rules that differ only in comment. The SSH-over-tailnet
+  iface/from/to, quotes in the comment and two rules that differ only in comment. The SSH-over-tailnet
   rule must be in the list (the role fails before touching UFW otherwise) and is always ordered first.
   No rule may use `wifi_iface`. The role default is an empty list, so a host group must declare its rules;
 - then the container-DNS rules (below), the same on every host.
@@ -81,5 +87,6 @@ Variables: `firewall_allow_rules` (group_vars); `docker_dns_ip` (group_vars); `l
 (optional) and whatever the allow rules reference, e.g. `lan_cidr` (network address), `gaming_pc_lan_ip`
 (host_vars).
 
-Tests: `python3 -m unittest discover -s roles/firewall/tests -v` (the filter, and the guard script
-rendered with and without `wifi_iface`).
+Tests: `python3 -m unittest discover -s roles/firewall/tests -v` (the filter; two runs of the role's own
+add/compare/prune expressions from `vars/main.yml` and `tasks/ufw.yml` against a model of UFW whose
+`show added` printer is ufw's `get_command`; the guard script rendered with and without `wifi_iface`).

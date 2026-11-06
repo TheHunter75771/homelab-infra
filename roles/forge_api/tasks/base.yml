@@ -1,0 +1,56 @@
+---
+# forge and library need Python 3.12+ (§12.11); F is stdlib only. Ubuntu 26.04 ships newer.
+- name: Base | Python version
+  ansible.builtin.command:
+    argv:
+      - "{{ forge_api_python }}"
+      - -I
+      - -c
+      - "import sys; print(sys.version_info >= (3, 12))"
+  register: forge_api_py
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Base | Python is 3.12 or newer
+  ansible.builtin.assert:
+    that: forge_api_py.rc == 0 and forge_api_py.stdout | trim == 'True'
+    fail_msg: "Need Python >= 3.12 at {{ forge_api_python }}: {{ forge_api_py.stdout | default('') }} {{ forge_api_py.stderr | default('') }}"
+    quiet: true
+
+# §12.25 / Lead decision F-4: the research gate's account, shared (one trust zone). Roles research_gate and
+# ai_library_share create the same account (§12.17.3), so this role sets EXACTLY their attributes and nothing
+# else (no comment, no groups/append): any extra attribute would make the roles undo each other on every run
+# (tests/test_forge_api.yml compares the three). "Not in docker" is a read-only check below, not a write.
+- name: Base | rgate group
+  ansible.builtin.group:
+    name: "{{ forge_api_user }}"
+    system: true
+
+- name: Base | rgate system user (no login, no home)
+  ansible.builtin.user:
+    name: "{{ forge_api_user }}"
+    group: "{{ forge_api_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: /nonexistent
+    create_home: false
+  register: forge_api_user_task
+  notify: Restart forge-api
+
+- name: Base | rgate's groups
+  ansible.builtin.command:
+    argv: [id, -Gn, "{{ forge_api_user }}"]
+  register: forge_api_user_groups
+  changed_when: false
+  check_mode: false
+  when: not (ansible_check_mode and forge_api_user_task is changed)
+
+- name: Base | rgate is in its own group only (never docker)
+  ansible.builtin.assert:
+    that: forge_api_user_groups.stdout.split() == [forge_api_user]
+    fail_msg: >-
+      {{ forge_api_user }} is in groups {{ forge_api_user_groups.stdout }}; it must be in {{ forge_api_user }} only
+      (never docker). Remove the extra membership by hand (gpasswd -d {{ forge_api_user }} <group>).
+    quiet: true
+  when: not (ansible_check_mode and forge_api_user_task is changed)

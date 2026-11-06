@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Fake ip: only `-o -4 addr show to <addr>/32`. knob `ip`: gw (default: the address with /24 on a bridge) |
+# none | wrongprefix (/16) | two (on two interfaces)
+set -euo pipefail
+: "${FA_TEST_DIR:?}"
+. "$(dirname "$0")/_knob"
+[ "$#" -eq 6 ] && [ "$1 $2 $3 $4 $5" = "-o -4 addr show to" ] && [[ "$6" == */32 ]] \
+  || { echo "fake ip: unexpected arguments: $*" >&2; exit 2; }
+a="${6%/32}"
+line() { printf '%s: %s    inet %s/%s brd x scope global %s\\       valid_lft forever preferred_lft forever\n' "$1" "$2" "$a" "$3" "$2"; }
+case "$(knob ip gw)" in
+  gw) line 5 br-c6f41836f3e0 24 ;;
+  none) ;;
+  wrongprefix) line 5 br-c6f41836f3e0 16 ;;
+  two) line 5 br-c6f41836f3e0 24; line 7 eno1 24 ;;
+  *) echo "fake ip: bad knob" >&2; exit 2 ;;
+esac

@@ -1,0 +1,20 @@
+# {{ ansible_managed }}
+# Skill Forge API F's listening socket (docs/CONTRACTS.md §12.25, module H8; Reviewer Q, Q-F3: socket
+# activation). systemd binds the ai bridge's gateway and holds the port whether or not the service runs, so no
+# local user can squat it; the service (forge-api.service) gets the socket through LISTEN_FDS. This is the unit
+# that is enabled (forge_api_enabled). FreeBind: the bridge address may not exist yet at boot (Docker creates it).
+# The port is privileged (Reviewer S): even if this socket were ever closed, only root could bind it.
+# IP filter (§12.25): it applies to the listening socket and to the connections accepted on it (the service's
+# own filter doesn't apply to an inherited socket). Only open-webui's pinned address {{ forge_api_webui_ip | trim }}
+# is allowed; the host itself ({{ forge_api_bind | trim }}, loopback), the LAN and the tailnet are dropped.
+[Unit]
+Description=Skill Forge API socket (open-webui only)
+Documentation=file://{{ forge_api_launcher }}
+
+[Socket]
+{% for p in forge_api_socket_lines %}
+{{ p }}
+{% endfor %}
+
+[Install]
+WantedBy=sockets.target

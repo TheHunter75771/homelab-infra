@@ -1,0 +1,76 @@
+---
+# /etc/forge-api: root:rgate 0750. The bearer token (§12.25: root-generated, 0640 root:rgate) is made ONCE on the
+# host from `secrets` (43 URL-safe characters, F's b64token alphabet) and never rotated by a converge: the
+# generator only runs while the file doesn't exist (`creates`), and it opens with O_CREAT|O_EXCL|O_NOFOLLOW, so it
+# can't replace a file or write through a planted symlink either. Noah pastes the token into module T's Valve
+# (README, "The token"). It never passes through Ansible: no task reads it, prints it or templates it, and every
+# task that touches it is no_log (a failure shows only "censored").
+- name: Token | the config directory is a real directory (before any write)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    forge_api_guard_dirs: ["{{ forge_api_config_dir }}"]
+
+- name: Token | config directory
+  ansible.builtin.file:
+    path: "{{ forge_api_config_dir }}"
+    state: directory
+    owner: "{{ forge_api_root_owner }}"
+    group: "{{ forge_api_group }}"
+    mode: "0750"
+
+- name: Token | generate it once (never rotated)
+  ansible.builtin.command:
+    argv:
+      - "{{ forge_api_python }}"
+      - -I
+      - -B
+      - -c
+      - |
+        import grp, os, secrets, sys
+        path, group = sys.argv[1], sys.argv[2]
+        gid = grp.getgrnam(group).gr_gid
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            os.fchown(fd, -1, gid)
+            os.fchmod(fd, 0o640)
+            os.write(fd, (secrets.token_urlsafe(32) + "\n").encode("ascii"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+      - "{{ forge_api_token_file }}"
+      - "{{ forge_api_group }}"
+    creates: "{{ forge_api_token_file }}"
+  no_log: true
+  notify: Restart forge-api
+
+- name: Token | stat it without following links (no checksum)
+  ansible.builtin.stat:
+    path: "{{ forge_api_token_file }}"
+    follow: false
+    get_checksum: false
+    get_mime: false
+  register: forge_api_token_stat
+  no_log: true
+
+# In check mode on a fresh host the generator didn't run: nothing to check yet.
+- name: Token | a regular file, never a symlink
+  ansible.builtin.assert:
+    that:
+      - forge_api_token_stat.stat.exists
+      - forge_api_token_stat.stat.isreg and not forge_api_token_stat.stat.islnk
+    fail_msg: "{{ forge_api_token_file }} must be a regular file (not a symlink or a directory). Remove it by hand; the next converge makes a new one."
+    quiet: true
+  no_log: true
+  when: not (ansible_check_mode and not forge_api_token_stat.stat.exists)
+
+- name: Token | owner, group and mode (content untouched)
+  ansible.builtin.file:
+    path: "{{ forge_api_token_file }}"
+    state: file
+    owner: "{{ forge_api_root_owner }}"
+    group: "{{ forge_api_group }}"
+    mode: "0640"
+    follow: false
+  no_log: true
+  notify: Restart forge-api
+  when: not (ansible_check_mode and not forge_api_token_stat.stat.exists)

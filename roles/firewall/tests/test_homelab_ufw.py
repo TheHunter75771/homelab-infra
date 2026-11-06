@@ -111,6 +111,14 @@ class Filter(unittest.TestCase):
             "fe80::1%lan0": "zone",
             "host.example": "network address",
             "192.0.2.01": "network address",
+            # Reviewer U (U-1): any in disguise.
+            "0.0.0.0/0": "is any; leave from out",
+            "::/0": "is any; leave from out",
+            "0.0.0.0": "is any; leave from out",
+            "::": "is any; leave from out",
+            # U-2: IPv4-mapped.
+            "::ffff:192.0.2.1": "IPv4-mapped",
+            "::ffff:0:0/96": "IPv4-mapped",
         }
         for source, fragment in cases.items():
             with self.subTest(source=source):
@@ -133,9 +141,120 @@ class Filter(unittest.TestCase):
             ],
         )
 
+    def test_ai_servers_list_is_byte_for_byte_unchanged(self):
+        # inventory/group_vars/ai_servers firewall_allow_rules as it stood before `to` (identifiers filled in).
+        rules = AI_LIST + [
+            {"port": 8080, "proto": "tcp", "iface": "tailscale0", "comment": "open-webui over tailnet"},
+            {"port": 11434, "proto": "tcp", "iface": "tailscale0", "from": "100.64.0.7", "comment": "gpu-broker from mediaserver"},
+            {"port": 443, "proto": "tcp", "iface": "tailscale0", "comment": "ai-control via tailscale serve"},
+        ]
+        self.assertEqual(render(rules)[3:], [
+            "allow in on tailscale0 to any port 8080 proto tcp comment 'homelab: open-webui over tailnet'",
+            "allow in on tailscale0 from 100.64.0.7 to any port 11434 proto tcp comment 'homelab: gpu-broker from mediaserver'",
+            "allow in on tailscale0 to any port 443 proto tcp comment 'homelab: ai-control via tailscale serve'",
+        ])
+
+    # ---- to: (docs/CONTRACTS.md \u00a712.25 H8)
+    def test_from_and_to_without_iface(self):
+        self.assertEqual(
+            render([{"port": 8790, "proto": "tcp", "from": "172.20.0.4", "to": "172.20.0.1",
+                     "comment": "forge-api from open-webui"}]),
+            ["allow from 172.20.0.4 to 172.20.0.1 port 8790 proto tcp comment 'homelab: forge-api from open-webui'"],
+        )
+
+    def test_to_with_iface_and_ipv6(self):
+        self.assertEqual(render([
+            {"port": 1, "proto": "tcp", "iface": LAN, "from": LAN_CIDR, "to": "192.0.2.5", "comment": "a"},
+            {"port": 2, "proto": "udp", "iface": "tailscale0", "to": "100.64.0.5", "comment": "b"},
+            {"port": 3, "proto": "tcp", "from": "2001:db8::/32", "to": "2001:db8::1", "comment": "c"},
+            {"port": 4, "proto": "tcp", "from": "2001:db8::2", "to": "2001:db8::1", "comment": "d"},
+        ]), [
+            "allow in on lan0 from 192.0.2.0/24 to 192.0.2.5 port 1 proto tcp comment 'homelab: a'",
+            "allow in on tailscale0 to 100.64.0.5 port 2 proto udp comment 'homelab: b'",
+            "allow from 2001:db8::/32 to 2001:db8::1 port 3 proto tcp comment 'homelab: c'",
+            "allow from 2001:db8::2 to 2001:db8::1 port 4 proto tcp comment 'homelab: d'",
+        ])
+
+    def test_to_is_part_of_the_rule_identity(self):
+        base = {"port": 8790, "proto": "tcp", "from": "172.20.0.4", "comment": "x"}
+        self.assertEqual(len(render([dict(base, to="172.20.0.1"), dict(base, to="172.20.0.2", comment="y")])), 2)
+        self.assertRejected([dict(base, to="172.20.0.1"), dict(base, to="172.20.0.1", comment="y")], "same rule")
+        # Same match with and without an interface are two different UFW rules.
+        self.assertEqual(len(render([dict(base, to="172.20.0.1"), dict(base, to="172.20.0.1", iface=LAN, comment="y")])), 2)
+
+    def test_iface_is_required_unless_from_and_to_are_both_given(self):
+        base = {"port": 22, "proto": "tcp", "comment": "ok"}
+        self.assertRejected([base], "iface")
+        self.assertRejected([dict(base, **{"from": "192.0.2.1"})], "iface")
+        self.assertRejected([dict(base, to="192.0.2.1")], "iface")
+        # Given, it's still checked.
+        for iface in ("", None, "lan0 to any"):
+            self.assertRejected([dict(base, iface=iface, to="192.0.2.1", **{"from": "192.0.2.2"})], "iface")
+
+    def test_rejects_bad_destinations(self):
+        base = {"port": 8790, "proto": "tcp", "from": "172.20.0.4", "comment": "ok"}
+        cases = {
+            "any": "leave to out",
+            "ANY": "leave to out",
+            "0.0.0.0": "never 0.0.0.0",
+            "::": "never ::",
+            "0.0.0.0/0": "not a range",
+            "172.20.0.0/24": "not a range",
+            "172.20.0.1/32": "not a range",
+            "2001:db8::1/128": "not a range",
+            "172.20.0.1-172.20.0.9": "not a range",
+            "172.20.0.1:172.20.0.9": "one IP address",
+            "fe80::1%lan0": "zone",
+            "2001:DB8::1": "write 2001:db8::1",
+            "2001:db8:0:0::1": "write 2001:db8::1",
+            "172.020.0.1": "one IP address",
+            "host.example": "one IP address",
+            "": "one IP address",
+            "172.20.0.1 port 22": "one IP address",
+            "172.20.0.1'": "one IP address",
+        }
+        for destination, fragment in cases.items():
+            with self.subTest(to=destination):
+                self.assertRejected([dict(base, to=destination)], fragment)
+        self.assertRejected([dict(base, to=None)], "one IP address")
+
+    def test_rejects_from_any_with_to_with_and_without_iface(self):
+        # Reviewer U (U-1): {from: 0.0.0.0/0, to: X} without iface would be stored as `allow to X ...`, open on
+        # every interface; with iface it would silently become a to-only rule. Refused either way.
+        base = {"port": 8790, "proto": "tcp", "comment": "ok"}
+        for source, destination in (("0.0.0.0/0", "172.20.0.1"), ("::/0", "2001:db8::1")):
+            for extra in ({}, {"iface": LAN}):
+                with self.subTest(source=source, extra=extra):
+                    self.assertRejected([dict(base, to=destination, **{"from": source}, **extra)], "is any; leave from out")
+
+    def test_rejects_special_destinations(self):
+        base = {"port": 8790, "proto": "tcp", "from": "172.20.0.4", "comment": "ok"}
+        base6 = dict(base, **{"from": "2001:db8::2"})
+        cases = [
+            (base6, "::ffff:172.20.0.1", "IPv4-mapped"),
+            (base, "127.0.0.1", "loopback"),
+            (base, "127.1.2.3", "loopback"),
+            (base6, "::1", "loopback"),
+            (base, "255.255.255.255", "broadcast"),
+            (base, "224.0.0.1", "multicast"),
+            (base, "239.255.255.250", "multicast"),
+            (base6, "ff02::1", "multicast"),
+            (base, "169.254.169.254", "link-local"),
+            (base6, "fe80::1", "link-local"),
+        ]
+        for rule, destination, fragment in cases:
+            with self.subTest(to=destination):
+                self.assertRejected([dict(rule, to=destination)], fragment)
+
+    def test_rejects_mixed_ip_versions(self):
+        base = {"port": 1, "proto": "tcp", "comment": "ok"}
+        self.assertRejected([dict(base, to="2001:db8::1", **{"from": "192.0.2.1"})], "must both be IPv4 or both IPv6")
+        self.assertRejected([dict(base, to="192.0.2.1", **{"from": "2001:db8::/32"})], "must both be IPv4 or both IPv6")
+
     def test_errors_are_filter_errors(self):
         from homelab_ufw import AnsibleFilterError
-        for bad in ({"from": "any"}, {"from": "192.0.2.1/32"}, {"port": "\u00b2"}, {"iface": "x" * 16}):
+        for bad in ({"from": "any"}, {"from": "192.0.2.1/32"}, {"port": "\u00b2"}, {"iface": "x" * 16},
+                    {"to": "any"}, {"to": "0.0.0.0"}, {"to": "192.0.2.0/24"}):
             rule = dict({"port": 22, "proto": "tcp", "iface": "lan0", "comment": "ok"}, **bad)
             with self.subTest(bad=bad), self.assertRaises(AnsibleFilterError):
                 render([rule])

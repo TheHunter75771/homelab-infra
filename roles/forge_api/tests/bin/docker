@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Fake docker: only `inspect -f {{.State.Pid}} open-webui` and `inspect -f {{json .Mounts}} open-webui` (never exec).
+# knob `docker`: running (pid 4242) | stopped (0). knob `mounts`: data (default: /app/backend/data from
+# $FA_TEST_DIR/owui_data) | none (no data mount)
+set -euo pipefail
+: "${FA_TEST_DIR:?}"
+. "$(dirname "$0")/_knob"
+case "$*" in
+  "inspect -f {{.State.Pid}} open-webui")
+    case "$(knob docker running)" in
+      running) echo 4242 ;;
+      stopped) echo 0 ;;
+      *) echo "fake docker: bad knob" >&2; exit 2 ;;
+    esac ;;
+  "inspect -f {{json .Mounts}} open-webui")
+    skills='{"Type":"bind","Source":"/var/lib/homelab-ai/skills","Destination":"/skills","Mode":"","RW":false,"Propagation":"rslave"}'
+    case "$(knob mounts data)" in
+      data) printf '[{"Type":"volume","Name":"ai_open-webui-data","Source":"%s","Destination":"/app/backend/data","Driver":"local","Mode":"z","RW":true,"Propagation":""},%s]\n' \
+              "$(knob owui_data /nonexistent)" "$skills" ;;
+      none) printf '[%s]\n' "$skills" ;;
+      *) echo "fake docker: bad knob" >&2; exit 2 ;;
+    esac ;;
+  *) echo "fake docker: unexpected arguments: $*" >&2; exit 2 ;;
+esac

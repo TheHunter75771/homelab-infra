@@ -1,0 +1,102 @@
+---
+# One verify.yml run against the fakes (tests/bin), with the real installed forge-api running
+# `check-config --require-library` through the fake systemd-run and the real Open WebUI checker on a scratch
+# database. case = {name, knobs (dict of fake knob -> mode), config (optional: the config file check-config
+# reads), owui (optional: the scratch database directory, default good), trust (optional: the
+# forge_api_verify_owui_trust switch, default true), bad (optional: the one trust check that must fail),
+# refused_by ('' = must pass)}.
+- name: Verify case | set the fakes' knobs for {{ case.name }}
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      d="$FA_TEST_DIR"
+      rm -f "$d/active" "$d/socket" "$d/ip" "$d/ss" "$d/host_curl" "$d/netns_curl" "$d/docker" "$d/mounts" "$d/ufw" \
+        "$d/journal" "$d/calls" "$d/systemd-run.args" "$d/nsenter.args" "$d/curl-host.args" "$d/curl-1.args"
+      printf '%s\n' "{{ forge_api_bind | trim }}" > "$d/bind"
+      printf '%s\n' "{{ test_tmp }}/owui/{{ case.owui | default('good') }}" > "$d/owui_data"
+      printf '%s\n' "ufw {{ forge_api_ufw_rule }}" > "$d/ufw_rule"
+      {% for k, v in (case.knobs | default({})).items() %}
+      printf '%s\n' "{{ v }}" > "$d/{{ k }}"
+      {% endfor %}
+    executable: /bin/bash
+  changed_when: true
+
+- name: Verify case | verify.yml for {{ case.name }}
+  block:
+    - name: Verify case | run verify.yml ({{ case.name }})
+      ansible.builtin.include_tasks: ../tasks/verify.yml
+      vars:
+        forge_api_config_file: "{{ case.config | default(fa_test_cfg_file) }}"
+        forge_api_verify_owui_trust: "{{ case.trust | default(true) }}"
+
+    - name: Verify case | passed ({{ case.name }})
+      ansible.builtin.set_fact:
+        fa_test_verify_by: ""
+  rescue:
+    - name: Verify case | note which task refused ({{ case.name }})
+      ansible.builtin.set_fact:
+        fa_test_verify_by: "{{ ansible_failed_task.name }}"
+
+- name: Verify case | the outcome matches ({{ case.name }})
+  ansible.builtin.assert:
+    that: fa_test_verify_by == case.refused_by
+    fail_msg: "{{ case.name }}: refused by '{{ fa_test_verify_by }}', expected '{{ case.refused_by }}'"
+    quiet: true
+
+- name: Verify case | exactly the expected trust checks failed ({{ case.name }})
+  vars:
+    r: "{{ forge_api_owui.stdout | trim | from_json }}"
+  ansible.builtin.assert:
+    that:
+      - forge_api_owui.rc == 0
+      - >-
+        r.checks | map(attribute='name') | list
+        == ['admins', 'default-permissions', 'group-permissions', 'tool-write-grants', 'tool-owners', 'iframe-same-origin']
+      - r.checks | rejectattr('ok') | map(attribute='name') | list == ([case.bad] if case.bad is defined else [])
+      - r.ok is sameas (case.bad is not defined)
+    fail_msg: "{{ forge_api_owui.stdout | default('') }} {{ forge_api_owui.stderr | default('') }}"
+    quiet: true
+  when: case.bad is defined or case.refused_by == ''
+
+- name: Verify case | what the fakes were called with ({{ case.name }})
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      d="$FA_TEST_DIR"
+      for f in systemd-run.args nsenter.args curl-host.args curl-1.args; do
+        echo "== $f"
+        if [ -f "$d/$f" ]; then cat "$d/$f"; fi
+      done
+    executable: /bin/bash
+  register: fa_test_fake_args
+  changed_when: false
+  when: case.refused_by == ''
+
+- name: Verify case | check-config ran sandboxed, the host and netns calls went where they should ({{ case.name }})
+  vars:
+    parts: "{{ fa_test_fake_args.stdout | split('== ') | reject('equalto', '') | map('trim') | map('split', '\n') | list }}"
+    run: "{{ parts[0][1:] }}"
+    ns: "{{ parts[1][1:] }}"
+    host: "{{ parts[2][1:] }}"
+    netns: "{{ parts[3][1:] }}"
+    sep: "{{ 7 + forge_api_sandbox | length }}"
+    url: "http://{{ forge_api_bind | trim }}:{{ forge_api_port }}/requests"
+  ansible.builtin.assert:
+    that:
+      - run[:6] == ['--wait', '--pipe', '--collect', '--quiet', '--service-type=oneshot', '--description=forge-api check-config (Ansible verify)']
+      - run[6] == '--property=TimeoutStartSec=1min'
+      - run[7:sep | int] == forge_api_sandbox | map('regex_replace', '^', '--property=') | list
+      - run[sep | int] == '--'
+      - run[sep | int + 1:] == ['/usr/bin/python3', '-I', '-B', forge_api_launcher, '--config', case.config | default(fa_test_cfg_file),
+                               'check-config', '--require-library']
+      - "'serve' not in run"
+      - "'--property=User=rgate' in run and '--property=IPAddressDeny=any' in run"
+      - "'--property=IPAddressAllow=172.20.0.4/32' in run and '--property=ReadWritePaths=' ~ forge_api_forge_dir in run"
+      - ns[:3] == ['--net=/proc/4242/ns/net', '--', 'curl']
+      - ns[-1] == url and host[-1] == url and netns[-1] == url
+      # The netns call carries no Authorization header (a no-token call must get 401).
+      - netns | select('search', '(?i)authorization|bearer|-H') | list == []
+      - host | select('search', '(?i)authorization|bearer|-H') | list == []
+    fail_msg: "{{ parts | to_json }}"
+    quiet: true
+  when: case.refused_by == ''

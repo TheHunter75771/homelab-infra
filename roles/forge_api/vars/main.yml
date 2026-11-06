@@ -1,0 +1,154 @@
+---
+# Fixed by the contract (§12.25, row H8) and module F.
+# The research gate's account (Lead decision F-4: one trust zone; a dedicated user is queued, Low). Roles
+# research_gate and ai_library_share create it with exactly the same attributes as tasks/base.yml here.
+forge_api_user: rgate
+forge_api_app_dir: /opt/forge-api
+forge_api_config_dir: /etc/forge-api
+forge_api_config_file: "{{ forge_api_config_dir }}/config.json"
+# F's default token path (forge_api/config.py DEFAULTS). Generated once on the host, 0640 root:rgate.
+forge_api_token_file: "{{ forge_api_config_dir }}/token"
+forge_api_service: forge-api.service
+# Reviewer Q (Q-F3): socket activation. systemd binds and holds the listening socket (so no local user can squat
+# the port while the service is down) and passes it to the service (LISTEN_FDS); the socket is what is enabled.
+forge_api_socket: forge-api.socket
+forge_api_unit_dir: /etc/systemd/system
+forge_api_python: /usr/bin/python3
+# Owner/group of the root-owned files rgate must read (config.json and the token: root:rgate 0640). The tests
+# override them.
+forge_api_root_owner: root
+forge_api_group: "{{ forge_api_user }}"
+# F's launcher (it puts its own directory first on sys.path, so it works under `python3 -I`, and finds forge
+# and library beside it) and the three packages: the only entries kept under /opt/forge-api.
+forge_api_launcher: "{{ forge_api_app_dir }}/forge-api"
+forge_api_packages: [forge_api, forge, library]
+forge_api_app_entries: "{{ forge_api_packages + ['forge-api'] }}"
+# §12.11: the share carries this sentinel; the library's own layout has 35-forge/, the ONLY writable path (new
+# requests, proposals, ticks and the forge lock all live there; F's README).
+forge_api_sentinel_name: .ai-library-sentinel
+forge_api_sentinel: "{{ forge_api_library_root }}/{{ forge_api_sentinel_name }}"
+forge_api_forge_dir: "{{ forge_api_library_root }}/35-forge"
+# Paths ProtectHome/ProtectSystem hide or make read-only in ways ReadWritePaths can't fix, plus system dirs.
+forge_api_library_forbidden_re: '^/(home|root|run|proc|sys|dev|etc|usr|boot|bin|sbin|lib|lib64|opt|var|tmp)(/|$)'
+# Noah's Open WebUI user id: the forge's `by` rule (F's config.py USER_ID_RE).
+forge_api_user_id_re: '^[A-Za-z0-9._@-]{1,64}$'
+# Switched off without an approver, nothing needs the config: it isn't rendered (README, "Inputs").
+forge_api_config_wanted: >-
+  {{ forge_api_approver_user_id is defined and forge_api_approver_user_id is not none
+     and forge_api_approver_user_id | string | length > 0 }}
+
+# §12.25 IP filter: inbound only from open-webui's pinned /32; everything else, the host itself (the gateway,
+# loopback) included, is dropped at the socket, and the service can open no outbound connection at all.
+forge_api_ip_allow: ["{{ forge_api_webui_ip | trim }}/32"]
+forge_api_ip_deny: [any]
+
+# §12.25 UFW (Lead decision F-1): matched by address, not by the bridge interface (br-<network id> isn't pinned).
+# Written exactly as `ufw show added` prints it (without the leading "ufw "). Role firewall converges UFW to its
+# declared list and prunes anything else, so THIS ROLE NEVER WRITES UFW: the Lead declares this rule through
+# role firewall (README, "UFW"), and the verify reads `ufw show added` and requires it, alone, for the port.
+forge_api_ufw_comment: "homelab: forge-api from open-webui"
+forge_api_ufw_rule: >-
+  allow from {{ forge_api_webui_ip | trim }} to {{ forge_api_bind | trim }} port {{ forge_api_port }} proto tcp
+  comment '{{ forge_api_ufw_comment }}'
+
+# /etc/forge-api/config.json: F's keys, all of them, nothing else (F's loader refuses unknown keys).
+forge_api_config: >-
+  {{ {'library_root': forge_api_library_root,
+      'bind': forge_api_bind | trim,
+      'port': forge_api_port | int,
+      'allowed_peers': [forge_api_webui_ip | trim],
+      'token_file': forge_api_token_file,
+      'approver_user_id': forge_api_approver_user_id | default('') | string} }}
+forge_api_config_keys:
+  - allowed_peers
+  - approver_user_id
+  - bind
+  - library_root
+  - port
+  - token_file
+# config.json's deploy-time check (`validate`; %s is the candidate file): exactly F's keys, then F's own
+# `check-config` from the installed code, which loads the config AND the token file (F's rules: 0640, owner,
+# b64token, >= 32 characters; it never prints the token). Switched on, `--require-library` also opens the library.
+# -I -B: nothing from the environment or the working directory, no bytecode in the root-owned install.
+forge_api_config_validate: >-
+  {{ forge_api_python }} -I -B -c
+  "import json, sys; c = json.load(open(sys.argv[1])); k = set(sys.argv[2].split(','));
+  assert set(c) == k, sorted(set(c) ^ k); sys.path.insert(0, sys.argv[3]);
+  from forge_api.__main__ import main; sys.exit(main(['--config', sys.argv[1], 'check-config'] + sys.argv[4:]))"
+  %s {{ forge_api_config_keys | join(',') }} {{ forge_api_app_dir }}{{ ' --require-library' if forge_api_enabled | bool else '' }}
+
+# The socket unit's [Socket] section (Q-F3): systemd binds the ai bridge's gateway (FreeBind: before Docker has
+# created the bridge at boot) and applies the same IP filter to the listening socket and every connection it
+# accepts. The service's own filter doesn't apply to an inherited socket, so the socket needs it too.
+forge_api_socket_lines:
+  - "ListenStream={{ forge_api_bind | trim }}:{{ forge_api_port }}"
+  - "FreeBind=yes"
+  - "Accept=no"
+  # Reviewer S (S-1): never give the port up after a burst of triggers (the socket would close).
+  - "TriggerLimitIntervalSec=0"
+  - "IPAddressDeny={{ forge_api_ip_deny | join(' ') }}"
+  - "IPAddressAllow={{ forge_api_ip_allow | join(' ') }}"
+
+# The unit's [Service] sandbox, one `Key=Value` per entry. The unit template renders exactly these, and the
+# verify runs `check-config --require-library` under the same list through systemd-run, so it proves rgate
+# reads the config and the token and opens the library through the real sandbox. SocketBindDeny=any with no
+# allow: the service only uses the socket systemd passes it and can bind nothing itself (Q-F3).
+forge_api_sandbox:
+  - "User={{ forge_api_user }}"
+  - "Group={{ forge_api_user }}"
+  - "WorkingDirectory={{ forge_api_app_dir }}"
+  - "UMask=0027"
+  - "MemoryMax={{ forge_api_memory_max }}"
+  - "TasksMax={{ forge_api_tasks_max }}"
+  - "LimitNOFILE={{ forge_api_limit_nofile }}"
+  - "NoNewPrivileges=yes"
+  - "ProtectSystem=strict"
+  - "ProtectHome=yes"
+  - "PrivateTmp=yes"
+  - "ReadOnlyPaths=/run"
+  - "ReadWritePaths={{ forge_api_forge_dir }}"
+  - "InaccessiblePaths=/dev/shm"
+  - "RestrictAddressFamilies=AF_INET AF_UNIX"
+  - "SocketBindDeny=any"
+  - "CapabilityBoundingSet="
+  - "AmbientCapabilities="
+  - "SystemCallFilter=@system-service"
+  - "SystemCallFilter=~@privileged"
+  - "SystemCallErrorNumber=EPERM"
+  - "SystemCallArchitectures=native"
+  - "PrivateDevices=yes"
+  - "PrivateIPC=yes"
+  - "ProtectKernelTunables=yes"
+  - "ProtectKernelModules=yes"
+  - "ProtectKernelLogs=yes"
+  - "ProtectControlGroups=yes"
+  - "ProtectClock=yes"
+  - "ProtectHostname=yes"
+  - "ProtectProc=invisible"
+  - "ProcSubset=pid"
+  - "RestrictNamespaces=yes"
+  - "RestrictRealtime=yes"
+  - "RestrictSUIDSGID=yes"
+  - "LockPersonality=yes"
+  - "MemoryDenyWriteExecute=yes"
+  - "RemoveIPC=yes"
+  - "IPAddressDeny={{ forge_api_ip_deny | join(' ') }}"
+  - "IPAddressAllow={{ forge_api_ip_allow | join(' ') }}"
+
+# F's command without its subcommand (the unit adds `serve`, the verify `check-config --require-library`).
+forge_api_argv:
+  - "{{ forge_api_python }}"
+  - -I
+  - -B
+  - "{{ forge_api_launcher }}"
+  - --config
+  - "{{ forge_api_config_file }}"
+
+# Verify (enabled only): open-webui's container, whose network namespace the 401 check enters (Lead decision
+# F-3: nsenter --net from the host; never `docker exec`, nothing runs inside the container).
+forge_api_webui_container: open-webui
+# Q-1: open-webui's data directory inside the container (role ai_stack's open-webui-data volume) and its sqlite
+# database; the verify finds the volume's host path with `docker inspect` and opens the file read-only there.
+forge_api_webui_data_dir: /app/backend/data
+forge_api_webui_db_name: webui.db
+forge_api_url: "http://{{ forge_api_bind | trim }}:{{ forge_api_port }}/requests"

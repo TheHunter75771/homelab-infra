@@ -27,12 +27,14 @@
     fail_msg: "tailnet_ip must be an IPv4 address and tailnet_ip6 an IPv6 address (no prefix): {{ tailnet_ip | default('') }} {{ tailnet_ip6 | default('') }}"
     quiet: true
 
-# Rendering the list also validates every item (filter_plugins/homelab_ufw.py).
+# Rendering the list also validates every item (filter_plugins/homelab_ufw.py). A rule with from and to may
+# leave iface out (it then counts as '' here), and such a rule matches on any interface, the Wi-Fi uplink too:
+# its from/to pair is what limits it.
 - name: Declared allow rules keep SSH over the tailnet and stay off the Wi-Fi uplink
   ansible.builtin.assert:
     that:
       - firewall_allow_rule_lines | select('match', firewall_lockout_guard_regex) | list | length > 0
-      - wifi_iface is not defined or wifi_iface not in (firewall_allow_rules | map(attribute='iface') | map('string') | map('trim') | list)
+      - wifi_iface is not defined or wifi_iface not in (firewall_allow_rules | map(attribute='iface', default='') | map('string') | map('trim') | list)
     fail_msg: >-
       firewall_allow_rules must include { port: 22, proto: tcp, iface: {{ firewall_tailnet_iface }}, comment: ... }
       and no rule on wifi_iface. Declared: {{ firewall_allow_rule_lines }}
