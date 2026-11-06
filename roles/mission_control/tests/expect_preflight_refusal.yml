@@ -33,6 +33,14 @@
         mission_control_build_lock_src: "{{ case.vars.get('mission_control_build_lock_src', playbook_dir ~ '/../files/build.lock') }}"
         ai_control_serve_extra_handlers: "{{ case.vars.get('ai_control_serve_extra_handlers', test_good_extra) }}"
         mission_control_aictl_vars_file: "{{ case.vars.get('mission_control_aictl_vars_file', test_repo ~ '/roles/ai_control/vars/main.yml') }}"
+        # B2/B1: the good values are a full setup (two senders with the canary tokens, allow_from, quiet hours, both
+        # limits, six links), so each case below changes exactly one thing.
+        mission_control_notify_tokens: "{{ case.vars.get('mission_control_notify_tokens', test_notify_tokens) }}"
+        mission_control_notify_allow_from: "{{ case.vars.get('mission_control_notify_allow_from', test_notify_allow_from) }}"
+        mission_control_quiet_hours: "{{ case.vars.get('mission_control_quiet_hours', test_quiet_hours) }}"
+        mission_control_notify_dedupe_seconds: "{{ case.vars.get('mission_control_notify_dedupe_seconds', 600) }}"
+        mission_control_notify_rate_per_hour: "{{ case.vars.get('mission_control_notify_rate_per_hour', 60) }}"
+        mission_control_app_links: "{{ case.vars.get('mission_control_app_links', test_app_links) }}"
 
     - name: Not reached
       ansible.builtin.set_fact:

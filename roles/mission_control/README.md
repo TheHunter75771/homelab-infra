@@ -18,7 +18,7 @@ separate origin from AI Control's 443. Playbook: `playbooks/mission-control.yml`
 | CLI | `/usr/local/bin/mission-control` (root 0755): `#!/opt/mission-control/venv/bin/python3 -IB`, runs the installed package (`runpy`). |
 | Lib | `/opt/mission-control/lib/`: the two locks and the role's helper scripts (VAPID keygen and check, the journal scan, the egress probe), root 0644. |
 | Guard | `/etc/mission-control/guard.nft` (root 0644, checked with `nft -c`) and `mission-control-guard.service` (oneshot, `RemainAfterExit`, enabled, `Before=mission-control.service`): its own nftables table `inet mission_control_guard`. Only root reaches the server on 127.0.0.1:8097, and serve's :8443 only takes connections arriving on the tailscale interface (see "Local-access guard"). |
-| Config | `/etc/mission-control/` root:mc 0750. `config.json` root:mc 0640 has MC1's keys (below), validated at deploy time by MC1's own loader (`mission_control.config.load`) under the venv. |
+| Config | `/etc/mission-control/` root:mc 0750. `config.json` root:mc 0640 has MC1's keys (below), validated at deploy time by MC1's own loader (`mission_control.config.load`) under the venv. With notify senders set it holds each sender's token **sha256**, never the token, and the task that writes it is `no_log` (see "Notify senders and the Apps card"). |
 | VAPID keys | `/etc/mission-control/vapid.json` root:mc 0640, MC1's layout `{publicKey, privateKey, subject}`. **Generated once, on ai-box, never rotated by a converge** (see "VAPID keys"). |
 | HA token | `/etc/mission-control/ha-token`. **Noah creates it**; the role never reads or writes it. When it exists, the role only fixes its owner and mode to root:mc 0640. |
 | State | `/var/lib/mission-control` mc:mc **0700**; `subscriptions.json` mc 0600, created as `[]` once and never overwritten. MC1 changes it under its lock with atomic replaces. Only mc can write anything there. |
@@ -103,13 +103,69 @@ python_packages:
 | `mission_control_lockscreen_detail` | `minimal` | `none`, `minimal` or `names` (MC1 README, "Lock screen") |
 | `mission_control_moneyhub_timezone` | `UTC` | Money Hub's naive timestamps (Lead, §12.28) |
 | `mission_control_vapid_subject` | `https://<ai-box tailnet name>` | the VAPID `sub`, kept in `vapid.json`. It must be one py_vapid signs with: `https://<host>` with **no port and no path**, or `mailto:<address>`. Preflight refuses anything else. A converge rewrites only this field when it differs |
-| `mission_control_config_extra` | `{}` | more MC1 keys (`alert_repeat_hours`, `disk_alert_pct`, ...). The role-owned keys are refused: `listen_host`, `listen_port`, `allowed_login`, `static_dir`, `state_dir`, `vapid_file`, `ha_token_file`, `host_map`, `systemctl` |
+| `mission_control_config_extra` | `{}` | more MC1 keys (`alert_repeat_hours`, `disk_alert_pct`, ...). The role-owned keys are refused: `listen_host`, `listen_port`, `allowed_login`, `static_dir`, `state_dir`, `vapid_file`, `ha_token_file`, `host_map`, `systemctl`, and the five B2/B1 keys below (`notify_senders`, `quiet_hours`, `notify_dedupe_seconds`, `notify_rate_per_hour`, `app_links`: they come only from their own variables, so preflight's checks can't be bypassed) |
+| `mission_control_notify_tokens` | `{}` (no senders: `POST /api/notify` answers 401 to everyone) | **vault only.** `{sender name: token}`, at most 32. Names `^[a-z0-9-]{1,32}$`; tokens 32-256 visible ASCII characters, no two alike. `config.json` gets `notify_senders: [{name, token_sha256}]` (`hash('sha256')`, lowercase hex, sorted by name) |
+| `mission_control_notify_allow_from` | `{}` | `{sender name: [tailnet IPv4, ...]}`, at most 16 each: MC1 then takes that sender only from those addresses (the last `X-Forwarded-For` hop). Each name must be a configured sender; an empty list is refused (leave the sender out for no address check) |
+| `mission_control_quiet_hours` | `null` (off) | `{start: "HH:MM", end: "HH:MM"}` in `mission_control_timezone`, may cross midnight, start != end. **Quote the times** (YAML reads an unquoted `22:00` as the number 1320; preflight says so) |
+| `mission_control_notify_dedupe_seconds` | `null` (MC1's 1800) | 0-86400: the same sender + tag + title + body within this window is pushed once |
+| `mission_control_notify_rate_per_hour` | `null` (MC1's 30) | 1-1000 accepted messages per sender per rolling hour |
+| `mission_control_app_links` | `[]` (no Apps card) | at most 12 `{label, url}`: label 1-32 printable characters without surrounding spaces, url `http(s)://host[:port]` plus an optional `/path?query` (MC1's link rule), at most 300 characters, no user info or fragment. The real list holds tailnet names: host_vars (below) |
 
 `config.json` is exactly: `listen_host` `127.0.0.1`, `listen_port` 8097, `allowed_login`, `timezone`, `static_dir`,
 `state_dir`, `vapid_file`, `lockscreen_detail`, `aicontrol_url` (`http://127.0.0.1:8095`), `webui_url`
 (`http://<Open WebUI's container address>:8080`), `moneyhub_url`, `moneyhub_timezone`, `erau_url`, `host_map` (`{homebk-edge
 name: its IP, mediaserver name: its IP}`: ai-box has no MagicDNS), `mediaserver_url`, `ha_url` (null when off),
 `ha_token_file`, `ha_entities`, `units`, `backups`, `links`. It is pinned literally in `tests/expected/config.json`.
+Each B2/B1 key (`notify_senders`, `quiet_hours`, `notify_dedupe_seconds`, `notify_rate_per_hour`, `app_links`) is
+added **only when its variable is set**, so with none set the file is byte for byte what it was before B2 (and an
+MC1 without those keys still loads it); unset means MC1's default, the same meaning.
+
+## Notify senders and the Apps card (B2, B1)
+
+**What it is:** any host or service pushes to Noah's phone through Mission Control (`POST /api/notify`, MC1 README)
+instead of running its own Web Push sender. The sending side is role `mc_notify_client` (`mc-notify` and
+`notify-failure@.service`).
+
+**Add a sender** (Noah or the Lead; nothing here generates or stores a token):
+1. Make a token: `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'` (43 characters).
+2. Put it in an **ansible-vault** file both hosts' plays can read, never in host_vars or any file in this repo.
+   One map serves both sides, e.g. `vault_mc_notify_tokens: {backup-box: <token>, gaming-pc: <token>}`, then
+   `mission_control_notify_tokens: "{{ vault_mc_notify_tokens }}"` for ai-box and
+   `mc_notify_client_token: "{{ vault_mc_notify_tokens['backup-box'] }}"` for the sender. (Today the only vault is
+   `inventory/group_vars/media_servers/vault.yml`, which ai-box's group doesn't read: Open items.)
+3. Optionally pin it to its tailnet address: `mission_control_notify_allow_from: {backup-box: [<its tailnet IPv4>]}`.
+4. Converge ai-box (this role), then the sender (`mc_notify_client`). Test from the sender:
+   `mc-notify --title "hello" --tag test` prints `sent` (exit 0).
+
+**Secrets in the run:**
+- Preflight reads the tokens in one `no_log` task whose verdict holds names and problems only, and the checks after
+  it print only that verdict.
+- A problem shows a sender name only when it is a valid name shorter than 32 characters (the shortest token). Any
+  other key, and any longer value, is shown by its length ("<a key of 43 characters>"). So names and tokens swapped
+  in the vault, or a token pasted into allow_from or a limit, never print the token.
+- `config.json`'s task is `no_log` and `diff: false` (it carries the hashes), so its diff and a refusal by MC1's
+  loader are hidden. Run `mission-control check-config` on ai-box to see the loader's reason.
+- `tests/check_no_log.py` holds every task that names the tokens, the variables computed from them or
+  `config.json.j2` to `no_log`. It also fails an assert whose `fail_msg`, `success_msg` or `msg` templates the
+  tokens or anything computed from them; prose that merely names the variable is fine.
+
+**Apps card (B1):** `mission_control_app_links`, in page order. The real list names tailnet hosts and a public
+domain, which this public repo never holds (docs/CONTRACTS.md §0), so it lives in `host_vars/ai-box.yml`
+(git-ignored). Its shape for this homelab, with the tailnet suffix from `mission_control_tailnet_suffix`:
+
+```yaml
+# host_vars/ai-box.yml
+mission_control_app_links:
+  - {label: Server Hub, url: "https://<gaming PC>.{{ mission_control_tailnet_suffix }}/"}
+  - {label: PC Control, url: "https://<gaming PC>.{{ mission_control_tailnet_suffix }}:8443/"}
+  - {label: Money Hub, url: "https://homebk-edge.{{ mission_control_tailnet_suffix }}:8443/"}
+  - {label: Media dashboard, url: "https://mediaserver.{{ mission_control_tailnet_suffix }}/"}
+  - {label: Jellyseerr, url: "https://mediaserver.{{ mission_control_tailnet_suffix }}:8443/"}
+  - {label: <public site>, url: "https://<public site domain>/"}
+```
+
+These are tap-through links only: MC1 never fetches them, so they need no `host_map` entry and the IP filter is
+unchanged.
 
 ## tailscale serve
 
@@ -357,6 +413,10 @@ allows `tag:family` only ai-box:8080), and any other login gets 403.
   - **Caveat:** `/etc/nftables.conf` has `flush ruleset`, and `nftables.service` is disabled on ai-box. If it is
     ever started by hand, the guard is gone until `systemctl reload mission-control-guard` or the next boot (the
     guard is ordered after it at boot).
+- **Notify (B2), once a sender is configured:** from the sender, `mc-notify --title test --tag test` prints `sent`
+  and the phone shows "<sender>: test"; the same command again within 30 min prints `deduped`; a wrong token gets
+  exit 1 (HTTP 401); `curl -m3 https://<ai-box>:8443/api/notify` (GET) gives 405. `config.json` holds the senders'
+  `token_sha256` and no token: `sudo grep -c <first 8 characters of a token> /etc/mission-control/config.json` is 0.
 - **Idempotence:** a second run gives `changed=0`, and `vapid.json` keeps its checksum.
 
 ## Tests
@@ -366,17 +426,28 @@ roles/mission_control/tests/run.sh       # from anywhere; the repo's .venv; no r
 ```
 
 1. `check_no_log.py`: every task touching a secret (the VAPID file or its scripts, the journal scan, the HA token
-   file, the subscriptions file) is `no_log`.
+   file, the subscriptions file; B2: the notify tokens, the variables computed from them, `config.json.j2`) is
+   `no_log`.
 2. `test_mission_control.yml` with `-vvv --diff` against `tests/inventory.yml`. Two local hosts:
    - **`box`** runs the role's task files into a scratch dir with stub handlers:
-     - **preflight:** passes, plus 50 refusals: the login (empty, newline, space, not a login), the account, the
+     - **preflight:** passes, plus 134 refusals (72 of them B2/B1): the login (empty, newline, space, not a login), the account, the
        time, the zones, the subject, role-owned extras, units/backups/links shapes, Money Hub/ERAU/mediaserver
        addresses, the container allow list, the IP filter widened (LAN, tailnet, any, deny without 10/8, without
        CGNAT, deny everything), the pins (pywebpush and aiohttp moved or missing, a hashless lock), and the serve
        set (missing, without MC, MC on 443, a second handler on 8443, MC's backend elsewhere, role ai_control as
        it was before H13). It also refuses `localhost`, another loopback address and ai-box's own tailnet address in
        the allow list, user info in Money Hub's and ERAU's URLs, and a bad or off-tailnet guard IPv6. The good case
-       reads role ai_control's real vars file, and never asks this machine's tailscale;
+       reads role ai_control's real vars file, and never asks this machine's tailscale. **B2/B1** (against a full
+       good setup, one thing changed each): the five keys set through `config_extra`; tokens a list, 33 senders,
+       bad names (capital, underscore, 33 characters), tokens empty, null, 31 or 257 characters, with a space or a
+       newline, a number, two alike; **names and tokens swapped** (a 32-character hex token, which is a valid name,
+       and 32-, 33- and 43-character tokens as the key), a token pasted as an allow_from name, an allow_from
+       address and the dedupe window (all made from the notify canary, so the leak check below sees any echo); allow_from for an unknown sender, empty, a string, a list, 17 addresses, the
+       LAN, a public address, a prefix, a /32, IPv6, a name, an address twice; quiet hours unquoted, 24:00, without
+       the leading zero, with seconds, without an end, with an extra key, one string, "", start = end; dedupe -1,
+       86401, a boolean, a float, `30m`; rate 0, 1001, a string; app links 13, a mapping, a password, a user name,
+       ftp, `javascript:`, no scheme, a fragment, a space, a query without a path, a bad port, 301 characters, the
+       label empty, 33 characters, with a newline, with a trailing space, an extra key, no url;
      - **venv:** a real `python3 -m venv` with a fake pip (`tests/bin/fake-pip` records the flags and writes
        dist-info). The first build runs the two pip steps with the exact hashed flags. A rerun changes nothing. A
        drifted package, an extra package and a broken interpreter are each rebuilt (in venv.new, then swapped). **A
@@ -394,6 +465,16 @@ roles/mission_control/tests/run.sh       # from anywhere; the repo's .venv; no r
        rerun **and** after a run with the generator forced; MC1's own `load_vapid` accepts it; 4 bad files refused and left untouched;
      - **config.json:** the exact key set and values, validated by MC1's real loader. An unknown key is refused
        and the good file stays;
+     - **B2/B1:** the swapped and pasted cases' messages exactly: each key by its length, never a piece of the
+       token; preflight passes with everything set, at the edges (32-character names, 32- and 256-character
+       tokens, 16 addresses, 00:00-23:59, dedupe "0" and rate "1000" as strings, 12 links, http with a query) and
+       with 32 senders; its verdict holds names only. Seven renders of `config.json.j2`: nothing set is byte for
+       byte today's file; each key alone, and all together, keep every other key and add exactly the expected
+       ones (senders sorted, `allow_from` only where set, limits as integers, links in order); the hashes equal
+       hashlib's sha256 of the tokens. The real `config_file.yml` with everything set: with an MC1 loader that
+       knows the five keys (the server builder's) it writes root:mc 0640 equal to the render; with the baseline
+       loader it is refused and writes nothing. MC1's loader on the render: every other key valid, and the five
+       accepted (or, baseline, refused exactly as unknown keys);
      - **the launcher:** over a stand-in package (MC1's CLI imports aiohttp): the units' argv passes through,
        `-I` and `-B` hold, and `PYTHONPATH` is ignored;
      - **verify files against fakes:**
@@ -433,14 +514,25 @@ roles/mission_control/tests/run.sh       # from anywhere; the repo's .venv; no r
        8443 → 8097, with drift for ai-box before the first converge (443 only), an empty config and funnel;
      - role ai_control's real defaults (under a name, so the inventory's extra list isn't reset) and real vars:
        both roles declare the identical set, 443 → 8095 then 8443 → 8097.
-3. Then `run.sh` greps the whole output for the generated VAPID private key (stored, base64, hex) and a canary
-   planted in the HA token and the subscriptions (text and base64 at 3 alignments). Any hit fails.
+3. Then `run.sh` greps the whole output for the generated VAPID private key (stored, base64, hex), a canary
+   planted in the HA token and the subscriptions, and a notify canary both senders' tokens are made from (text and
+   base64 at 3 alignments), plus each sender token's sha256, plus **any 12 consecutive characters** of either canary
+   (a cut, swapped or pasted token; 12 random hex characters can't match this log by chance, 8 could). Any hit
+   fails. It also checks that the key tasks ran (task names matched literally: `|` and `()` in a name are escaped,
+   so they no longer read as regex).
+4. Before the play, `run.sh` runs `check_no_log.py` on its own mutants (`tests/fixtures/check_no_log_mutants.yml`):
+   an assert whose `fail_msg` templates the tokens and a token read without `no_log` must both fail, and an assert
+   whose prose names the variable must not.
 
 **Mutants** (each must fail the suite; run only in a scratch copy of the repo, never in the shared checkout):
 - the IP filter widened: an allow `/16`, deny without 10/8, deny without CGNAT, the whole Docker range allowed,
   `localhost` back, ai-box's tailnet IP back;
 - the VAPID key rotated each run, and the generator's guard dropped;
-- `no_log` removed (keygen, journal scan);
+- `no_log` removed (keygen, journal scan; B2: the token verdict, `config.json`). For `config.json` the static check
+  is the real guard: with `diff: false` still on the task, the output shows no hash, so only `check_no_log.py`
+  fails. Removing both `no_log` and `diff: false` also shows the hash in the diff, and the leak check fails too
+  (with a loader that knows the keys; the baseline loader refuses the file before any diff);
+- an assert message templating the tokens (`check_no_log.py`, and its own mutant fixture);
 - AI Control's handler replaced or pointed at Mission Control;
 - the timer's zone dropped, and `Persistent` dropped;
 - `AF_UNIX` dropped;
@@ -474,3 +566,7 @@ roles/mission_control/tests/run.sh       # from anywhere; the repo's .venv; no r
    Control. Confirm.
 4. The PC pull's `.last_pull` (§12.29 "if readable") and X-4's PC-side alerts aren't wired. The file is on the
    gaming PC, which the IP filter denies; it needs a push from the PC or a read endpoint there.
+5. B2 needs a vault ai-box's play reads (the only one today is `group_vars/media_servers/vault.yml`), holding the
+   sender tokens for both sides ("Notify senders and the Apps card"), and the tailnet ACL must let each sender
+   (tagged servers included) reach ai-box:8443. The live journal scan (verify) doesn't look for notify tokens: they
+   never exist on ai-box (only their hashes); B2-CONTRACT.md §1 forbids MC1 to log them.

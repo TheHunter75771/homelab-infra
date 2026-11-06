@@ -41,6 +41,51 @@
       extras can't set the role-owned keys ({{ mission_control_config_role_keys | join(', ') }}).
     quiet: true
 
+# B2 (POST /api/notify, B2-CONTRACT.md §4). The tokens come from the vault: they are read only by this no_log task,
+# whose verdict holds sender names and problems, never a token. The checks below print only the verdict.
+- name: Preflight | the notify tokens, checked without printing them
+  ansible.builtin.set_fact:
+    mission_control_notify_verdict: "{{ mission_control_notify_tokens | mission_control_notify_token_check }}"
+  no_log: true
+
+- name: Preflight | notify senders have valid names and their own token of 32-256 visible characters
+  ansible.builtin.assert:
+    that: mission_control_notify_verdict.problems | length == 0
+    fail_msg: >-
+      mission_control_notify_tokens (vault) must map sender names (1-32 of a-z 0-9 -) to tokens of 32-256 visible
+      ASCII characters, one token per sender (`python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`). The
+      tokens are never printed: {{ mission_control_notify_verdict.problems | join('; ') }}
+    quiet: true
+
+- name: Preflight | notify allow_from names configured senders and only tailnet IPv4 addresses
+  vars:
+    mission_control_allow_issues: >-
+      {{ mission_control_notify_allow_from
+         | mission_control_notify_allow_problems(mission_control_notify_verdict.names, mission_control_tailnet_range) }}
+  ansible.builtin.assert:
+    that: mission_control_allow_issues | length == 0
+    fail_msg: "mission_control_notify_allow_from: {{ mission_control_allow_issues | join('; ') }}"
+    quiet: true
+
+- name: Preflight | quiet hours, the dedupe window and the rate limit
+  vars:
+    mission_control_settings_issues: >-
+      {{ mission_control_quiet_hours
+         | mission_control_notify_settings_problems(mission_control_notify_dedupe_seconds, mission_control_notify_rate_per_hour) }}
+  ansible.builtin.assert:
+    that: mission_control_settings_issues | length == 0
+    fail_msg: "Mission Control's notify settings: {{ mission_control_settings_issues | join('; ') }}"
+    quiet: true
+
+# B1: the Apps card. The problems name the entry and its label, never its URL (a bad one may carry a password).
+- name: Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials
+  vars:
+    mission_control_links_issues: "{{ mission_control_app_links | mission_control_app_links_problems }}"
+  ansible.builtin.assert:
+    that: mission_control_links_issues | length == 0
+    fail_msg: "mission_control_app_links: {{ mission_control_links_issues | join('; ') }}"
+    quiet: true
+
 # Q-1: the guard covers :8443 on ai-box's tailnet IPv6 too. From inventory (tailnet_ip6) or, read-only, from
 # tailscale itself.
 - name: Preflight | ai-box's tailnet IPv6, from tailscale (when the inventory doesn't set it)

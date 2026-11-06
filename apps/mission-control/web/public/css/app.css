@@ -405,6 +405,20 @@ a {
   width: 16px;
   height: 16px;
 }
+.apps .item {
+  padding: 0;
+}
+.app-link {
+  flex: 1;
+  min-width: 0;
+  margin-left: 0;
+}
+.apps .muted {
+  display: flex;
+  align-items: center;
+  min-height: var(--target);
+  padding: 0 4px;
+}
 
 /* status badges: icon shape + word, never colour alone */
 .badge {

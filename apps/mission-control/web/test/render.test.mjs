@@ -225,3 +225,66 @@ test('every card section is labelled by its heading; status words never colour a
     assert.ok(b.textContent.trim(), 'word');
   }
 });
+
+test('Apps card: absent when the server sends none, so the page is the eight cards as before', () => {
+  for (const st of [buildState(mods, { cards: fx.cards(), briefing: fx.briefing() }), buildState(mods, { cards: fail('network'), briefing: fail('network') })]) {
+    const { root } = render(mods, st);
+    assert.equal(find(root, (e) => /^card-apps/.test(e.getAttribute('id') || '')).length, 0, 'no Apps element at all');
+    assert.doesNotMatch(text(root), /\bApps\b/);
+  }
+});
+
+test('Apps card: after Alerts, one tap-through per app in the server order, text only, no status badge', () => {
+  const { root } = render(mods, buildState(mods, { cards: fx.cardsWithApps(), briefing: fx.briefing() }));
+  const ids = find(root, (e) => e.localName === 'section' && /^card-/.test(e.getAttribute('id'))).map((e) => e.getAttribute('id'));
+  assert.deepEqual(ids, [...ORDER, 'apps'].map((i) => `card-${i}`));
+  const sec = card(root, 'apps');
+  assert.equal(sec.getAttribute('aria-labelledby'), 'card-apps-h');
+  assert.equal(find(sec, (e) => e.localName === 'h2')[0].textContent, 'Apps');
+  assert.equal(word(sec), undefined, 'a list of links has no status badge');
+  const as = links(sec);
+  assert.deepEqual(as.map((a) => a.getAttribute('href')), ['https://ai-box.example.test/', 'http://money.example.test:8710/', 'http://media.example.test:8096/web/']);
+  assert.deepEqual(as.map((a) => find(a, (e) => e.getAttribute('class') === 'item-label')[0].textContent), ['Open WebUI', 'Money Hub', 'Jellyfin']);
+  for (const a of as) {
+    assert.equal(a.getAttribute('target'), '_blank');
+    assert.equal(a.getAttribute('rel'), 'noopener noreferrer');
+    assert.match(text(a), /\(opens in a new window\)/);
+  }
+});
+
+test('Apps card: a link that is not plain http(s) shows its label as text; at most 12 apps', () => {
+  const c = fx.cardsWithApps();
+  c.cards.apps.items = [
+    { label: 'Script', url: 'javascript:alert(1)' },
+    { label: 'Creds', url: 'https://u:p@x.example.test/' },
+    { label: 'Relative', url: '/x' },
+    { label: '', url: 'https://nolabel.example.test/' },
+    ...Array.from({ length: 14 }, (_, i) => ({ label: `App ${i}`, url: `https://a${i}.example.test/` })),
+  ];
+  const sec = card(render(mods, buildState(mods, { cards: c })).root, 'apps');
+  const rows = find(sec, (e) => e.localName === 'li');
+  assert.equal(rows.length, 12);
+  assert.deepEqual(rows.slice(0, 3).map(text), ['Script', 'Creds', 'Relative']);
+  assert.equal(links(sec).length, 9, 'only the http(s) ones are links');
+  assert.ok(!links(sec).some((a) => /nolabel/.test(a.getAttribute('href'))), 'an item with no label is dropped');
+});
+
+test('Apps card: leaves the page when the server stops sending it, comes back, and keeps focus on a link', () => {
+  const st = buildState(mods, { cards: fx.cardsWithApps() });
+  const { doc, root, view } = render(mods, st);
+  const sec = card(root, 'apps');
+  links(sec)[1].focus();
+  view.update(buildState(mods, { cards: fx.cardsWithApps() }), fx.NOW);
+  assert.equal(doc.activeElement.getAttribute('id'), 'app-link-1', 'focus survives a refresh');
+  assert.notEqual(doc.activeElement.parentNode, null);
+  view.update(buildState(mods, { cards: fx.cards() }), fx.NOW);
+  assert.equal(card(root, 'apps'), undefined);
+  view.update(buildState(mods, { cards: fx.cardsWithApps() }), fx.NOW);
+  assert.equal(card(root, 'apps'), sec, 'the same section is put back, after Alerts');
+  assert.equal(root.contains(sec), true);
+});
+
+test('Apps card: drawn from the saved copy when the server is down', () => {
+  const st = buildState(mods, { cards: fail('network'), cardsSnapshot: { savedAt: fx.NOW - 60_000, data: fx.cardsWithApps() } });
+  assert.equal(links(card(render(mods, st).root, 'apps')).length, 3);
+});

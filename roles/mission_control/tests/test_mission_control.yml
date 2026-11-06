@@ -44,6 +44,24 @@
     test_my_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
     # A Python with real cryptography (the repo's .venv) for the VAPID scripts and config validation.
     test_crypto_python: "{{ test_repo }}/.venv/bin/python"
+    # B2/B1. run.sh writes notify-canary (random per run); both senders' tokens carry it, so its leak check finds a
+    # token in any encoding it greps for. Never in a set_fact (that would print it).
+    test_notify_canary: "{{ lookup('ansible.builtin.file', test_tmp ~ '/notify-canary') }}"
+    test_notify_tokens:
+      backup-box: "NTA-{{ test_notify_canary }}"
+      gaming-pc: "NTB-{{ test_notify_canary }}"
+    test_notify_allow_from:
+      gaming-pc: [100.64.0.20]
+    test_quiet_hours: {start: "22:00", end: "06:30"}
+    test_app_links:
+      - {label: Server Hub, url: "https://gaming-pc.example.ts.net/"}
+      - {label: PC Control, url: "https://gaming-pc.example.ts.net:8443/"}
+      - {label: Money Hub, url: "https://homebk-edge.example.ts.net:8443/"}
+      - {label: Media dashboard, url: "https://mediaserver.example.ts.net/"}
+      - {label: Jellyseerr, url: "https://mediaserver.example.ts.net:8443/"}
+      - {label: Public site, url: "https://www.example.com/"}
+    # The five keys B2/B1 add to MC1's config (B2-CONTRACT.md §2).
+    test_notify_keys: [app_links, notify_dedupe_seconds, notify_rate_per_hour, notify_senders, quiet_hours]
   handlers:
     - name: Reload systemd for mission-control
       ansible.builtin.debug:
@@ -304,6 +322,204 @@
         - name: role ai_control as it was before H13 (443 only, no shared list)
           vars: {mission_control_aictl_vars_file: "{{ playbook_dir }}/fixtures/ai_control_vars_before_h13.yml"}
           task: "Preflight | ai-box's serve set holds AI Control's 443 and Mission Control's :8443, and role ai_control agrees"
+        # B2/B1 (the good fallback is a full setup; tests/expect_preflight_refusal.yml). The bad tokens below are
+        # throwaway literals, not the canary.
+        - {name: extra sets notify_senders, vars: {mission_control_config_extra: {notify_senders: []}}, task: "Preflight | role inputs"}
+        - {name: extra sets quiet_hours, vars: {mission_control_config_extra: {quiet_hours: null}}, task: "Preflight | role inputs"}
+        - {name: extra sets app_links, vars: {mission_control_config_extra: {app_links: []}}, task: "Preflight | role inputs"}
+        - {name: extra sets notify_rate_per_hour, vars: {mission_control_config_extra: {notify_rate_per_hour: 5}}, task: "Preflight | role inputs"}
+        - {name: extra sets notify_dedupe_seconds, vars: {mission_control_config_extra: {notify_dedupe_seconds: 5}}, task: "Preflight | role inputs"}
+        - name: notify tokens a list
+          vars: {mission_control_notify_tokens: ["{{ 'a' * 40 }}"]}
+          task: "Preflight | notify senders have valid names and their own token of 32-256 visible characters"
+        - name: sender name with a capital
+          vars: {mission_control_notify_tokens: {Backup-box: "{{ 'a' * 40 }}"}}
+          task: "Preflight | notify senders have valid names and their own token of 32-256 visible characters"
+        - name: sender name with an underscore
+          vars: {mission_control_notify_tokens: {backup_box: "{{ 'a' * 40 }}"}}
+          task: "Preflight | notify senders have valid names and their own token of 32-256 visible characters"
+        - name: sender name of 33 characters
+          vars: {mission_control_notify_tokens: {bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: "{{ 'a' * 40 }}"}}
+          task: "Preflight | notify senders have valid names and their own token of 32-256 visible characters"
+        - name: sender token empty
+          vars: {mission_control_notify_tokens: {backup-box: ""}}
+          task: "Preflight | notify senders have valid names and their own token of 32-256 visible characters"
+        - name: sender token missing (vault var unset)
+          vars: {mission_control_notify_tokens: {backup-box: null}}
+          task: "Preflight | notify senders have valid names and their own token of 32-256 visible characters"
+        - name: sender token of 31 characters
+          vars: {mission_control_notify_tokens: {backup-box: "{{ 'a' * 31 }}"}}
+          task: "Preflight | notify senders have valid names and their own token of 32-256 visible characters"
+        - name: sender token of 257 characters
+          vars: {mission_control_notify_tokens: {backup-box: "{{ 'a' * 257 }}"}}
+          task: "Preflight | notify senders have valid names and their own token of 32-256 visible characters"
+        - name: sender token with a space
+          vars: {mission_control_notify_tokens: {backup-box: "{{ 'a' * 20 ~ ' ' ~ 'a' * 20 }}"}}
+          task: "Preflight | notify senders have valid names and their own token of 32-256 visible characters"
+        - name: sender token with a newline
+          vars: {mission_control_notify_tokens: {backup-box: "{{ 'a' * 20 }}\n{{ 'a' * 20 }}"}}
+          task: "Preflight | notify senders have valid names and their own token of 32-256 visible characters"
+        - name: sender token a number
+          vars: {mission_control_notify_tokens: {backup-box: 123456789012345678901234567890123456}}
+          task: "Preflight | notify senders have valid names and their own token of 32-256 visible characters"
+        # Names and tokens swapped (review B1): the keys are pieces of the notify canary, so run.sh's window check
+        # fails if any 12 characters of one reach the output. 32 lowercase hex is a valid sender name.
+        - name: token and name swapped, 32 hex characters as the key
+          vars: {mission_control_notify_tokens: "{{ {test_notify_canary[:32]: 'backup-box'} }}"}
+          task: "Preflight | notify senders have valid names and their own token of 32-256 visible characters"
+        - name: token and name swapped, 32 characters as the key
+          vars: {mission_control_notify_tokens: "{{ {('NTS-' ~ test_notify_canary)[:32]: 'backup-box'} }}"}
+          task: "Preflight | notify senders have valid names and their own token of 32-256 visible characters"
+        - name: token and name swapped, 33 characters as the key
+          vars: {mission_control_notify_tokens: "{{ {('NTS-' ~ test_notify_canary)[:33]: 'backup-box'} }}"}
+          task: "Preflight | notify senders have valid names and their own token of 32-256 visible characters"
+        - name: token and name swapped, 43 characters as the key
+          vars: {mission_control_notify_tokens: "{{ {('NTS-' ~ test_notify_canary)[:43]: 'backup-box'} }}"}
+          task: "Preflight | notify senders have valid names and their own token of 32-256 visible characters"
+        - name: a token pasted as an allow_from name
+          vars: {mission_control_notify_allow_from: "{{ {test_notify_canary[:32]: ['100.64.0.20']} }}"}
+          task: "Preflight | notify allow_from names configured senders and only tailnet IPv4 addresses"
+        - name: a token pasted as an allow_from address
+          vars: {mission_control_notify_allow_from: "{{ {'gaming-pc': [test_notify_canary[:32]]} }}"}
+          task: "Preflight | notify allow_from names configured senders and only tailnet IPv4 addresses"
+        - name: a token pasted as the dedupe window
+          vars: {mission_control_notify_dedupe_seconds: "{{ test_notify_canary[:32] }}"}
+          task: "Preflight | quiet hours, the dedupe window and the rate limit"
+        - name: two senders with the same token
+          vars: {mission_control_notify_tokens: {backup-box: "{{ 'a' * 40 }}", gaming-pc: "{{ 'a' * 40 }}"}}
+          task: "Preflight | notify senders have valid names and their own token of 32-256 visible characters"
+        - name: 33 senders (MC1 takes 32)
+          vars:
+            mission_control_notify_tokens: >-
+              {{ dict(range(33) | map('string') | map('regex_replace', '^', 's') | list
+                      | zip(range(33) | map('string') | map('regex_replace', '$', 'x' * 40) | list)) }}
+          task: "Preflight | notify senders have valid names and their own token of 32-256 visible characters"
+        - name: allow_from 17 addresses (MC1 takes 16)
+          vars:
+            mission_control_notify_allow_from: {gaming-pc: "{{ range(1, 18) | map('string') | map('regex_replace', '^', '100.64.0.') | list }}"}
+          task: "Preflight | notify allow_from names configured senders and only tailnet IPv4 addresses"
+        - name: allow_from for a sender that has no token
+          vars: {mission_control_notify_allow_from: {media-box: [100.64.0.40]}}
+          task: "Preflight | notify allow_from names configured senders and only tailnet IPv4 addresses"
+        - name: allow_from an empty list
+          vars: {mission_control_notify_allow_from: {gaming-pc: []}}
+          task: "Preflight | notify allow_from names configured senders and only tailnet IPv4 addresses"
+        - name: allow_from a string, not a list
+          vars: {mission_control_notify_allow_from: {gaming-pc: 100.64.0.20}}
+          task: "Preflight | notify allow_from names configured senders and only tailnet IPv4 addresses"
+        - name: allow_from a list, not a mapping
+          vars: {mission_control_notify_allow_from: [100.64.0.20]}
+          task: "Preflight | notify allow_from names configured senders and only tailnet IPv4 addresses"
+        - name: allow_from on the LAN
+          vars: {mission_control_notify_allow_from: {gaming-pc: [192.168.77.5]}}
+          task: "Preflight | notify allow_from names configured senders and only tailnet IPv4 addresses"
+        - name: allow_from a public address
+          vars: {mission_control_notify_allow_from: {gaming-pc: [1.1.1.1]}}
+          task: "Preflight | notify allow_from names configured senders and only tailnet IPv4 addresses"
+        - name: allow_from the whole tailnet (a prefix)
+          vars: {mission_control_notify_allow_from: {gaming-pc: [100.64.0.0/10]}}
+          task: "Preflight | notify allow_from names configured senders and only tailnet IPv4 addresses"
+        - name: allow_from a host prefix (/32)
+          vars: {mission_control_notify_allow_from: {gaming-pc: [100.64.0.20/32]}}
+          task: "Preflight | notify allow_from names configured senders and only tailnet IPv4 addresses"
+        - name: allow_from the tailnet IPv6
+          vars: {mission_control_notify_allow_from: {gaming-pc: ["fd7a:115c:a1e0::14"]}}
+          task: "Preflight | notify allow_from names configured senders and only tailnet IPv4 addresses"
+        - name: allow_from a name
+          vars: {mission_control_notify_allow_from: {gaming-pc: [gaming-pc.example.ts.net]}}
+          task: "Preflight | notify allow_from names configured senders and only tailnet IPv4 addresses"
+        - name: allow_from an address twice
+          vars: {mission_control_notify_allow_from: {gaming-pc: [100.64.0.20, 100.64.0.20]}}
+          task: "Preflight | notify allow_from names configured senders and only tailnet IPv4 addresses"
+        - name: quiet hours unquoted (YAML reads 22:00 as 1320)
+          vars: {mission_control_quiet_hours: {start: 22:00, end: "06:30"}}
+          task: "Preflight | quiet hours, the dedupe window and the rate limit"
+        - name: quiet hours 24:00
+          vars: {mission_control_quiet_hours: {start: "24:00", end: "06:30"}}
+          task: "Preflight | quiet hours, the dedupe window and the rate limit"
+        - name: quiet hours without the leading zero
+          vars: {mission_control_quiet_hours: {start: "22:00", end: "6:30"}}
+          task: "Preflight | quiet hours, the dedupe window and the rate limit"
+        - name: quiet hours with seconds
+          vars: {mission_control_quiet_hours: {start: "22:00:00", end: "06:30"}}
+          task: "Preflight | quiet hours, the dedupe window and the rate limit"
+        - name: quiet hours without an end
+          vars: {mission_control_quiet_hours: {start: "22:00"}}
+          task: "Preflight | quiet hours, the dedupe window and the rate limit"
+        - name: quiet hours with an extra key
+          vars: {mission_control_quiet_hours: {start: "22:00", end: "06:30", days: weekdays}}
+          task: "Preflight | quiet hours, the dedupe window and the rate limit"
+        - name: quiet hours as one string
+          vars: {mission_control_quiet_hours: "22:00-06:30"}
+          task: "Preflight | quiet hours, the dedupe window and the rate limit"
+        - name: quiet hours empty string instead of null
+          vars: {mission_control_quiet_hours: ""}
+          task: "Preflight | quiet hours, the dedupe window and the rate limit"
+        - name: quiet hours start equals end
+          vars: {mission_control_quiet_hours: {start: "06:30", end: "06:30"}}
+          task: "Preflight | quiet hours, the dedupe window and the rate limit"
+        - {name: dedupe -1, vars: {mission_control_notify_dedupe_seconds: -1}, task: "Preflight | quiet hours, the dedupe window and the rate limit"}
+        - {name: dedupe 86401, vars: {mission_control_notify_dedupe_seconds: 86401}, task: "Preflight | quiet hours, the dedupe window and the rate limit"}
+        - {name: dedupe a boolean, vars: {mission_control_notify_dedupe_seconds: true}, task: "Preflight | quiet hours, the dedupe window and the rate limit"}
+        - {name: dedupe a float, vars: {mission_control_notify_dedupe_seconds: 1.5}, task: "Preflight | quiet hours, the dedupe window and the rate limit"}
+        - {name: dedupe with a unit, vars: {mission_control_notify_dedupe_seconds: 30m}, task: "Preflight | quiet hours, the dedupe window and the rate limit"}
+        - {name: rate 0, vars: {mission_control_notify_rate_per_hour: 0}, task: "Preflight | quiet hours, the dedupe window and the rate limit"}
+        - {name: rate 1001, vars: {mission_control_notify_rate_per_hour: 1001}, task: "Preflight | quiet hours, the dedupe window and the rate limit"}
+        - {name: rate a string, vars: {mission_control_notify_rate_per_hour: 30/h}, task: "Preflight | quiet hours, the dedupe window and the rate limit"}
+        - name: app links 13 entries
+          vars: {mission_control_app_links: "{{ (test_app_links * 3)[:13] }}"}
+          task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
+        - name: app links a mapping
+          vars: {mission_control_app_links: {Server Hub: "https://gaming-pc.example.ts.net/"}}
+          task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
+        - name: app link with a password
+          vars: {mission_control_app_links: [{label: Money Hub, url: "https://noah:hunter2@homebk-edge.example.ts.net/"}]}
+          task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
+        - name: app link with a user name
+          vars: {mission_control_app_links: [{label: Money Hub, url: "https://noah@homebk-edge.example.ts.net/"}]}
+          task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
+        - name: app link ftp
+          vars: {mission_control_app_links: [{label: Files, url: "ftp://mediaserver.example.ts.net/"}]}
+          task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
+        - name: app link javascript
+          vars: {mission_control_app_links: [{label: Evil, url: "javascript:alert(1)"}]}
+          task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
+        - name: app link without a scheme
+          vars: {mission_control_app_links: [{label: Site, url: "www.example.com/"}]}
+          task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
+        - name: app link with a fragment
+          vars: {mission_control_app_links: [{label: Site, url: "https://www.example.com/#/home"}]}
+          task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
+        - name: app link with a space
+          vars: {mission_control_app_links: [{label: Site, url: "https://www.example.com/a b"}]}
+          task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
+        - name: app link with a query but no path (MC1's link rule)
+          vars: {mission_control_app_links: [{label: Site, url: "https://www.example.com?x=1"}]}
+          task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
+        - name: app link with a bad port
+          vars: {mission_control_app_links: [{label: Site, url: "https://www.example.com:99999/"}]}
+          task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
+        - name: app link of 301 characters
+          vars: {mission_control_app_links: [{label: Site, url: "https://www.example.com/{{ 'a' * 277 }}"}]}
+          task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
+        - name: app link label empty
+          vars: {mission_control_app_links: [{label: "", url: "https://www.example.com/"}]}
+          task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
+        - name: app link label of 33 characters
+          vars: {mission_control_app_links: [{label: "{{ 'L' * 33 }}", url: "https://www.example.com/"}]}
+          task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
+        - name: app link label with a newline
+          vars: {mission_control_app_links: [{label: "Site\nX", url: "https://www.example.com/"}]}
+          task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
+        - name: app link label with a trailing space
+          vars: {mission_control_app_links: [{label: "Site ", url: "https://www.example.com/"}]}
+          task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
+        - name: app link with an extra key
+          vars: {mission_control_app_links: [{label: Site, url: "https://www.example.com/", icon: x}]}
+          task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
+        - name: app link without a url
+          vars: {mission_control_app_links: [{label: Site}]}
+          task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
       loop_control:
         loop_var: case
         label: "{{ case.name }}"
@@ -845,6 +1061,262 @@
         that:
           - test_cfg_refused | bool
           - (lookup('ansible.builtin.file', test_tmp ~ '/etc/mission-control/config.json') | from_json).surprise is not defined
+        quiet: true
+
+    # ---------------------------------------------------------------- B2/B1: notify senders, quiet hours, app links
+    - name: Notify | preflight passes with every B2/B1 variable set
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+      vars:
+        mission_control_notify_tokens: "{{ test_notify_tokens }}"
+        mission_control_notify_allow_from: "{{ test_notify_allow_from }}"
+        mission_control_quiet_hours: "{{ test_quiet_hours }}"
+        mission_control_notify_dedupe_seconds: 600
+        mission_control_notify_rate_per_hour: 60
+        mission_control_app_links: "{{ test_app_links }}"
+
+    - name: Notify | preflight's verdict holds the sender names, never a token
+      ansible.builtin.assert:
+        that: >-
+          mission_control_notify_verdict == {'names': ['backup-box', 'gaming-pc'], 'problems': []}
+        quiet: true
+
+    - name: Notify | names and tokens swapped are named by their length, never printed (32, 33 and 43 characters)
+      vars:
+        hex32: "{{ test_notify_canary[:32] }}"
+        t32: "{{ ('NTS-' ~ test_notify_canary)[:32] }}"
+        t33: "{{ ('NTS-' ~ test_notify_canary)[:33] }}"
+        t43: "{{ ('NTS-' ~ test_notify_canary)[:43] }}"
+        bad_token: the token must be a string of 32-256 visible ASCII characters, no spaces
+        bad_name: must be 1-32 characters of a-z 0-9 -
+        dup: "{{ ({hex32: 'x' * 40, ('a' * 31): 'x' * 40} | mission_control_notify_token_check).problems }}"
+      ansible.builtin.assert:
+        that:
+          - >-
+            ({hex32: 'backup-box'} | mission_control_notify_token_check).problems
+            == ['sender <a key of 32 characters>: ' ~ bad_token]
+          - >-
+            ({t32: 'backup-box'} | mission_control_notify_token_check).problems
+            == ['sender name <a key of 32 characters> ' ~ bad_name]
+          - >-
+            ({t33: 'backup-box'} | mission_control_notify_token_check).problems
+            == ['sender name <a key of 33 characters> ' ~ bad_name]
+          - >-
+            ({t43: 'backup-box'} | mission_control_notify_token_check).problems
+            == ['sender name <a key of 43 characters> ' ~ bad_name]
+          # Two senders with one token: the valid short name is shown, the 32-character one by its length (in sort order).
+          - dup | length == 1
+          - dup[0] is search("^senders ")
+          - dup[0] is search("'" ~ 'a' * 31 ~ "'")
+          - dup[0] is search("<a key of 32 characters>")
+          - dup[0] is search(" have the same token [(]each sender needs its own[)]$")
+          - dup[0] is not search(hex32[:12])
+          - >-
+            ({hex32: ['100.64.0.20']} | mission_control_notify_allow_problems([], '100.64.0.0/10'))
+            == ["allow_from names <a key of 32 characters>, which isn't a configured sender (mission_control_notify_tokens)"]
+          - >-
+            ({'gaming-pc': [t43]} | mission_control_notify_allow_problems(['gaming-pc'], '100.64.0.0/10'))
+            == ["allow_from['gaming-pc']: <a value of 43 characters> is not an IPv4 address (one host, no prefix)"]
+          - (none | mission_control_notify_settings_problems(t32, none)) | join is search('it is <a value of 32 characters>$')
+        quiet: true
+
+    - name: Notify | preflight passes at the edges (0 s dedupe, 1 and 1000 per hour, 23:59, 12 links, http, limits as strings)
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+      vars:
+        mission_control_notify_tokens: {a: "{{ '!' * 32 }}", zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz: "{{ '~' * 256 }}"}
+        mission_control_notify_allow_from: {a: "{{ range(1, 16) | map('string') | map('regex_replace', '^', '100.64.0.') | list + ['100.127.255.254'] }}"}
+        mission_control_quiet_hours: {start: "00:00", end: "23:59"}
+        mission_control_notify_dedupe_seconds: "0"
+        mission_control_notify_rate_per_hour: "1000"
+        mission_control_app_links: >-
+          {{ (test_app_links * 2) | map('combine', {'url': 'http://100.64.0.30:8710/?view=week'}) | list }}
+
+    - name: Notify | preflight passes with 32 senders (MC1's limit)
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+      vars:
+        mission_control_notify_tokens: >-
+          {{ dict(range(32) | map('string') | map('regex_replace', '^', 's') | list
+                  | zip(range(32) | map('string') | map('regex_replace', '$', 'x' * 40) | list)) }}
+        mission_control_notify_allow_from: {}
+
+    - name: Notify | render cases (each key only when set; nothing set renders today's file byte for byte)
+      ansible.builtin.include_tasks: notify_render_case.yml
+      loop:
+        - {name: nothing set, vars: {}, want: {}}
+        - name: senders only
+          vars: {mission_control_notify_tokens: "{{ test_notify_tokens }}"}
+          want:
+            notify_senders:
+              - {name: backup-box, token_sha256: "{{ test_notify_tokens['backup-box'] | hash('sha256') }}"}
+              - {name: gaming-pc, token_sha256: "{{ test_notify_tokens['gaming-pc'] | hash('sha256') }}"}
+        - name: senders with allow_from for one of them
+          vars:
+            mission_control_notify_tokens: "{{ test_notify_tokens }}"
+            mission_control_notify_allow_from: "{{ test_notify_allow_from }}"
+          want:
+            notify_senders:
+              - {name: backup-box, token_sha256: "{{ test_notify_tokens['backup-box'] | hash('sha256') }}"}
+              - name: gaming-pc
+                token_sha256: "{{ test_notify_tokens['gaming-pc'] | hash('sha256') }}"
+                allow_from: [100.64.0.20]
+        - name: quiet hours only (across midnight)
+          vars: {mission_control_quiet_hours: "{{ test_quiet_hours }}"}
+          want: {quiet_hours: {start: "22:00", end: "06:30"}}
+        - name: the limits only, given as strings (as from -e), rendered as integers
+          vars: {mission_control_notify_dedupe_seconds: "0", mission_control_notify_rate_per_hour: "1000"}
+          want: {notify_dedupe_seconds: 0, notify_rate_per_hour: 1000}
+        - name: app links only (in their order)
+          vars: {mission_control_app_links: "{{ test_app_links }}"}
+          want: {app_links: "{{ test_app_links }}"}
+        - name: everything
+          vars:
+            mission_control_notify_tokens: "{{ test_notify_tokens }}"
+            mission_control_notify_allow_from: "{{ test_notify_allow_from }}"
+            mission_control_quiet_hours: "{{ test_quiet_hours }}"
+            mission_control_notify_dedupe_seconds: 600
+            mission_control_notify_rate_per_hour: 60
+            mission_control_app_links: "{{ test_app_links }}"
+          want:
+            notify_senders:
+              - {name: backup-box, token_sha256: "{{ test_notify_tokens['backup-box'] | hash('sha256') }}"}
+              - name: gaming-pc
+                token_sha256: "{{ test_notify_tokens['gaming-pc'] | hash('sha256') }}"
+                allow_from: [100.64.0.20]
+            quiet_hours: {start: "22:00", end: "06:30"}
+            notify_dedupe_seconds: 600
+            notify_rate_per_hour: 60
+            app_links: "{{ test_app_links }}"
+      loop_control:
+        loop_var: render_case
+        label: "{{ render_case.name }}"
+
+    - name: Notify | the hashes are the tokens' sha256 in lowercase hex (64 characters), independent of Ansible's filter
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -I
+          - -c
+          - |
+            import hashlib, json, sys
+            cfg = json.load(open(sys.argv[1]))
+            canary = open(sys.argv[2]).read()
+            want = {"backup-box": hashlib.sha256(("NTA-" + canary).encode()).hexdigest(),
+                    "gaming-pc": hashlib.sha256(("NTB-" + canary).encode()).hexdigest()}
+            got = {s["name"]: s["token_sha256"] for s in cfg["notify_senders"]}
+            ok = got == want and all(len(h) == 64 and h == h.lower() for h in got.values())
+            print("ok" if ok else "mismatch: " + ",".join(sorted(got)))
+          - "{{ test_tmp }}/notify-render.json"
+          - "{{ test_tmp }}/notify-canary"
+      register: test_notify_hashes
+      changed_when: false
+
+    - name: Notify | hashlib agrees
+      ansible.builtin.assert:
+        that: test_notify_hashes.stdout == 'ok'
+        fail_msg: "{{ test_notify_hashes.stdout }}"
+        quiet: true
+
+    # The real task (config_file.yml: no_log, validated by the installed MC1 loader) with everything set. The server
+    # builder adds these keys to MC1's loader in parallel (B2-CONTRACT.md §2). With that loader the file is written
+    # and loads; with the baseline loader (this build copy's apps/ before the merge) it is refused as unknown keys
+    # and nothing is written. Either way this exercises the real no_log task with the canary tokens under -vvv --diff.
+    - name: Notify | which B2/B1 keys the installed MC1 loader knows
+      ansible.builtin.command:
+        argv: >-
+          {{ [test_crypto_python, '-I', '-B', '-c',
+              'import sys; sys.path.insert(0, sys.argv[1]); from mission_control import config; '
+              ~ 'print(sum(k in config.DEFAULTS for k in sys.argv[2:]) if len(sys.argv) == 7 else "bad argv")',
+              test_tmp ~ '/opt/mission-control/server'] + test_notify_keys }}
+      register: test_loader_known
+      changed_when: false
+
+    - name: Notify | the loader knows all five keys or none (a partial B2 server is a bug)
+      ansible.builtin.assert:
+        that: test_loader_known.stdout in ['0', '5']
+        fail_msg: "MC1's loader knows {{ test_loader_known.stdout }} of {{ test_notify_keys | join(', ') }}"
+        quiet: true
+
+    - name: Notify | the real task with everything set
+      block:
+        - name: Notify | config_file.yml with every B2/B1 variable set
+          ansible.builtin.include_tasks: ../tasks/config_file.yml
+          vars:
+            mission_control_config_file: "{{ test_tmp }}/etc/mission-control/config-notify.json"
+            mission_control_notify_tokens: "{{ test_notify_tokens }}"
+            mission_control_notify_allow_from: "{{ test_notify_allow_from }}"
+            mission_control_quiet_hours: "{{ test_quiet_hours }}"
+            mission_control_notify_dedupe_seconds: 600
+            mission_control_notify_rate_per_hour: 60
+            mission_control_app_links: "{{ test_app_links }}"
+        - name: Not reached
+          ansible.builtin.set_fact:
+            test_notify_cfg_by: ""
+      rescue:
+        - name: Note which task refused
+          ansible.builtin.set_fact:
+            test_notify_cfg_by: "{{ ansible_failed_task.name }}"
+
+    - name: Notify | what the real task left
+      ansible.builtin.stat:
+        path: "{{ test_tmp }}/etc/mission-control/config-notify.json"
+      register: test_notify_cfg_stat
+
+    - name: Notify | the real task wrote root:mc 0640 with the keys (new loader), or was refused and wrote nothing (baseline loader)
+      vars:
+        cfg: >-
+          {{ lookup('ansible.builtin.file', test_tmp ~ '/etc/mission-control/config-notify.json') | from_json
+             if test_notify_cfg_stat.stat.exists else {} }}
+        rendered: "{{ lookup('ansible.builtin.file', test_tmp ~ '/notify-render.json') | from_json }}"
+      ansible.builtin.assert:
+        that: >-
+          (test_loader_known.stdout == '5' and test_notify_cfg_by == '' and test_notify_cfg_stat.stat.mode == '0640'
+           and cfg == rendered)
+          or (test_loader_known.stdout == '0' and test_notify_cfg_by == "Config | config.json (MC1's keys, values from inventory)"
+              and not test_notify_cfg_stat.stat.exists)
+        fail_msg: >-
+          loader knows {{ test_loader_known.stdout }} keys; refused by '{{ test_notify_cfg_by }}'; file written:
+          {{ test_notify_cfg_stat.stat.exists }} (mode {{ test_notify_cfg_stat.stat.mode | default('-') }})
+        quiet: true
+
+    # MC1's own loader on the "everything" render: every other key valid, and the five new keys accepted (new loader)
+    # or refused exactly as the unknown keys (baseline loader). no_log: a refusal could quote a value; the verdict
+    # printed below has every run of 16+ hex digits masked.
+    - name: Notify | MC1's loader on the full render
+      ansible.builtin.command:
+        argv:
+          - "{{ test_crypto_python }}"
+          - -I
+          - -B
+          - -c
+          - |
+            import json, re, sys
+            sys.path.insert(0, sys.argv[1])
+            from mission_control import config
+            new = sys.argv[3].split(",")
+            raw = json.load(open(sys.argv[2]))
+            def verdict(d):
+                try:
+                    config.from_dict(d)
+                    return "ok"
+                except config.ConfigError as exc:
+                    return re.sub(r"[0-9a-fA-F]{16,}", "<hex>", str(exc))[:200]
+            print(json.dumps({"base": verdict({k: v for k, v in raw.items() if k not in new}), "full": verdict(raw)}))
+          - "{{ test_tmp }}/opt/mission-control/server"
+          - "{{ test_tmp }}/notify-render.json"
+          - "{{ test_notify_keys | join(',') }}"
+      register: test_notify_loader
+      changed_when: false
+      no_log: true
+
+    - name: Notify | the loader's verdict
+      vars:
+        v: "{{ test_notify_loader.stdout | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - v.base == 'ok'
+          - >-
+            (test_loader_known.stdout == '5' and v.full == 'ok')
+            or (test_loader_known.stdout == '0' and v.full == 'unknown config keys: ' ~ (test_notify_keys | join(', ')))
+        fail_msg: "loader knows {{ test_loader_known.stdout }} keys: {{ v | to_json }}"
         quiet: true
 
     - name: The launcher, rendered over the stand-in package (MC1's CLI needs aiohttp)

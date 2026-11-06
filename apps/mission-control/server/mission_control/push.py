@@ -24,6 +24,9 @@ from .util import clean, file_lock, read_json, write_json_atomic
 
 log = logging.getLogger("mission_control.push")
 
+# Bytes of JSON per push. aes128gcm adds 103 (RFC 8188/8291: an 86-byte header, a 16-byte tag, 1 delimiter) and
+# push services take a 4096-byte body; measured with the real pywebpush in tests/test_review_b2.py.
+MAX_PAYLOAD = 3900
 PRUNE_STATUSES = frozenset({404, 410})
 OK_STATUSES = frozenset({200, 201, 202, 204})
 _B64URL = re.compile(r"[A-Za-z0-9_-]+")
@@ -223,9 +226,14 @@ def make_pywebpush_sender(vapid: dict[str, str], cfg: Config) -> Sender:
 async def send_all(store: SubscriptionStore, sender: Sender, message: dict[str, str], *, only: str | None = None
                    ) -> dict[str, int]:
     """Push `message` to every subscription (or only to endpoint `only`). Prunes 404/410. Returns counts:
-    devices, delivered, failed, pruned."""
-    payload = json.dumps(message, separators=(",", ":"))
+    devices, delivered, failed, pruned. A payload over MAX_PAYLOAD is sent to no one (every push service would
+    refuse it)."""
+    payload = encode(message)
     subs = [s for s in store.all() if only is None or s["endpoint"] == only]
+    size = len(payload.encode("utf-8"))
+    if size > MAX_PAYLOAD:
+        log.error("push not sent: %d bytes is over the %d-byte limit", size, MAX_PAYLOAD)
+        return {"devices": len(subs), "delivered": 0, "failed": len(subs), "pruned": 0}
     gone: set[str] = set()
     delivered = failed = 0
     for sub in subs:
@@ -252,6 +260,15 @@ async def send_all(store: SubscriptionStore, sender: Sender, message: dict[str, 
             log.warning("push to %s failed: HTTP %d (kept)", label, status)
     pruned = store.prune(gone)
     return {"devices": len(subs), "delivered": delivered, "failed": failed, "pruned": pruned}
+
+
+def encode(message: dict[str, str]) -> str:
+    """The payload exactly as send_all sends it: compact JSON, non-ASCII escaped (\\uXXXX)."""
+    return json.dumps(message, separators=(",", ":"))
+
+
+def fits(message: dict[str, str]) -> bool:
+    return len(encode(message).encode("utf-8")) <= MAX_PAYLOAD
 
 
 def subscriptions_path(cfg: Config) -> str:

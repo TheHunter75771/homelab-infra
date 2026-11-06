@@ -47,7 +47,7 @@ http
         return json(res, 200, { ok: true });
       }
       if (p === '/api/cards') {
-        const c = { normal: fx.cards, broken: fx.cardsBroken, hostile: () => fx.hostile(fx.cards()), slow: fx.cards }[scenario] || fx.cards;
+        const c = { normal: fx.cardsWithApps, broken: fx.cardsBroken, hostile: () => fx.hostile(fx.cardsWithApps()), slow: fx.cards }[scenario] || fx.cards;
         return json(res, 200, shift(c()));
       }
       if (p === '/api/briefing') {

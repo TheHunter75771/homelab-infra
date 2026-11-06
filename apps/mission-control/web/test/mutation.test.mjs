@@ -1,7 +1,7 @@
 // Mutation check: copies public/ to a temp dir, applies one mutation, and runs the test file that should
 // catch it against the copy (MC_WEB_PUBLIC). Each mutant must FAIL with the expected test; the unmutated copy
 // must PASS every guarding test, so a failure really comes from the mutation.
-//   hostile.test.mjs  card text rendered with innerHTML / insertAdjacentHTML
+//   hostile.test.mjs  card text (and the Apps card's labels) rendered with innerHTML / insertAdjacentHTML
 //   model.test.mjs    the deep link without URL encoding (or with encodeURI); safeHref letting any scheme in
 //   sw.test.mjs       the worker ignoring notificationclick, opening the root instead of the card, not telling
 //                     an open window, saving error replies as the offline copy
@@ -55,6 +55,13 @@ const MUTANTS = [
     file: 'js/view.js',
     from: "h('span', null, ...children));",
     to: "__ih('span', 'x', children.join('')));",
+    prelude: IH,
+  },
+  {
+    name: 'Apps card labels via innerHTML',
+    file: 'js/view.js',
+    from: "h('span', { class: 'item-label' }, l.label)",
+    to: "__ih('span', 'item-label', l.label)",
     prelude: IH,
   },
   {

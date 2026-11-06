@@ -43,7 +43,7 @@ placeholders and `192.0.2.10` are rendered by the role.
 | `allowed_login` | **required** | Noah's Tailscale login (`mission_control_noah_login`, private host_vars). Compared byte-for-byte with `Tailscale-User-Login`: no trimming, no case folding, no normalisation. The role must render exactly the login tailscale serve sends |
 | `timezone` | `America/New_York` | "today", the 48 h / 7 day windows, and every displayed time |
 | `static_dir` | `/opt/mission-control/web` | MC2's `public/` files (`index.html` is the SPA fallback) |
-| `state_dir` | `/var/lib/mission-control` | `subscriptions.json`, `alerts.json`, `restarts.json`, `briefing.json` and their `.lock` files (mc 0700; files 0600) |
+| `state_dir` | `/var/lib/mission-control` | `subscriptions.json`, `alerts.json`, `restarts.json`, `briefing.json`, `notify.json` and their `.lock` files (mc 0700; files 0600) |
 | `vapid_file` | `/etc/mission-control/vapid.json` | `{"publicKey", "privateKey", "subject"}`: base64url, no padding, a P-256 point (65 bytes) and scalar (32 bytes), subject. The house push-store layout. root:mc 0640. **Subject:** `https://host` with no port, path or trailing slash, or `mailto:address`: py_vapid (1.9.6) refuses to sign anything else, so `load_vapid` applies py_vapid's own pattern (no whitespace or control characters either, so a trailing newline is refused) and also asks py_vapid at load. If that check itself breaks (a crypto backend error, a library change), it logs a warning (exception type only) and the mirrored pattern alone decides. `check-config` fails with "VAPID subject must be https://host (no port or path) or mailto:address"; a signing failure at send time is logged as "VAPID config invalid" and never prunes a device |
 | `push_ttl_s`, `push_timeout_s` | `14400`, `10` | push TTL (how long a push service holds it) and the per-send HTTP timeout |
 | `push_endpoint_hosts` | FCM, Mozilla, `push.apple.com`, `notify.windows.com` | a subscription's endpoint host must equal one of these or end in `.` + one (https only) |
@@ -67,6 +67,11 @@ placeholders and `192.0.2.10` are rendered by the role.
 | `disk_alert_pct` | `90` | warn at ≥ 90 % used, crit at ≥ (100 + 90) / 2 = 95 % (ai-box and PC disks, via AI Control) |
 | `deadline_window_hours`, `bills_window_days` | `48`, `7` | the briefing / card windows |
 | `links` | `{}` | `{card id: URL}`, the tap-through link per card. `links.ai` is also `config.open_webui_url` (the AI card's ask box) |
+| `notify_senders` | `[]` | who may `POST /api/notify`: at most 32 `{name, token_sha256, allow_from?}`. `name` matches `[a-z0-9-]{1,32}`, unique. `token_sha256` is the SHA-256 of the sender's token, 64 lowercase hex, unique; the hash of the empty string is refused. `allow_from` is an optional list of at most 16 IP literals (no CIDR, no duplicates; normalised, so `FD7A::1` = `fd7a::1`). `[]` means the route answers 401 to everyone |
+| `quiet_hours` | `null` | `{"start": "HH:MM", "end": "HH:MM"}` (exactly those keys, 00:00-23:59, start ≠ end) in `timezone`; it may cross midnight; `null` is off. See Notify |
+| `notify_dedupe_seconds` | `1800` | integer 0-86400; `0` turns dedupe off |
+| `notify_rate_per_hour` | `30` | integer 1-1000: accepted messages per sender per rolling hour |
+| `app_links` | `[]` | the Apps card: at most 12 `{label, url}` (exactly those keys), in page order. `label` 1-32 printable characters (not all spaces); `url` an http(s) URL without credentials or fragment, at most 300 characters (the `links` rule). `[]` = no Apps card |
 | `log_level` | `INFO` | |
 
 **Backups:**
@@ -86,13 +91,29 @@ future) never raises an alert, but it shows on the card.
   exactly one `Tailscale-User-Login`, byte-for-byte equal to `allowed_login` (two such headers are refused; the HTTP
   parser itself drops whitespace around a field value, RFC 9110 §5.5, but nothing else is trimmed). Anything
   else gets a 403 `{"error": "forbidden"}`, before any source is touched. That includes the static app.
-- **Methods:** GET everywhere, except POST on the three push endpoints. Anything else is a 405, and HEAD counts
-  as anything else.
+- **The one exception: `POST /api/notify`** (B2). Senders are tagged servers with no login, so for that path and
+  method only, and only when the router sends it to the notify handler, the login check gives way to the handler's
+  bearer-token check (see Notify). It still needs TCP peer 127.0.0.1. Every other method on `/api/notify`, and every
+  other spelling of the path (`/api/notify/`, `/API/notify`, `/api//notify`, ...), keeps the login guard: 403 without
+  the login, 405 with it.
+- **Methods:** GET everywhere, except POST on the three push endpoints and `/api/notify`. Anything else is a 405,
+  and HEAD counts as anything else.
 - **Fetch site:** `/api/*` refuses `Sec-Fetch-Site` values other than `same-origin`, `none` or absent, with a 403.
-- **POST rules:**
+- **POST rules** (the push endpoints; `/api/notify` has its own, see Notify):
   - needs `X-Mission-Control: 1` (403 without it) and `Content-Type: application/json` (415 otherwise);
-  - the body must be at most 8 KiB and a JSON object.
+  - the body must be at most 8 KiB and a JSON object. It is read to the end (or past the limit), however many
+    packets it arrives in.
 - **No query parameters:** `/api/cards` and `/api/briefing` answer any query with a 400.
+- **Requests aiohttp can't parse** (a header or request line over 8190 bytes, a control character in a header, a
+  bad chunk size, ...) never reach the app or the guard: aiohttp answers them itself, and by default its 400 body
+  and its ERROR log line quote the parser's message, which holds raw request bytes (a bearer token included).
+  `server.start` stops both: such a request gets the fixed body `400 Bad Request` and a log line with the error
+  type only ("refused a request that couldn't be parsed: HTTP 400 (LineTooLong)"), and a filter on the
+  `aiohttp.server`, `aiohttp.web`, `aiohttp.internal` and `aiohttp.access` loggers replaces any exception text and
+  traceback with the exception's type ("... (ValueError; details withheld)"). aiohttp 3.14 has no option for the
+  body, so `start` gives the runner's server a subclass whose connections use a `RequestHandler` subclass with
+  its own `handle_error`; `tests/test_review_b2.py` pins the result, so an aiohttp upgrade that breaks it fails
+  the tests.
 - **Headers:** every response has the CSP (`default-src 'self'`, `frame-ancestors 'none'`, ...), `nosniff`,
   `no-referrer` and `X-Frame-Options: DENY`. `/api/*` also gets `Cache-Control: no-store`.
 
@@ -105,12 +126,17 @@ future) never raises an alert, but it shows on the card.
   cards: { ai|ai_control|money|school|home|servers|alerts:
            { status: "ok"|"warn"|"down"|"unknown"|"setup", headline: str,
              items: [{label: str, value: str, status: <status>|null}],
-             link: str|null, error: str|null, updated_at: epoch s|null } } }
+             link: str|null, error: str|null, updated_at: epoch s|null },
+           apps:   # only while app_links isn't empty (B1)
+           { status: "ok", headline: "4 apps", items: [{label, value: "", status: null, url: str}],
+             link: null, error: null, updated_at: null } } }
 ```
 - `unknown` + `error`: the source failed (timeout, refused, HTTP status, bad JSON). `setup`: not configured,
   or Home Assistant has no token yet ("Connect Home Assistant").
 - `ai` is Open WebUI's health plus where answers run (GPU or CPU). `servers` is the watched units, the backups
   and the disks. `alerts` lists every active alert, worst first, with "since …".
+- `apps` (B1) lists `app_links` in config order, each item's `url` the tap-through. With `app_links` empty the key is
+  absent, so the page is unchanged. It has no source and never fails.
 
 `GET /api/briefing` (today's, composed on request from the cached collection):
 ```
@@ -135,8 +161,80 @@ future) never raises an alert, but it shows on the card.
 | briefing | `Mission Control` | `mc-briefing` | `/#card-briefing` |
 | alerts | `Mission Control alert` | `mc-alerts` | `/#card-alerts` |
 | test | `Mission Control` | `mc-test` | `/` |
+| notify | `<sender>: <title>` | `n.<sender>.<tag>`, or `n.<sender>.~<hash>` past 64 characters | the message's `url`, else `/` (only MC's own origin opens; anything else opens `/`) |
+| held summary | `Held overnight: N` | `n.held` | `/` |
 
 `GET /healthz` gives `{"ok": true}` and needs no identity.
+
+## Notify (`POST /api/notify`, B2)
+
+Any host or service sends Noah a push through MC's own Web Push, instead of running its own sender. The client is
+`mc-notify` (`roles/mc_notify_client`). Code: `mission_control/notify.py` (rules and state), `app.py` `notify` and
+`State.notify_accept` / `notify_flush`.
+
+- **Auth:** `Authorization: Bearer <token>`, exactly one header; the scheme is case-insensitive, the token non-empty,
+  printable, with no whitespace. The server holds only `notify_senders[].token_sha256`. The presented value (empty
+  when the header is missing or malformed) is hashed and compared with **every** sender's hash
+  (`hmac.compare_digest`, no early exit), so every failure takes the same path to the same **401**
+  `{"error": "unauthorized"}` with `WWW-Authenticate: Bearer`. The login header doesn't count. Nothing is read or
+  written before the token checks out.
+- **`allow_from`:** when a sender has one, the **last** `X-Forwarded-For` hop (the address `tailscale serve` saw;
+  with several headers, the last hop of the last one) must parse as an IP and equal one of them. No header, an
+  unparseable hop or another address → **403** `{"error": "forbidden"}`. `::ffff:a.b.c.d` is not `a.b.c.d`.
+- **Then, in order:** `Content-Type: application/json` (a charset parameter is fine) else **415**; no query string
+  else 400; at most **4096** bytes (Content-Length or counted while streaming) else **413**; a JSON object else 400;
+  the fields below else **400** `{"error": "<field>"}` (`"unknown field"` for a key outside the table); a push that
+  fits Web Push else **413** `{"error": "too large to push"}` (below). None of the fields may be `null`: leave an
+  absent optional field out.
+
+  | field | rule |
+  |---|---|
+  | `title` | string, 1-80 characters after strip; no control characters (Cc), format characters (Cf: bidi overrides such as U+202E, zero-width characters, the soft hyphen, so also emoji joined with U+200D), line breaks (Zl, Zp) or lone surrogates. It is one line of the summary and must read as it looks. Sent stripped |
+  | `body` | string, 0-300 characters, optional (default `""`). Sent as given (line breaks allowed) |
+  | `tag` | `[a-z0-9][a-z0-9._-]{0,63}` (whole string) |
+  | `url` | optional (default `/`): a path starting with `/` with no `//` in it, or an `https://` URL (lowercase scheme) with no credentials whose host ends in `.ts.net`. Printable ASCII with no space or backslash, at most 512 characters. **A tap opens only MC's own origin:** `sw.js` opens a same-origin url, and anything else (another `*.ts.net` app) opens `/` instead |
+  | `urgent` | optional JSON boolean, default `false` |
+- **Too large to push:** a valid message can still make a push over what Web Push carries. The payload (as
+  `send_all` encodes it: compact JSON with non-ASCII escaped, so a 4-byte UTF-8 emoji in the request is 12 bytes
+  in the push) may be at most `push.MAX_PAYLOAD` = 3900 bytes: aes128gcm adds 103 and push services take a
+  4096-byte body (measured with the real pywebpush in `tests/test_review_b2.py`). Over it → **413**
+  `{"error": "too large to push"}`, nothing counted or held, rather than a 202 that every push service would then
+  refuse. `send_all` itself also refuses (sends nothing, logs the size) any payload over the cap.
+- **Push not set up** (no VAPID file / pywebpush) → **503**, after the body is checked; nothing is counted or held.
+- **Dedupe:** the same sender + tag + title + body accepted within `notify_dedupe_seconds` → **202**
+  `{"status": "deduped"}`, nothing sent. The window runs from the accepted copy; repeats don't stretch it. `url` and
+  `urgent` aren't part of the key. If a sent copy reached no device while devices exist, its dedupe entry is taken
+  back, so the sender's retry goes out.
+- **Rate:** at most `notify_rate_per_hour` accepted (sent or held) messages per sender in the rolling hour; deduped
+  ones don't count → **429** `{"error": "rate limited"}` with `Retry-After` (seconds until the oldest leaves the
+  hour, 1-3600). Urgent messages are rate-limited too.
+- **Quiet hours** (`quiet_hours`, in `timezone`, start included, end excluded): a non-urgent message inside the
+  window → **202** `{"status": "held"}`. At most 50 are held; past that the oldest is dropped and counted. The
+  background loop checks every 60 s; once the window is over (or `quiet_hours` is turned off), everything held goes
+  out as **one** push: title `Held overnight: N` (N includes the dropped ones), body up to 5 `<sender>: <title>`
+  lines (oldest kept first) plus `…and K more`, tag `n.held`, url `/`. Urgent messages are always sent at once.
+  - **The body is at most 400 UTF-16 units** (what `sw.js` cuts at), the "more" line included. Each line gets an
+    equal share of the room, the shortest first, so a title that fits leaves its spare room to the longer ones; a
+    title over its share is cut and ends in `…`. The sender is never cut. So the summary always fits a push.
+  - **Back-off:** a summary that reached no device while devices exist, or that can't go out because push is
+    disabled, stays held and is tried again after 1, 2, 4, 8, 16, 32 minutes, then hourly; a delivery resets it.
+    The back-off is in memory, so a restart tries at once.
+- **Otherwise** → **202** `{"status": "sent"}`, payload `{title: "<sender>: <title>", body, tag, url}`. "Sent"
+  means handed to the push services; the log line has the delivered count.
+- **The pushed tag is at most 64 characters**, since `sw.js` cuts a longer one (and two tags cut to the same 63
+  characters would replace each other): `n.<sender>.<tag>` when that fits, else `n.<sender>.~` + the first 16 hex of
+  the tag's SHA-256. The same tag always gives the same pushed tag, so replace-on-device still works, and since a
+  tag can't start with `~`, a hashed one never equals a literal one.
+- **State:** `state_dir/notify.json` (0600, the server its only writer, atomic write under the file lock, read and
+  written under one lock per request): `dedupe` (a SHA-256 of sender, tag, title and body: never the text), `rate`
+  (accept times), `held` (`{sender, tag, title, at}`: the titles are kept at rest until the summary goes out; the
+  body and url never are) and `dropped`. Loaded like `alerts.json`: bad entries are dropped, numbers must be finite
+  and within 10 years of now, a file that can't be parsed is logged and treated as empty. It survives a restart.
+  **Future times:** a dedupe or rate entry more than 5 min after now is dropped, on load and again on every use, so
+  a poisoned file or a clock stepped back can't silence a message or give a false 429. A held message is never
+  dropped for its time (that would silence it): its time is clamped to now.
+- **Logging:** the sender name, the tag (only once it passed its rule) and the outcome. Never the title, body, url,
+  a token or a hash; a 400 names the field, not the value.
 
 ## Lock screen
 
@@ -268,6 +366,8 @@ Each alert id has a state in `alerts.json`: `pending`, `active` or `clearing`.
   - So every change is a read-modify-write under an exclusive `flock` on `subscriptions.json.lock`, then an atomic
     replace: tmp in the same dir, fsync, rename, fsync of the dir. A failed write leaves the old file and no tmp
     file.
+- **Size:** a payload is at most `push.MAX_PAYLOAD` = 3900 bytes of JSON (aes128gcm adds 103; push services take
+  4096). `send_all` sends a bigger one to no device and logs its size.
 - **Pruning:** a push service answering **404 or 410** removes the subscription. 429, 5xx, other 4xx and network
   errors keep it.
 - **Logging:** endpoint URLs are device capabilities. A log line names a device by its label and gives the HTTP
@@ -312,4 +412,14 @@ The tests cover:
 - subscription pruning, atomic writes and the lock;
 - no secrets in logs;
 - the config rules;
-- the CLI.
+- the CLI;
+- `POST /api/notify` (`tests/test_notify.py`): every status code; the guard kept on every other route, method and
+  path spelling; the token compared with every sender; `allow_from` with and without `X-Forwarded-For`; dedupe, the
+  rolling hour and `Retry-After`; quiet hours across midnight, the held cap and drop count, the single summary,
+  urgent; the state file across a restart and poisoned; no message text or token in the logs; the new config keys;
+  the Apps card;
+- the Lead's follow-ups (`tests/test_review_b2.py`): requests aiohttp can't parse (oversized and control-character
+  `Authorization`, a bad header, request line, method or chunk) never echo or log the token; the push cap measured
+  with the real pywebpush, 413 for a valid message too big to push, the summary always fitting; future times in
+  `notify.json` (poisoned, a clock stepped back, the 5 min slack); the summary's back-off; pushed tags within 64 and
+  the collision case; the summary body within 400; format characters refused in titles.

@@ -73,7 +73,11 @@ becomes "Unknown", a bad link is dropped, and a missing card shows "The server d
     `status` is optional; when it's there, an icon and a screen-reader word go next to the item.
   - **`error`:** a string (null when there's no error). It shows as "Couldn't read this source: <error>". If
     there's an `error` but no `status`, the card reads Down.
-  - **Card ids:** `ai`, `ai_control`, `money`, `school`, `home`, `servers`, `alerts`. Unknown ids are ignored.
+  - **Card ids:** `ai`, `ai_control`, `money`, `school`, `home`, `servers`, `alerts`, and the optional `apps`.
+    Unknown ids are ignored.
+- **`cards.apps`** (B1, optional): the server sends it only when its config has `app_links`. Its `items` are
+  `{label, url}` (other fields are ignored, and so are the card's `status`, `headline` and `link`). With no `apps`
+  card (or none with a usable label) the page has no Apps section at all, so it is exactly the eight cards.
 - **The server formats values.** The page doesn't do money or date maths: it shows `label` and `value` as
   given, so MC1 decides how much detail (for example, budget amounts) appears.
 - **Home before the token exists:** `{"status": "setup", "headline": "Connect Home Assistant", "link": "<HA URL>"}`.
@@ -138,6 +142,11 @@ Response bodies aren't read.
 - **Tap-through:** each card except Briefing and Alerts links to its app (from the card's `link`). The link opens
   in a new context with `rel="noopener noreferrer"`, and has a visible "↗" icon and screen-reader text
   "(opens in a new window)".
+- **Apps card** (B1): after Alerts, while the server sends one. One tap-through per app in the server's order (at
+  most 12), built like the other tap-throughs (`extLink` → `safeHref`; the label is a Text node). A url that isn't
+  plain http(s) without credentials shows its label as text, not a link. No status badge (it's a list of links).
+  The section is built once and put on or taken off the page as the server sends it or stops, and each link keeps
+  its id (`app-link-<n>`), so keyboard focus survives a refresh.
 - **AI card ("Ask anything" box, button "Open in AI"):** the question goes into
   `<open_webui_url>?models=agent_router.auto&q=<question>`.
   - **It only opens the question, ready to send.** Open WebUI 0.12.4 prefills its message box from `?q=` and
@@ -227,14 +236,14 @@ The preview server is for local testing only and is never deployed. All fixtures
 
 | File | What |
 |---|---|
-| `model.test.mjs` | the **deep link**: round-trips for `& # ? + % / quotes newline unicode`; `a=b&models=evil` can't add a parameter; the exact encoded form; a bad base → no link. Also `safeHref` (javascript:/data:/vbscript:/blob:/file:/credentials/relative refused), `statusKey` (incl. `__proto__`), and tolerant `normalizeCards` / `normalizeBriefing`. |
-| `render.test.mjs` | **error states** per card: a source error, an unknown status, a missing card, a bad link, a bad Open WebUI base, the server down with no copy, the server erroring with a copy (banner + age), the briefing failing, and stale data kept on a later failure. Also normal rendering and links, the ask submit (encoded URL, typed text survives refresh), every push-panel state (the iOS steps), focus kept across re-render, and the controller opening the card on a worker `open-card` message. |
-| `hostile.test.mjs` | every string (cards, items, errors, statuses, briefing, snapshot, push message) is `<img src=x onerror=alert(1)> javascript:alert(1) "><script>…`. It proves no element or attribute comes from that text, hrefs are only normalised http(s), and the text shows verbatim. |
+| `model.test.mjs` | `normApps` (absent or junk → no card, http(s) links only, 12 max). The **deep link**: round-trips for `& # ? + % / quotes newline unicode`; `a=b&models=evil` can't add a parameter; the exact encoded form; a bad base → no link. Also `safeHref` (javascript:/data:/vbscript:/blob:/file:/credentials/relative refused), `statusKey` (incl. `__proto__`), and tolerant `normalizeCards` / `normalizeBriefing`. |
+| `render.test.mjs` | the **Apps card**: absent unless sent (the page is the eight cards), order, links, labels as text for bad links, the 12 cap, taken off and put back, focus kept, drawn from the saved copy. **Error states** per card: a source error, an unknown status, a missing card, a bad link, a bad Open WebUI base, the server down with no copy, the server erroring with a copy (banner + age), the briefing failing, and stale data kept on a later failure. Also normal rendering and links, the ask submit (encoded URL, typed text survives refresh), every push-panel state (the iOS steps), focus kept across re-render, and the controller opening the card on a worker `open-card` message. |
+| `hostile.test.mjs` | every string (cards, the Apps card, items, errors, statuses, briefing, snapshot, push message) is `<img src=x onerror=alert(1)> javascript:alert(1) "><script>…`. It proves no element or attribute comes from that text, hrefs are only normalised http(s), and the text shows verbatim. |
 | `sw.test.mjs` | the worker in a fake scope: precache, the shell served through a 502, snapshots saved on 200 objects only. **Push** → `showNotification` with icon, badge, tag and card. Odd or forged payloads never point off-origin. **`notificationclick`** opens `/#card-<id>` when no window is open, or focuses the open window and posts `open-card` (a window on another origin is never used). Also `pushsubscriptionchange`, and that **cross-origin requests** (another host, port or scheme) are never answered from the shell or saved as a snapshot. |
 | `push.test.mjs` | `pushEnv` (iPhone Safari tab, iPadOS-as-Mac, standalone, denied, insecure, unsupported); subscribe/test/unsubscribe POST bodies and the `X-Mission-Control` header; key rotation; readable errors. **Expired subscription:** 410/404 on test or subscribe drops the local subscription (even if that throws), and the controller's panel goes from On to Off with the expired line; a 500 does not. Unsubscribe: a 500 is an error and stays On; 410/404 drop it. Every `window.open` is `_blank` + `noopener,noreferrer`, and every rendered external link has `rel="noopener noreferrer"`. |
 | `dom.test.mjs` | allowlists pinned; `h()` refuses `href`/`style`/string handlers; `extLink` / `hashLink` refuse everything but http(s) / literal ids |
 | `static.test.mjs` | banned APIs; no view sets `href`/`src`/`on*`; CSP-clean `index.html`; no other origins; imports resolve; `sw.js` stamped. The **manifest** is valid (names, standalone, colours match the CSS, icon files exist with their real PNG sizes, 192/512 any + 512 maskable, apple-touch 180, badge 96). Icons match the script. The maskable safe zone holds. CSS a11y basics; **WCAG contrast** on the tokens. |
-| `mutation.test.mjs` | 18 mutants, each against the test that must catch it, plus an unmutated control that must pass. The mutants: card headline / item label / every Text node / briefing title / error note rendered via `innerHTML` or `insertAdjacentHTML` (hostile test); the deep link **without URL encoding**, or with `encodeURI`, and `safeHref` letting any scheme through (model test); the SW **ignoring `notificationclick`**, opening `/` instead of the card, or not telling an open window (sw test); the SW saving error replies as the offline copy (sw test); a card's error not rendered (render test); a 410 not recognised as "gone", the controller ignoring "gone" so a 410 leaves the panel On, unsubscribe swallowing a server 500, and `window.open` without `noopener` (push test); the SW answering cross-origin requests (sw test). |
+| `mutation.test.mjs` | 19 mutants, each against the test that must catch it, plus an unmutated control that must pass. The mutants: card headline / item label / every Text node / briefing title / error note / Apps label rendered via `innerHTML` or `insertAdjacentHTML` (hostile test); the deep link **without URL encoding**, or with `encodeURI`, and `safeHref` letting any scheme through (model test); the SW **ignoring `notificationclick`**, opening `/` instead of the card, or not telling an open window (sw test); the SW saving error replies as the offline copy (sw test); a card's error not rendered (render test); a 410 not recognised as "gone", the controller ignoring "gone" so a 410 leaves the panel On, unsubscribe swallowing a server 500, and `window.open` without `noopener` (push test); the SW answering cross-origin requests (sw test). |
 
 `test/dom-shim.mjs` (copied from AI Control's web module) is a small DOM with a real HTML parser behind
 `innerHTML`. That parser is what lets the hostile test catch an innerHTML regression.

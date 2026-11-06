@@ -115,7 +115,22 @@ export function normCard(raw) {
   };
 }
 
-/** /api/cards → {generatedAt, config: {openWebuiUrl}, cards: {id: card}} with every id present. */
+/**
+ * The Apps card (B1) → {links: [{label, href}]} in the server's order, at most 12, or null when the server didn't
+ * send one (the card is then left off the page). A url that isn't plain http(s) keeps its label with href null,
+ * so it shows as text, not a link. Items without a usable label are dropped.
+ */
+export function normApps(raw) {
+  if (!isObj(raw) || !Array.isArray(raw.items)) return null;
+  const links = raw.items
+    .filter(isObj)
+    .map((it) => ({ label: str(it.label), href: safeHref(it.url) }))
+    .filter((l) => l.label)
+    .slice(0, MAX_ITEMS);
+  return links.length ? { links } : null;
+}
+
+/** /api/cards → {generatedAt, config: {openWebuiUrl}, cards: {id: card}, apps} with every card id present. */
 export function normalizeCards(json) {
   const o = isObj(json) ? json : {};
   const cfg = isObj(o.config) ? o.config : {};
@@ -129,6 +144,7 @@ export function normalizeCards(json) {
       vapidPublicKey: typeof cfg.vapid_public_key === 'string' && /^[A-Za-z0-9_-]{40,200}$/.test(cfg.vapid_public_key) ? cfg.vapid_public_key : null,
     },
     cards,
+    apps: normApps(Object.hasOwn(src, 'apps') ? src.apps : undefined),
   };
 }
 

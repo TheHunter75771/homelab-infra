@@ -3,6 +3,9 @@
 Identity: every request except /healthz must come from 127.0.0.1 (tailscale serve) and carry a
 `Tailscale-User-Login` equal to `allowed_login` (case-insensitive). Anything else is a 403. Any local process
 can set that header, which is why the server binds 127.0.0.1 only and the unit's IP filter is tight.
+
+The one exception is POST /api/notify (B2, notify.py): senders are tagged servers with no login, so that route
+and method alone authenticate by bearer token in the handler instead. It still needs the 127.0.0.1 peer.
 """
 
 from __future__ import annotations
@@ -25,12 +28,14 @@ from aiohttp import web
 from . import alerts as alerts_mod
 from . import briefing as briefing_mod
 from . import cards as cards_mod
+from . import notify as notify_mod
 from .config import Config
 from .net import make_session, strict_json
 from .push import (
     PushError,
     Sender,
     SubscriptionStore,
+    fits,
     load_vapid,
     make_pywebpush_sender,
     send_all,
@@ -44,8 +49,11 @@ log = logging.getLogger("mission_control.app")
 CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; "
        "worker-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 ALLOWED_FETCH_SITES = frozenset({"same-origin", "none"})
-POST_PATHS = frozenset({"/api/push/subscribe", "/api/push/unsubscribe", "/api/push/test"})
+NOTIFY_PATH = "/api/notify"
+POST_PATHS = frozenset({"/api/push/subscribe", "/api/push/unsubscribe", "/api/push/test", NOTIFY_PATH})
 MAX_BODY = 8192
+NOTIFY_TICK_S = 60.0  # how often the held queue is checked for the end of quiet hours
+FLUSH_RETRY_FIRST_S, FLUSH_RETRY_MAX_S = 60.0, 3600.0  # an undelivered summary: 1, 2, 4 ... min, then hourly
 TEST_MESSAGE = {"title": "Mission Control", "body": "Notifications work on this device.", "tag": "mc-test", "url": "/"}
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")
@@ -69,12 +77,16 @@ def error_response(status: int, message: str, headers: dict[str, str] | None = N
     return json_out({"error": message}, status, headers)
 
 
+def _local_peer(request: web.Request) -> bool:
+    transport = request.transport
+    peer = transport.get_extra_info("peername") if transport is not None else None
+    return bool(peer) and peer[0] == "127.0.0.1"
+
+
 def is_allowed(request: web.Request, login: str) -> bool:
     """Peer 127.0.0.1, exactly one Tailscale-User-Login header, byte-for-byte equal to `login`: no trimming, no
     case folding, no Unicode normalisation (Reviewer Z-10)."""
-    transport = request.transport
-    peer = transport.get_extra_info("peername") if transport is not None else None
-    if not peer or peer[0] != "127.0.0.1":
+    if not _local_peer(request):
         return False
     values = request.headers.getall("Tailscale-User-Login", [])
     if len(values) != 1:
@@ -96,6 +108,10 @@ class State:
         self.subs = SubscriptionStore(subscriptions_path(cfg), cfg.max_subscriptions, clock)
         self.alert_store = alerts_mod.AlertStore(os.path.join(cfg.state_dir, "alerts.json"))
         self.restart_store = alerts_mod.RestartStore(os.path.join(cfg.state_dir, "restarts.json"))
+        self.notify_store = notify_mod.NotifyStore(os.path.join(cfg.state_dir, "notify.json"))
+        self.notify_lock = asyncio.Lock()  # one read-modify-write of notify.json at a time
+        self.flush_failures = 0  # summaries in a row that weren't delivered (in memory: a restart tries at once)
+        self.flush_retry_at = 0.0
         self.vapid_public_key: str | None = None
         self.sender = sender
         self.tasks: list[asyncio.Task[Any]] = []
@@ -156,6 +172,98 @@ class State:
                 log.exception("alert round failed")
             await asyncio.sleep(self.cfg.alert_interval_s)
 
+    async def notify_accept(self, name: str, msg: notify_mod.Message) -> tuple[str, int | None]:
+        """A checked message from sender `name`: dedupe, rate, quiet hours, else send (notify.py). Returns the
+        outcome (deduped | rate-limited | held | sent) and, when rate-limited, the Retry-After seconds.
+
+        The rate and dedupe entries are written before the push goes out, so a second copy arriving meanwhile is
+        deduped; if the push then reached no device (while devices exist), the dedupe entry is taken back so the
+        sender's retry isn't swallowed."""
+        sender = self.sender
+        assert sender is not None
+        key = notify_mod.dedupe_key(name, msg)
+        async with self.notify_lock:
+            now = self.clock()
+            state = notify_mod.prune(self.notify_store.load(now), now, self.cfg.notify_dedupe_seconds)
+            if key in state["dedupe"]:
+                log.info("notify: %s %s: deduped", name, msg.tag)
+                return "deduped", None
+            times = state["rate"].get(name, [])
+            if len(times) >= self.cfg.notify_rate_per_hour:
+                log.warning("notify: %s %s: rate limited (%d in the last hour)", name, msg.tag, len(times))
+                return "rate-limited", notify_mod.retry_after(times, now)
+            state["rate"][name] = [*times, now]
+            if self.cfg.notify_dedupe_seconds:
+                state["dedupe"][key] = now
+            if not msg.urgent and notify_mod.in_quiet_hours(self.cfg.quiet_hours, now, self.cfg.timezone):
+                dropped = notify_mod.hold(state, name, msg, now)
+                self.notify_store.save(state)
+                log.info("notify: %s %s: held for after quiet hours (%d waiting)", name, msg.tag, len(state["held"]))
+                if dropped is not None:
+                    log.warning("notify: held queue full (%d); dropped the oldest (%s %s)", notify_mod.HELD_CAP,
+                                dropped["sender"], dropped["tag"])
+                return "held", None
+            self.notify_store.save(state)
+        result = await send_all(self.subs, sender, notify_mod.push_message(name, msg))
+        log.info("notify: %s %s: sent%s, delivered to %d/%d device(s), %d pruned", name, msg.tag,
+                 " (urgent)" if msg.urgent else "", result["delivered"], result["devices"], result["pruned"])
+        if self.cfg.notify_dedupe_seconds and not result["delivered"] and result["devices"]:
+            async with self.notify_lock:
+                state = self.notify_store.load(self.clock())
+                if state["dedupe"].get(key) == now:
+                    del state["dedupe"][key]
+                    try:
+                        self.notify_store.save(state)
+                    except OSError as exc:
+                        log.error("notify state not saved (%s)", type(exc).__name__)
+        return "sent", None
+
+    def _flush_failed(self, now: float) -> float:
+        """Backs off after a summary that couldn't go out: 1, 2, 4 ... minutes, at most an hour."""
+        self.flush_failures += 1
+        delay = min(FLUSH_RETRY_MAX_S, FLUSH_RETRY_FIRST_S * 2 ** min(self.flush_failures - 1, 16))
+        self.flush_retry_at = now + delay
+        return delay
+
+    async def notify_flush(self) -> bool:
+        """Outside quiet hours, everything held goes out as one summary push (notify.summary_push). It stays held
+        while push is disabled, or when the summary reached no device while devices exist, and is tried again with
+        a back-off (_flush_failed). Returns True when the queue was emptied. The lock is held across this send
+        (about once a night), so a message held meanwhile can't be cleared with the queue unsent."""
+        async with self.notify_lock:
+            now = self.clock()
+            state = self.notify_store.load(now)
+            if not state["held"] or notify_mod.in_quiet_hours(self.cfg.quiet_hours, now, self.cfg.timezone):
+                return False
+            if now < self.flush_retry_at:
+                return False
+            n = len(state["held"]) + state["dropped"]
+            if self.sender is None:
+                delay = self._flush_failed(now)
+                log.warning("notify: %d held message(s) to send, but push is disabled; next try in %d s", n, delay)
+                return False
+            result = await send_all(self.subs, self.sender, notify_mod.summary_push(state["held"], state["dropped"]))
+            log.info("notify: held summary of %d message(s), delivered to %d/%d device(s), %d pruned", n,
+                     result["delivered"], result["devices"], result["pruned"])
+            if not result["delivered"] and result["devices"]:
+                log.warning("notify: held summary not delivered; next try in %d s", self._flush_failed(now))
+                return False
+            self.flush_failures, self.flush_retry_at = 0, 0.0
+            state = notify_mod.prune(state, now, self.cfg.notify_dedupe_seconds)
+            state["held"], state["dropped"] = [], 0
+            self.notify_store.save(state)
+            return True
+
+    async def notify_loop(self) -> None:
+        while True:
+            try:
+                await self.notify_flush()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("held-message flush failed")
+            await asyncio.sleep(NOTIFY_TICK_S)
+
 
 STATE = web.AppKey("state", State)
 BACKGROUND = web.AppKey("background", bool)
@@ -170,11 +278,19 @@ def _is_api(path: str) -> bool:
     return path == "/api" or path.startswith("/api/")
 
 
+def _token_route(request: web.Request) -> bool:
+    """POST /api/notify from the local proxy, routed to `notify`: the one place the login guard gives way to the
+    handler's token check (B2). Any other method, path spelling or route keeps the guard."""
+    return (request.method == "POST" and request.path == NOTIFY_PATH and request.match_info.handler is notify
+            and _local_peer(request))
+
+
 @web.middleware
 async def guard(request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]) -> web.StreamResponse:
     st = _st(request)
     path = request.path
-    if path != "/healthz" and not is_allowed(request, st.cfg.allowed_login):
+    token_route = _token_route(request)
+    if path != "/healthz" and not token_route and not is_allowed(request, st.cfg.allowed_login):
         log.warning("refused %s %s: not the allowed Tailscale identity", request.method, path[:60] if path.isprintable() else "?")
         return error_response(403, "forbidden")
     if request.method == "POST" and path in POST_PATHS:
@@ -186,7 +302,7 @@ async def guard(request: web.Request, handler: Callable[[web.Request], Awaitable
         site = request.headers.get("Sec-Fetch-Site")
         if site is not None and site not in ALLOWED_FETCH_SITES:
             return error_response(403, "cross-site request refused")
-    if request.method == "POST":
+    if request.method == "POST" and not token_route:  # the notify handler checks its own content type
         if request.headers.get("X-Mission-Control") != "1":
             return error_response(403, "missing X-Mission-Control header")
         if request.content_type != "application/json":
@@ -222,14 +338,19 @@ async def _on_prepare(request: web.Request, response: web.StreamResponse) -> Non
 
 
 # ---- handlers --------------------------------------------------------------------------------------------------
-async def _body(request: web.Request) -> dict[str, Any]:
-    if request.content_length is not None and request.content_length > MAX_BODY:
+async def _body(request: web.Request, limit: int = MAX_BODY) -> dict[str, Any]:
+    if request.content_length is not None and request.content_length > limit:
         raise ApiError(413, "body too large")
+    raw = b""
     try:
-        raw = await request.content.read(MAX_BODY + 1)
+        while len(raw) <= limit:  # read() returns what has arrived so far: keep reading to the end or past the limit
+            chunk = await request.content.read(limit + 1 - len(raw))
+            if not chunk:
+                break
+            raw += chunk
     except Exception:  # noqa: BLE001
         raise ApiError(400, "unreadable body") from None
-    if len(raw) > MAX_BODY:
+    if len(raw) > limit:
         raise ApiError(413, "body too large")
     try:
         data = strict_json(raw)
@@ -313,6 +434,42 @@ async def push_test(request: web.Request) -> web.Response:
     raise ApiError(502, "the push service didn't accept the test")
 
 
+async def notify(request: web.Request) -> web.Response:
+    """POST /api/notify (B2). The guard let it through without a login; the token is the auth. Logs name the
+    sender, the tag (once it is valid) and the outcome only."""
+    st = _st(request)
+    sender = notify_mod.match_sender(st.cfg.notify_senders, request.headers.getall("Authorization", []))
+    if sender is None:
+        log.warning("notify: refused: unauthorized")
+        return error_response(401, "unauthorized", {"WWW-Authenticate": "Bearer"})
+    name = sender.name
+    if not notify_mod.from_allowed(sender, request.headers.getall("X-Forwarded-For", [])):
+        log.warning("notify: %s refused: not from an allowed address", name)
+        return error_response(403, "forbidden")
+    if request.content_type != "application/json":
+        log.info("notify: %s refused: not JSON (415)", name)
+        return error_response(415, "JSON only")
+    try:
+        _no_query(request)
+        msg = notify_mod.parse_message(await _body(request, notify_mod.MAX_REQUEST))
+    except notify_mod.BadField as exc:
+        log.info("notify: %s refused: bad %s (400)", name, exc.field)
+        return error_response(400, exc.field)
+    except ApiError as exc:
+        log.info("notify: %s refused: %s (%d)", name, exc.message, exc.status)
+        raise
+    if not fits(notify_mod.push_message(name, msg)):  # valid, but past what a push carries once encoded
+        log.info("notify: %s %s refused: too large to push (413)", name, msg.tag)
+        return error_response(413, "too large to push")
+    if st.sender is None:
+        log.warning("notify: %s %s: push is not set up (503)", name, msg.tag)
+        return error_response(503, "push is not set up on the server")
+    outcome, retry = await st.notify_accept(name, msg)
+    if outcome == "rate-limited":
+        return error_response(429, "rate limited", {"Retry-After": str(retry)})
+    return json_out({"status": outcome}, 202)
+
+
 async def api_not_found(_request: web.Request) -> web.Response:
     return error_response(404, "no such endpoint")
 
@@ -341,6 +498,7 @@ async def _startup(app: web.Application) -> None:
     st.load_push()
     if app.get(BACKGROUND, True):
         st.tasks.append(asyncio.create_task(st.alert_loop(), name="alerts"))
+        st.tasks.append(asyncio.create_task(st.notify_loop(), name="notify"))
 
 
 async def _cleanup(app: web.Application) -> None:
@@ -372,6 +530,7 @@ def make_app(cfg: Config, *, background: bool = True, sender: Sender | None = No
     r.add_route("POST", "/api/push/subscribe", push_subscribe)
     r.add_route("POST", "/api/push/unsubscribe", push_unsubscribe)
     r.add_route("POST", "/api/push/test", push_test)
+    r.add_route("POST", NOTIFY_PATH, notify)
     r.add_route("*", "/api", api_not_found)
     r.add_route("*", "/api/{tail:.*}", api_not_found)
     r.add_route("GET", "/{tail:.*}", static)

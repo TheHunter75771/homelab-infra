@@ -3,6 +3,7 @@ Noah's Tailscale login from private host_vars); every source URL defaults to nul
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import re
@@ -64,6 +65,13 @@ DEFAULTS: dict[str, Any] = {
     "deadline_window_hours": 48.0,
     "bills_window_days": 7,
     "links": {},
+    # POST /api/notify (B2): senders, quiet hours, dedupe window and per-sender rate. [] = everyone gets a 401.
+    "notify_senders": [],
+    "quiet_hours": None,
+    "notify_dedupe_seconds": 1800,
+    "notify_rate_per_hour": 30,
+    # B1: the "Apps" card, [{label, url}] in page order. [] = no card.
+    "app_links": [],
     "log_level": "INFO",
 }
 
@@ -72,6 +80,11 @@ _UNIT_RE = re.compile(r"[A-Za-z0-9:_.@][A-Za-z0-9:_.@-]{0,119}\.(service|socket|
 _ENTITY_RE = re.compile(r"[a-z_]{1,40}\.[a-z0-9_]{1,120}")
 _ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}")
 _HOST_RE = re.compile(r"(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,62})(\.[A-Za-z0-9]([A-Za-z0-9-]{0,62}))*\.?")
+_LINK_RE = re.compile(r"https?://[^\s/?#@]+(/[^\s#]*)?")  # a tap-through link: http(s), no credentials or fragment
+_SENDER_RE = re.compile(r"[a-z0-9-]{1,32}")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_HHMM_RE = re.compile(r"([01][0-9]|2[0-3]):([0-5][0-9])")
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()  # never a sender's hash: a missing token must not match it
 _LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 
 
@@ -88,6 +101,13 @@ class Backup:
     unit: str | None = None
     max_age_hours: float = 36.0
     timer: str | None = None  # kind "unit": the Persistent=true timer that starts it (default: <unit>.timer)
+
+
+@dataclass(frozen=True)
+class NotifySender:
+    name: str
+    token_sha256: str  # hex, lowercase: the server never holds the token itself
+    allow_from: tuple[str, ...] = ()  # normalised IP literals; empty = any address
 
 
 @dataclass(frozen=True)
@@ -130,6 +150,11 @@ class Config:
     deadline_window_hours: float = 48.0
     bills_window_days: int = 7
     links: tuple[tuple[str, str], ...] = ()
+    notify_senders: tuple[NotifySender, ...] = ()
+    quiet_hours: tuple[int, int] | None = None  # (start, end) in minutes after local midnight; may cross midnight
+    notify_dedupe_seconds: int = 1800
+    notify_rate_per_hour: int = 30
+    app_links: tuple[tuple[str, str], ...] = ()  # (label, url)
     log_level: str = "INFO"
 
     def link(self, card: str) -> str | None:
@@ -258,9 +283,79 @@ def _links(raw: dict[str, Any]) -> tuple[tuple[str, str], ...]:
     for card, url in value.items():
         if card not in CARD_IDS:
             raise ConfigError(f"links: unknown card {str(card)[:40]!r} (cards: {', '.join(CARD_IDS)})")
-        if not isinstance(url, str) or not re.fullmatch(r"https?://[^\s/?#@]+(/[^\s#]*)?", url) or len(url) > 300:
+        if not isinstance(url, str) or not _LINK_RE.fullmatch(url) or len(url) > 300:
             raise ConfigError(f"links[{card}] must be an http(s) URL without credentials")
         out.append((card, url))
+    return tuple(out)
+
+
+def _notify_senders(raw: dict[str, Any]) -> tuple[NotifySender, ...]:
+    value = raw.get("notify_senders", DEFAULTS["notify_senders"])
+    if not isinstance(value, list) or len(value) > 32:
+        raise ConfigError("notify_senders must be a list of at most 32 {name, token_sha256, allow_from}")
+    out: list[NotifySender] = []
+    for s in value:
+        if not isinstance(s, dict):
+            raise ConfigError("each notify_senders entry must be an object")
+        extra = set(s) - {"name", "token_sha256", "allow_from"}
+        if extra:
+            raise ConfigError(f"notify_senders: unknown keys: {', '.join(sorted(str(k)[:40] for k in extra))}")
+        name, digest = s.get("name"), s.get("token_sha256")
+        if not isinstance(name, str) or not _SENDER_RE.fullmatch(name):
+            raise ConfigError("notify_senders: name must match [a-z0-9-]{1,32}")
+        if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest) or digest == EMPTY_SHA256:
+            raise ConfigError(f"notify_senders[{name}]: token_sha256 must be 64 lowercase hex characters "
+                              "(the SHA-256 of a non-empty token)")
+        allow = s.get("allow_from", [])
+        if not isinstance(allow, list) or len(allow) > 16:
+            raise ConfigError(f"notify_senders[{name}]: allow_from must be a list of at most 16 IP addresses")
+        ips = []
+        for ip in allow:
+            try:
+                ips.append(str(ipaddress.ip_address(ip if isinstance(ip, str) else "")))
+            except ValueError:
+                raise ConfigError(f"notify_senders[{name}]: allow_from: {str(ip)[:60]!r} is not an IP address") from None
+        if len(set(ips)) != len(ips):
+            raise ConfigError(f"notify_senders[{name}]: allow_from lists an address twice")
+        out.append(NotifySender(name, digest, tuple(ips)))
+    if len({x.name for x in out}) != len(out):
+        raise ConfigError("notify_senders: names must be unique")
+    if len({x.token_sha256 for x in out}) != len(out):
+        raise ConfigError("notify_senders: token_sha256 values must be unique")
+    return tuple(out)
+
+
+def _quiet_hours(raw: dict[str, Any]) -> tuple[int, int] | None:
+    value = raw.get("quiet_hours", DEFAULTS["quiet_hours"])
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"start", "end"}:
+        raise ConfigError('quiet_hours must be {"start": "HH:MM", "end": "HH:MM"} or null')
+    mins = []
+    for k in ("start", "end"):
+        m = _HHMM_RE.fullmatch(value[k]) if isinstance(value[k], str) else None
+        if m is None:
+            raise ConfigError(f"quiet_hours.{k} must be HH:MM (00:00-23:59)")
+        mins.append(int(m.group(1)) * 60 + int(m.group(2)))
+    if mins[0] == mins[1]:
+        raise ConfigError("quiet_hours: start and end must differ (use null for no quiet hours)")
+    return mins[0], mins[1]
+
+
+def _app_links(raw: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    value = raw.get("app_links", DEFAULTS["app_links"])
+    if not isinstance(value, list) or len(value) > 12:
+        raise ConfigError("app_links must be a list of at most 12 {label, url}")
+    out = []
+    for a in value:
+        if not isinstance(a, dict) or set(a) != {"label", "url"}:
+            raise ConfigError("each app_links entry must be exactly {label, url}")
+        label, url = a["label"], a["url"]
+        if not isinstance(label, str) or not 0 < len(label) <= 32 or not label.isprintable() or not label.strip():
+            raise ConfigError("app_links: label must be 1-32 printable characters")
+        if not isinstance(url, str) or not _LINK_RE.fullmatch(url) or len(url) > 300:
+            raise ConfigError(f"app_links[{label}]: url must be an http(s) URL without credentials")
+        out.append((label, url))
     return tuple(out)
 
 
@@ -332,6 +427,11 @@ def from_dict(raw: dict[str, Any]) -> Config:
         deadline_window_hours=_number(raw, "deadline_window_hours", 1, 24 * 14),
         bills_window_days=_int(raw, "bills_window_days", 1, 31),
         links=_links(raw),
+        notify_senders=_notify_senders(raw),
+        quiet_hours=_quiet_hours(raw),
+        notify_dedupe_seconds=_int(raw, "notify_dedupe_seconds", 0, 86400),
+        notify_rate_per_hour=_int(raw, "notify_rate_per_hour", 1, 1000),
+        app_links=_app_links(raw),
         log_level=level,
     )
 

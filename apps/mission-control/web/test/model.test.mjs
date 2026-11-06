@@ -138,3 +138,16 @@ test('cardFromHash, longDate, ago, failText', () => {
   assert.equal(m.failText({ kind: 'http', status: 502 }), 'HTTP 502');
   assert.equal(m.failText({ kind: 'shape', status: 200 }), 'an unreadable reply');
 });
+
+test('normApps: absent or unusable → null; labels kept, links only http(s), at most 12', () => {
+  for (const junk of [undefined, null, 'x', [], {}, { items: 'x' }, { items: [] }, { items: ['bare', 5, null, { url: 'https://a.example.test/' }] }])
+    assert.equal(m.normApps(junk), null, JSON.stringify(junk));
+  assert.equal(m.normalizeCards(fx.cards()).apps, null);
+  assert.deepEqual(m.normalizeCards(fx.cardsWithApps()).apps.links[0], { label: 'Open WebUI', href: 'https://ai-box.example.test/' });
+  const a = m.normApps({ items: [{ label: ' Spaced ', url: 'javascript:alert(1)' }, ...Array.from({ length: 20 }, (_, i) => ({ label: `A${i}`, url: `https://a${i}.example.test` }))] });
+  assert.equal(a.links.length, 12);
+  assert.deepEqual(a.links[0], { label: 'Spaced', href: null });
+  assert.equal(a.links[1].href, 'https://a0.example.test/');
+  const p = m.normalizeCards(JSON.parse('{"cards": {"__proto__": {"items": [{"label": "x", "url": "https://x.example.test"}]}}}'));
+  assert.equal(p.apps, null, 'a prototype key is not the Apps card');
+});

@@ -1,0 +1,17 @@
+---
+# Mutants for tests/check_no_log.py (run.sh feeds it this file and expects both FAIL lines). Never included by a play.
+- name: Mutant | an assert whose message prints the tokens
+  ansible.builtin.assert:
+    that: mission_control_notify_verdict.problems | length == 0
+    fail_msg: "bad tokens: {{ mission_control_notify_tokens | to_json }}"
+    quiet: true
+
+- name: Mutant | reads the tokens without no_log
+  ansible.builtin.set_fact:
+    mission_control_notify_verdict: "{{ mission_control_notify_tokens | mission_control_notify_token_check }}"
+
+- name: Mutant | an assert whose prose names the tokens (allowed)
+  ansible.builtin.assert:
+    that: true
+    fail_msg: mission_control_notify_tokens comes from the vault
+    quiet: true

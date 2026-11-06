@@ -1,4 +1,5 @@
-// The page: header, status banner, the eight cards and the notifications panel. createView(actions) builds
+// The page: header, status banner, the eight cards (plus Apps when the server sends it) and the notifications
+// panel. createView(actions) builds
 // the frame once and returns {el, update(state, now)}; update() re-draws the parts that hold data. Section
 // elements and the AI card's question box are built once, so a refresh never loses what Noah typed, the
 // card he jumped to, or the control he has focused.
@@ -35,6 +36,22 @@ function itemList(items) {
         it.status ? h('span', { class: 'item-st' }, icon(it.status), h('span', { class: 'sr-only' }, `${STATUS_WORD[it.status]}: `)) : null,
         h('span', { class: 'item-label' }, it.label),
         it.value ? h('span', { class: 'item-value' }, it.value) : null,
+      ),
+    ),
+  );
+}
+
+/** The Apps card's list: one tap-through per app, in the server's order; a label without a usable link is text. */
+function appLinks(apps) {
+  return h(
+    'ul',
+    { class: ['items', 'apps'] },
+    apps.links.map((l, i) =>
+      h(
+        'li',
+        { class: 'item' },
+        extLink(l.href, { class: 'tap app-link', id: `app-link-${i}` }, h('span', { class: 'item-label' }, l.label), icon('external'), h('span', { class: 'sr-only' }, ' (opens in a new window)')) ||
+          h('span', { class: ['item-label', 'muted'] }, l.label),
       ),
     ),
   );
@@ -218,6 +235,14 @@ export function createView(actions = {}) {
     sections[id] = { el, heading, st, body, foot };
   }
   const grid = h('div', { class: 'grid', id: 'cards' }, CARD_ORDER.map((id) => sections[id].el));
+  // B1: built once, on the page (after Alerts) only while /api/cards has an Apps card. A list of links, so no badge.
+  const appsBody = h('div', { class: 'card-body' });
+  const apps = h(
+    'section',
+    { class: ['card', 'card-apps'], id: cardId('apps'), 'aria-labelledby': `${cardId('apps')}-h` },
+    h('div', { class: 'card-head' }, icon('apps', 'card-icon'), h('h2', { id: `${cardId('apps')}-h`, tabindex: '-1' }, 'Apps')),
+    appsBody,
+  );
 
   const pushPanel = h('div', { class: 'card-body' });
   const pushMsg = h('p', { class: 'push-msg', role: 'status', 'aria-live': 'polite' });
@@ -259,6 +284,14 @@ export function createView(actions = {}) {
       sec.el.setAttribute('aria-busy', state.loading && !state.cards ? 'true' : 'false');
     }
     ask.setBase(state.cards?.config.openWebuiUrl ?? null);
+
+    const appList = state.cards?.apps ?? null;
+    if (appList) {
+      mount(appsBody, appLinks(appList));
+      if (apps.parentNode !== grid) grid.appendChild(apps);
+    } else if (apps.parentNode) {
+      apps.remove();
+    }
 
     mount(pushPanel, ...pushBody(state.push, Boolean(state.cards?.config.vapidPublicKey), actions));
     pushPanel.setAttribute('aria-busy', state.push?.busy ? 'true' : 'false');

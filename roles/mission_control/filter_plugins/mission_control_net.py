@@ -32,10 +32,29 @@ mission_control_lock_problems(text) -> list of problems: each requirement is `na
   --hash=sha256:<64 hex>, nothing else (no URLs, -e, -r/-c includes, extras, markers or options).
 mission_control_dist_drift(installed, pins) -> sorted list of 'name: installed X, want Y' lines (missing,
   wrong version, or extra distributions besides pip); [] when the venv is exactly the lock.
+
+B2/B1 (B2-CONTRACT.md §2, §4). None of these ever returns or prints a token:
+mission_control_notify_token_check(tokens) -> {"names": [valid sender names, sorted], "problems": [...]}: tokens is a
+  mapping {name: token} of at most 32 senders (MC1's limit); names ^[a-z0-9-]{1,32}$; tokens strings of 32-256 visible
+  ASCII characters (no spaces), no two alike. A problem names the sender only when it is a valid name shorter than
+  32 characters (the shortest token); any other key, and any value longer than 12 (18 for an allow_from entry), is
+  shown by its length, so tokens and names swapped, or a token pasted anywhere, never print a token.
+mission_control_notify_sender_list(hashes, allow_from) -> MC1's notify_senders: [{name, token_sha256[, allow_from]}]
+  sorted by name, from {name: sha256 hex} (hashed by the caller with hash('sha256')); allow_from only when non-empty.
+mission_control_notify_allow_problems(allow_from, names, tailnet_range) -> list of problems: a mapping whose keys are
+  configured senders, each a non-empty list of at most 16 (MC1's limit) distinct IPv4 addresses (canonical form, no
+  prefix) inside the range.
+mission_control_notify_settings_problems(quiet_hours, dedupe, rate) -> list of problems: quiet_hours null or exactly
+  {start, end} as "HH:MM" strings with start != end; dedupe null or an integer 0-86400; rate null or 1-1000.
+mission_control_app_links_problems(links) -> list of problems: a list of at most 12 mappings of exactly {label, url};
+  label 1-32 printable characters without surrounding spaces; url http(s)://host[:port][/path[?query]] (MC1's link
+  rule), at most 300 characters, no user info, fragment, spaces or non-ASCII. Problems never quote the URL (it may
+  carry a password).
 """
 
 import ipaddress
 import re
+from collections.abc import Mapping, Sequence
 from urllib.parse import urlsplit
 
 _LOCALHOST = [ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_network("::1/128")]
@@ -315,6 +334,178 @@ def mission_control_dist_drift(installed, pins):
     return lines
 
 
+_NOTIFY_NAME = re.compile(r"[a-z0-9-]{1,32}\Z")
+_TOKEN_MIN = 32
+_NOTIFY_TOKEN = re.compile(r"[!-~]{%d,256}\Z" % _TOKEN_MIN)
+_HHMM = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]\Z")
+# MC1's rule for a tap-through link (config.py _links), with the query allowed and the fragment not.
+_APP_URL = re.compile(r"https?://[^\s/?#@]+(/[^\s#]*)?\Z")
+
+
+def _is_list(value):
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and not isinstance(value, Mapping)
+
+
+def _key_label(key):
+    """A sender name for a message. Shown only when it is a valid name AND shorter than the shortest token (32): a
+    key that could be a token (tokens and names swapped, a token pasted as a name) is shown by its length only."""
+    if isinstance(key, str) and _NOTIFY_NAME.match(key) and len(key) < _TOKEN_MIN:
+        return repr(key)
+    return "<a key of %d characters>" % len(str(key))
+
+
+def _value_label(value, short=12):
+    """A value for a message: as is when it is short (no token fits), else by its length only."""
+    text = str(value)
+    if len(text) <= short and text.isprintable():
+        return repr(text)
+    return "<a value of %d characters>" % len(text)
+
+
+def mission_control_notify_token_check(tokens):
+    if not isinstance(tokens, Mapping):
+        return {"names": [], "problems": ["mission_control_notify_tokens must be a mapping {sender name: token} (vault)"]}
+    names, problems, owners = [], [], {}
+    if len(tokens) > 32:
+        problems.append("%d senders; MC1 takes at most 32" % len(tokens))
+    for key in sorted(tokens, key=str):
+        label = _key_label(key)
+        if not isinstance(key, str) or not _NOTIFY_NAME.match(key):
+            problems.append("sender name %s must be 1-32 characters of a-z 0-9 -" % label)
+            continue
+        names.append(key)
+        token = tokens[key]
+        if not isinstance(token, str) or not _NOTIFY_TOKEN.match(token):
+            problems.append("sender %s: the token must be a string of 32-256 visible ASCII characters, no spaces" % label)
+            continue
+        owners.setdefault(token, []).append(key)
+    for same in owners.values():
+        if len(same) > 1:
+            problems.append("senders %s have the same token (each sender needs its own)" % ", ".join(map(_key_label, same)))
+    return {"names": names, "problems": problems}
+
+
+def mission_control_notify_sender_list(hashes, allow_from=None):
+    allow = allow_from if isinstance(allow_from, Mapping) else {}
+    out = []
+    for name in sorted(hashes or {}):
+        entry = {"name": name, "token_sha256": hashes[name]}
+        ips = allow.get(name)
+        if ips:
+            entry["allow_from"] = list(ips)
+        out.append(entry)
+    return out
+
+
+def mission_control_notify_allow_problems(allow_from, names, tailnet_range):
+    if not isinstance(allow_from, Mapping):
+        return ["mission_control_notify_allow_from must be a mapping {sender name: [tailnet IPv4, ...]} ({} for none)"]
+    net = ipaddress.ip_network(str(tailnet_range), strict=True)
+    problems = []
+    for key in sorted(allow_from, key=str):
+        label = _key_label(key)
+        if key not in (names or []):
+            problems.append("allow_from names %s, which isn't a configured sender (mission_control_notify_tokens)" % label)
+        ips = allow_from[key]
+        if not _is_list(ips) or not ips:
+            problems.append("allow_from[%s] must be a non-empty list of tailnet IPv4 addresses (leave the sender out for "
+                            "no address check)" % label)
+            continue
+        if len(ips) > 16:
+            problems.append("allow_from[%s] lists %d addresses; MC1 takes at most 16" % (label, len(ips)))
+        seen = set()
+        for ip in ips:
+            text = ip if isinstance(ip, str) else repr(ip)
+            try:
+                address = ipaddress.IPv4Address(ip) if isinstance(ip, str) else None
+            except ValueError:
+                address = None
+            if address is None or str(address) != ip:
+                problems.append("allow_from[%s]: %s is not an IPv4 address (one host, no prefix)"
+                                % (label, _value_label(text, 18)))
+            elif address not in net:
+                problems.append("allow_from[%s]: %s is outside the tailnet %s" % (label, ip, net))
+            elif ip in seen:
+                problems.append("allow_from[%s] lists %s twice" % (label, ip))
+            seen.add(text)
+    return problems
+
+
+def mission_control_notify_settings_problems(quiet_hours, dedupe=None, rate=None):
+    problems = []
+    if quiet_hours is not None:
+        if not isinstance(quiet_hours, Mapping) or sorted(str(k) for k in quiet_hours) != ["end", "start"]:
+            problems.append('mission_control_quiet_hours must be null (off) or exactly {start: "HH:MM", end: "HH:MM"}')
+        else:
+            good = True
+            for key in ("start", "end"):
+                value = quiet_hours[key]
+                if not isinstance(value, str) or not _HHMM.match(value):
+                    good = False
+                    problems.append('quiet_hours %s must be a quoted "HH:MM" from 00:00 to 23:59 (YAML reads an unquoted '
+                                    "22:00 as the number 1320); it is %s" % (key, _value_label(value)))
+            if good and quiet_hours["start"] == quiet_hours["end"]:
+                problems.append("quiet_hours start and end are the same time (empty or all day is ambiguous; null is off)")
+    for name, value, lo, hi in (("mission_control_notify_dedupe_seconds", dedupe, 0, 86400),
+                                ("mission_control_notify_rate_per_hour", rate, 1, 1000)):
+        if value is None:
+            continue
+        number = None
+        if isinstance(value, int) and not isinstance(value, bool):
+            number = value
+        elif isinstance(value, str) and value.isascii() and value.isdigit() and len(value) <= 6:
+            number = int(value)
+        if number is None or not lo <= number <= hi:
+            problems.append("%s must be null (MC1's default) or an integer %d-%d; it is %s" % (name, lo, hi, _value_label(value)))
+    return problems
+
+
+def mission_control_app_links_problems(links):
+    if not _is_list(links):
+        return ["mission_control_app_links must be a list of {label, url} ([] for no Apps card)"]
+    problems = []
+    if len(links) > 12:
+        problems.append("mission_control_app_links has %d entries; MC1 takes at most 12" % len(links))
+    for i, link in enumerate(links):
+        where = "app_links[%d]" % i
+        if not isinstance(link, Mapping) or sorted(str(k) for k in link) != ["label", "url"]:
+            problems.append("%s must be exactly {label, url}" % where)
+            continue
+        label, url = link["label"], link["url"]
+        if not isinstance(label, str) or not 0 < len(label) <= 32 or not label.isprintable() or label != label.strip():
+            problems.append("%s: the label must be 1-32 printable characters without leading or trailing spaces" % where)
+        else:
+            where += " (%s)" % label
+        if not isinstance(url, str) or not url:
+            problems.append("%s: the url is empty or not a string" % where)
+            continue
+        if len(url) > 300:
+            problems.append("%s: the url is longer than 300 characters" % where)
+        if any(ord(c) < 33 or ord(c) > 126 for c in url):
+            problems.append("%s: the url has spaces, control or non-ASCII characters" % where)
+            continue
+        if not url.startswith(("http://", "https://")):
+            problems.append("%s: the url must start with http:// or https://" % where)
+            continue
+        try:
+            parts = urlsplit(url)
+            port = parts.port
+        except ValueError:
+            problems.append("%s: the url doesn't parse (host or port)" % where)
+            continue
+        if parts.username is not None or parts.password is not None or "@" in parts.netloc:
+            problems.append("%s: the url must not carry credentials (user info)" % where)
+        if "#" in url:
+            problems.append("%s: the url must not have a fragment (#...)" % where)
+        if not parts.hostname:
+            problems.append("%s: the url has no host" % where)
+        if port is not None and not 0 < port < 65536:
+            problems.append("%s: the url's port is out of range" % where)
+        if not _APP_URL.match(url):
+            problems.append("%s: the url must be http(s)://host[:port] followed by nothing or a /path" % where)
+    return problems
+
+
 class FilterModule:
     def filters(self):
         return {
@@ -330,4 +521,9 @@ class FilterModule:
             "mission_control_lock_pins": mission_control_lock_pins,
             "mission_control_lock_problems": mission_control_lock_problems,
             "mission_control_dist_drift": mission_control_dist_drift,
+            "mission_control_notify_token_check": mission_control_notify_token_check,
+            "mission_control_notify_sender_list": mission_control_notify_sender_list,
+            "mission_control_notify_allow_problems": mission_control_notify_allow_problems,
+            "mission_control_notify_settings_problems": mission_control_notify_settings_problems,
+            "mission_control_app_links_problems": mission_control_app_links_problems,
         }

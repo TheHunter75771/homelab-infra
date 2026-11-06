@@ -50,11 +50,18 @@ const variants = {
   'broken fixture, hostile': () => buildState(mods, { cards: fx.hostile(fx.cardsBroken()), briefing: fail('http', 500) }),
   'served from a hostile snapshot under the banner': () =>
     buildState(mods, { cards: fail('network'), cardsSnapshot: { savedAt: fx.NOW - 60_000, data: fx.hostile(fx.cards()) }, briefing: fail('shape', 200), briefingSnapshot: { savedAt: fx.NOW, data: fx.hostile(fx.briefing()) } }),
+  'the Apps card, all strings hostile (its links still parse as URLs)': () => buildState(mods, { cards: fx.hostile(fx.cardsWithApps()), briefing: fx.briefing() }),
+  'the Apps card with hostile labels and bare-string or odd items': () => {
+    const c = fx.cardsWithApps();
+    c.cards.apps.items = [...hostileItems(), { label: H, url: H }, { label: H, url: 'https://ok.example.test/' }];
+    return buildState(mods, { cards: c, briefing: fx.briefing() });
+  },
   'link values that are scripts or data URLs': () => {
     const c = fx.cards();
     const bad = ['javascript:alert(1)', 'data:text/html,<script>alert(1)</script>', ' JavaScript:alert(1)', 'vbscript:x', '"><img src=x onerror=alert(1)>'];
     Object.keys(c.cards).forEach((k, i) => (c.cards[k].link = bad[i % bad.length]));
     c.config.open_webui_url = 'javascript:alert(1)';
+    c.cards.apps = { ...fx.apps(), items: bad.map((url, i) => ({ label: `App ${i}`, url })) };
     return buildState(mods, { cards: c, briefing: fx.briefing() });
   },
 };
@@ -71,4 +78,5 @@ test('hostile: only the server-sent links that parse as http(s) become hrefs, an
   const { root } = render(mods, variants['link values that are scripts or data URLs']());
   const hrefs = allElements(root).filter((e) => e.getAttribute('href')).map((e) => e.getAttribute('href'));
   assert.deepEqual(hrefs.filter((h) => !h.startsWith('#')), [], 'no link from a non-http value');
+  assert.match(root.textContent, /App 0.*App 1.*App 2.*App 3.*App 4/, 'Apps labels without a usable link are shown as text');
 });

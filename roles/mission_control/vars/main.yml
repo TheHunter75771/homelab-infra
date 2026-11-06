@@ -219,9 +219,11 @@ mission_control_config: >-
       'units': mission_control_units,
       'backups': mission_control_backups,
       'links': mission_control_links}
+     | combine(mission_control_notify_config)
      | combine(mission_control_config_extra) }}
 # Keys the role owns: the unit, the serve backend, the key and state files, the identity check and the IP filter
-# (host_map pins the addresses it allows) depend on them.
+# (host_map pins the addresses it allows) depend on them. The B2/B1 keys come only from their role variables, so
+# preflight's checks (tokens hashed, allow_from on the tailnet, links without credentials) can't be bypassed.
 mission_control_config_role_keys:
   - listen_host
   - listen_port
@@ -232,3 +234,30 @@ mission_control_config_role_keys:
   - ha_token_file
   - host_map
   - systemctl
+  - notify_senders
+  - quiet_hours
+  - notify_dedupe_seconds
+  - notify_rate_per_hour
+  - app_links
+
+# --- B2 (POST /api/notify) and B1 (the Apps card): B2-CONTRACT.md §2 and §4 ---
+# Each key is rendered only when its variable is set (defaults/main.yml): with none set, config.json is byte for byte
+# what it was before B2, and an MC1 without these keys still loads it.
+# notify_senders: sorted by name, {name, token_sha256 (hash('sha256') of the vault token, lowercase hex), allow_from
+# (only when set)}. The tokens are never written. Every task that evaluates this (config_file.yml) is no_log, and
+# tests/check_no_log.py holds it to that.
+mission_control_notify_names: "{{ mission_control_notify_tokens.keys() | list | sort }}"
+mission_control_notify_senders: >-
+  {{ dict(mission_control_notify_names
+          | zip(mission_control_notify_names | map('extract', mission_control_notify_tokens) | map('string')
+                | map('hash', 'sha256')))
+     | mission_control_notify_sender_list(mission_control_notify_allow_from) }}
+mission_control_notify_config: >-
+  {{ ({'notify_senders': mission_control_notify_senders} if mission_control_notify_tokens | length > 0 else {})
+     | combine({'quiet_hours': {'start': mission_control_quiet_hours.start, 'end': mission_control_quiet_hours.end}}
+               if mission_control_quiet_hours is not none else {})
+     | combine({'notify_dedupe_seconds': mission_control_notify_dedupe_seconds | int}
+               if mission_control_notify_dedupe_seconds is not none else {})
+     | combine({'notify_rate_per_hour': mission_control_notify_rate_per_hour | int}
+               if mission_control_notify_rate_per_hour is not none else {})
+     | combine({'app_links': mission_control_app_links} if mission_control_app_links | length > 0 else {}) }}

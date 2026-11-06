@@ -115,6 +115,7 @@ const ICONS = {
   offline: ['M3 3l18 18', 'M8.5 8.8A9 9 0 0 0 4.2 11', 'M12 7a12 12 0 0 1 7.8 4', 'M8 15a5 5 0 0 1 6.1-.6', 'M12 19.2v.3'],
   share: ['M12 3v12', 'M8 7l4-4l4 4', 'M5 11v9h14v-9'],
   plusSquare: ['M4 4h16v16H4z', 'M12 8v8', 'M8 12h8'],
+  apps: ['M4 4h6v6H4z', 'M14 4h6v6h-6z', 'M4 14h6v6H4z', 'M14 14h6v6h-6z'],
 };
 
 export function icon(name, cls) {

@@ -89,6 +89,30 @@ mission_control_links:
 # More config keys MC1's loader accepts (e.g. alert_repeat_hours, disk_alert_pct), merged over the role's own.
 mission_control_config_extra: {}
 
+# --- B2: pushes from other hosts (POST /api/notify) and B1: the Apps card (B2-CONTRACT.md §2, §4) ---
+# Each key below goes into config.json only when it is set, so with nothing set config.json is exactly what it was
+# before B2. Unset means MC1's default: no senders (the route answers 401 to everyone), quiet hours off, dedupe
+# 1800 s, 30 messages per sender per rolling hour, no Apps card. Preflight checks every value.
+# Senders: {name: token}. VAULT ONLY (never in host_vars or any file in this repo). Names ^[a-z0-9-]{1,32}$; tokens
+# 32-256 visible ASCII characters, no two alike (`python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`).
+# config.json gets only each token's sha256 (lowercase hex); the sending host's mc-notify (role mc_notify_client)
+# holds the token itself.
+mission_control_notify_tokens: {}
+# Optional per sender: {name: [tailnet IPv4, ...]}. MC1 then accepts that sender only from those addresses (the last
+# X-Forwarded-For hop tailscale serve sets). Leave a sender out for no address check; an empty list is refused.
+mission_control_notify_allow_from: {}
+# null (off) or {start: "HH:MM", end: "HH:MM"} in mission_control_timezone; may cross midnight. QUOTE the times
+# (YAML reads an unquoted 22:00 as the number 1320). Non-urgent messages inside the window are held and summed up
+# in one push when it ends.
+mission_control_quiet_hours: null
+# null = MC1's default (1800): the same sender + tag + title + body within this many seconds is pushed once.
+mission_control_notify_dedupe_seconds: null
+# null = MC1's default (30): accepted messages per sender per rolling hour (1-1000).
+mission_control_notify_rate_per_hour: null
+# The Apps card: at most 12 {label: 1-32 characters, url: http(s) URL without credentials}, in this order. Empty: no
+# card. The real list holds tailnet names, so it goes in host_vars/ai-box.yml (git-ignored); README "Apps card".
+mission_control_app_links: []
+
 # --- IP filter (systemd IPAddressDeny=/IPAddressAllow=; an address matching an allow entry passes even when a deny
 # entry matches it too, and an address in neither list passes) ---
 # Denied: loopback, RFC 1918, CGNAT/tailnet, link-local, ULA (the tailnet's IPv6 too) and the special ranges.

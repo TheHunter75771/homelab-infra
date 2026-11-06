@@ -4,7 +4,8 @@
    cards: {<id>: {status: ok|warn|down|unknown|setup, headline, items: [{label, value, status|null}],
                   link|null, error|null, updated_at|null}}}
 
-Card ids: ai, ai_control, money, school, home, servers, alerts (the briefing has its own endpoint).
+Card ids: ai, ai_control, money, school, home, servers, alerts (the briefing has its own endpoint), plus `apps`
+(B1) only while `app_links` isn't empty; its items also carry `url`.
 A source that failed gives its card `status: unknown` (down for Open WebUI's health check) and `error`.
 """
 
@@ -220,18 +221,27 @@ def alerts_card(alerts: list[Alert], state: dict[str, Any], cfg: Config, now: fl
                  updated_at=int(now))
 
 
+def apps_card(cfg: Config) -> dict[str, Any]:
+    """B1: a tap-through link to each homelab UI in `app_links`, in config order. No source behind it."""
+    items = [{"label": label, "value": "", "status": None, "url": url} for label, url in cfg.app_links]
+    return _card(cfg, "apps", "ok", plural(len(items), "app"), items)
+
+
 def build(snap: dict[str, Any], alerts: list[Alert], alert_state: dict[str, Any], cfg: Config, now: float,
           vapid_public_key: str | None, restarts: dict[str, list[list[float]]] | None = None) -> dict[str, Any]:
+    cards = {
+        "ai": ai_card(snap, cfg),
+        "ai_control": ai_control_card(snap, cfg),
+        "money": money_card(snap, cfg, now),
+        "school": school_card(snap, cfg, now),
+        "home": home_card(snap, cfg),
+        "servers": servers_card(snap, cfg, now, restarts),
+        "alerts": alerts_card(alerts, alert_state, cfg, now),
+    }
+    if cfg.app_links:  # absent when empty, so the page is what it was before B1
+        cards["apps"] = apps_card(cfg)
     return {
         "generated_at": int(now),
         "config": {"open_webui_url": cfg.link("ai"), "vapid_public_key": vapid_public_key},
-        "cards": {
-            "ai": ai_card(snap, cfg),
-            "ai_control": ai_control_card(snap, cfg),
-            "money": money_card(snap, cfg, now),
-            "school": school_card(snap, cfg, now),
-            "home": home_card(snap, cfg),
-            "servers": servers_card(snap, cfg, now, restarts),
-            "alerts": alerts_card(alerts, alert_state, cfg, now),
-        },
+        "cards": cards,
     }

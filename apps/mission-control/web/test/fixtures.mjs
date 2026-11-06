@@ -67,6 +67,28 @@ export function cards() {
   };
 }
 
+/** The Apps card (B1): the server sends it only when its config has app_links. */
+export function apps() {
+  return {
+    status: 'ok',
+    headline: '3 apps',
+    items: [
+      { label: 'Open WebUI', value: '', status: null, url: 'https://ai-box.example.test/' },
+      { label: 'Money Hub', value: '', status: null, url: 'http://money.example.test:8710/' },
+      { label: 'Jellyfin', value: '', status: null, url: 'http://media.example.test:8096/web/' },
+    ],
+    link: null,
+    error: null,
+    updated_at: null,
+  };
+}
+
+export function cardsWithApps() {
+  const c = cards();
+  c.cards.apps = apps();
+  return c;
+}
+
 /** Every source failing in a different way, plus cards the server left out or sent oddly. */
 export function cardsBroken() {
   const c = cards();
@@ -99,7 +121,7 @@ export const HOSTILE = `<img src=x onerror=alert(1)> javascript:alert(1) "><scri
 
 /** Every string value (not key) replaced by HOSTILE; links get hostile variants that still parse as URLs. */
 export function hostile(v, key) {
-  if (key === 'link') return `https://evil.example.test/"><img src=x onerror=alert(1)>`;
+  if (key === 'link' || key === 'url') return `https://evil.example.test/"><img src=x onerror=alert(1)>`;
   if (key === 'open_webui_url') return `https://evil.example.test/?a="><script>alert(1)</script>#<img src=x>`;
   if (typeof v === 'string') return HOSTILE;
   if (Array.isArray(v)) return v.map((x) => hostile(x));

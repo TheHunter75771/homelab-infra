@@ -34,5 +34,17 @@
     "ai_control": "https://ai-box.TAILNET.ts.net/",
     "money": "http://HOMEBK_EDGE_TAILNET_IP:8710/",
     "school": "https://homebk-edge.TAILNET.ts.net/"
-  }
+  },
+  "notify_senders": [
+    {"name": "mediaserver", "token_sha256": "0000000000000000000000000000000000000000000000000000000000000000", "allow_from": ["192.0.2.20"]}
+  ],
+  "quiet_hours": {"start": "22:00", "end": "07:00"},
+  "notify_dedupe_seconds": 1800,
+  "notify_rate_per_hour": 30,
+  "app_links": [
+    {"label": "Open WebUI", "url": "http://ai-box.TAILNET.ts.net:8080/"},
+    {"label": "AI Control", "url": "https://ai-box.TAILNET.ts.net/"},
+    {"label": "Money Hub", "url": "http://HOMEBK_EDGE_TAILNET_IP:8710/"},
+    {"label": "ERAU dashboard", "url": "https://homebk-edge.TAILNET.ts.net/"}
+  ]
 }
