@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Fake `docker` for the offline test (tests/run.sh puts this directory first on PATH). Read-only answers only:
+  docker network ls --quiet / network inspect --format ...   lines of $SEARXNG_TEST_NETWORKS ("<name> <subnet>...")
+  docker inspect [--type container] [--format F] NAME         the JSON array in $SEARXNG_TEST_INSPECT; with --format, F
+                                                              is evaluated for the subset `{{json .A.B}}` (anything else
+                                                              in braces fails), like Docker's Go template
+  docker port NAME                                            the lines of $SEARXNG_TEST_PORT
+The inspect fixture carries a canary SEARXNG_SECRET in Config.Env, so a role task that prints the environment is
+caught by run.sh. Anything else fails loudly, so no test can reach a real Docker."""
+import json
+import os
+import re
+import sys
+
+args = sys.argv[1:]
+
+
+def out(path_var):
+    with open(os.environ[path_var], encoding="utf-8") as fh:
+        sys.stdout.write(fh.read())
+
+
+if args[:2] == ["network", "ls"]:
+    with open(os.environ["SEARXNG_TEST_NETWORKS"], encoding="utf-8") as fh:
+        for line in fh:
+            if line.split():
+                print(line.split()[0])
+elif args[:2] == ["network", "inspect"]:
+    out("SEARXNG_TEST_NETWORKS")
+elif args[:1] == ["inspect"]:
+    rest = args[1:]
+    fmt = None
+    while rest and rest[0].startswith("--"):
+        if rest[0] in ("--type", "--format", "-f"):
+            if rest[0] != "--type":
+                fmt = rest[1]
+            rest = rest[2:]
+        else:
+            sys.exit(f"fake docker: unsupported inspect option {rest[0]}")
+    with open(os.environ["SEARXNG_TEST_INSPECT"], encoding="utf-8") as fh:
+        objs = json.load(fh)
+    if fmt is None:
+        print(json.dumps(objs, indent=4))
+        sys.exit(0)
+
+    def field(match):
+        value = objs[0]
+        for part in match.group(1).split("."):
+            value = value[part]
+        return json.dumps(value)
+
+    text = re.sub(r"\{\{json \.([A-Za-z0-9_.]+)\}\}", field, fmt)
+    if "{{" in text:
+        sys.exit(f"fake docker: unsupported template in {fmt!r}")
+    print(text)
+elif args[:1] == ["port"]:
+    out("SEARXNG_TEST_PORT")
+else:
+    sys.exit("fake docker: unsupported: " + " ".join(args))

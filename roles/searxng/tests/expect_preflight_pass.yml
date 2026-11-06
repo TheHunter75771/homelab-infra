@@ -1,0 +1,10 @@
+---
+# Preflight with the good inputs, against the fake docker's network list `networks`.
+- name: Pass case | networks
+  ansible.builtin.copy:
+    content: "{{ networks }}"
+    dest: "{{ test_networks_file }}"
+    mode: "0644"
+
+- name: Pass case | preflight
+  ansible.builtin.include_tasks: ../tasks/preflight.yml

@@ -1,0 +1,35 @@
+---
+# One refusal case for test_research_gate.yml: case = {name, vars, task}. The case's vars are passed as include
+# params (they outrank the test's set_fact values); every other input keeps its good value (test_good).
+- name: Preflight refuses {{ case.name }}
+  block:
+    - name: Preflight with {{ case.name }}
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+      vars:
+        research_gate_enabled: "{{ case.vars.get('research_gate_enabled', false) }}"
+        research_gate_library_root: "{{ case.vars.get('research_gate_library_root', test_good.library_root) }}"
+        research_gate_library_mount: "{{ case.vars.get('research_gate_library_mount', test_good.library_mount) }}"
+        research_gate_library_forbidden_re: "{{ case.vars.get('research_gate_library_forbidden_re', test_good.forbidden_re) }}"
+        research_gate_user_agent: "{{ case.vars.get('research_gate_user_agent', test_good.user_agent) }}"
+        research_gate_results_per_query: "{{ case.vars.get('research_gate_results_per_query', 8) }}"
+        research_gate_max_redirects: "{{ case.vars.get('research_gate_max_redirects', 3) }}"
+        searxng_ipv4: "{{ case.vars.get('searxng_ipv4', test_good.searxng_ipv4) }}"
+        research_gate_ip_deny: "{{ case.vars.get('research_gate_ip_deny', test_good.ip_deny) }}"
+        research_gate_dns_stub: "{{ case.vars.get('research_gate_dns_stub', '127.0.0.53') }}"
+        research_gate_pkg_src: "{{ case.vars.get('research_gate_pkg_src', test_good.pkg_src) }}"
+        research_gate_launcher_src: "{{ case.vars.get('research_gate_launcher_src', test_good.pkg_src | dirname ~ '/research-gate') }}"
+        research_gate_library_cap: "{{ case.vars.get('research_gate_library_cap', '500GB') }}"
+
+    - name: Not reached
+      ansible.builtin.set_fact:
+        rg_test_refused_by: ""
+  rescue:
+    - name: Note which task refused
+      ansible.builtin.set_fact:
+        rg_test_refused_by: "{{ ansible_failed_task.name }}"
+
+- name: Refused by the expected check for {{ case.name }}
+  ansible.builtin.assert:
+    that: rg_test_refused_by == case.task
+    fail_msg: "{{ case.name }}: refused by '{{ rg_test_refused_by }}', expected '{{ case.task }}'"
+    quiet: true

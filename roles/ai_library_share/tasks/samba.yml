@@ -1,0 +1,62 @@
+---
+# §12.17.2: smb.conf fully managed and validated before it is installed, the boot-order units, the
+# SELinux boolean, nmb masked, smb enabled and running (reloaded on a config change).
+
+- name: Samba | smb.conf
+  ansible.builtin.import_tasks: smb_conf.yml
+
+- name: Samba | units (tailnet wait, smb drop-in)
+  ansible.builtin.import_tasks: units_server_samba.yml
+
+- name: Samba | is SELinux enabled
+  ansible.builtin.command:
+    argv: [/usr/sbin/selinuxenabled]
+  register: ai_library_share_selinux
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# Noah's choice (§12.17.2). Read first; set (persistently) only when it is off.
+- name: Samba | read the SELinux boolean {{ ai_library_share_selinux_boolean }}
+  ansible.builtin.command:
+    argv: ["{{ ai_library_share_getsebool }}", "{{ ai_library_share_selinux_boolean }}"]
+  register: ai_library_share_sebool
+  changed_when: false
+  check_mode: false
+  when: ai_library_share_selinux.rc == 0
+
+- name: Samba | the boolean reads on or off
+  ansible.builtin.assert:
+    that: ai_library_share_sebool.stdout | trim is match('^' ~ ai_library_share_selinux_boolean ~ ' --> (on|off)$')
+    fail_msg: "Unexpected getsebool output: {{ ai_library_share_sebool.stdout | trim }}"
+    quiet: true
+  when: ai_library_share_selinux.rc == 0
+
+- name: Samba | turn on (persistently) the SELinux boolean {{ ai_library_share_selinux_boolean }}
+  ansible.builtin.command:
+    argv: ["{{ ai_library_share_setsebool }}", -P, "{{ ai_library_share_selinux_boolean }}", "on"]
+  changed_when: true
+  when:
+    - ai_library_share_selinux.rc == 0
+    - ai_library_share_sebool.stdout | trim is search('--> off$')
+
+# NetBIOS is off (disable netbios = yes); nmb must never run.
+- name: Samba | nmb is stopped and disabled
+  ansible.builtin.systemd_service:
+    name: "{{ ai_library_share_nmb_unit }}"
+    state: stopped
+    enabled: false
+
+- name: Samba | nmb is masked
+  ansible.builtin.systemd_service:
+    name: "{{ ai_library_share_nmb_unit }}"
+    masked: true
+
+- name: Samba | load changed units and reload smb before enabling it
+  ansible.builtin.meta: flush_handlers
+
+- name: Samba | smb is enabled and running
+  ansible.builtin.systemd_service:
+    name: "{{ ai_library_share_smb_unit }}"
+    enabled: true
+    state: started

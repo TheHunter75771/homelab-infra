@@ -1,0 +1,78 @@
+# {{ ansible_managed }}
+# Skill Forge research gate R (docs/CONTRACTS.md §12.16.3, deploy §12.16.4). Not AI, no autonomy: it runs only
+# the searches and fetches Noah has ticked in the AI Library's 35-forge/ requests. User rgate: no
+# capabilities, not in docker; writes only the library. Installed always, enabled only with
+# research_gate_enabled (the library share must be mounted: RequiresMountsFor + the sentinel assert).
+[Unit]
+Description=Skill Forge research gate (approved searches and fetches only)
+Documentation=file://{{ research_gate_launcher }}
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor={{ research_gate_library_root }}
+# §12.11 mount safety: never run against an empty mount point.
+AssertPathExists={{ research_gate_sentinel }}
+AssertPathIsDirectory={{ research_gate_forge_dir }}
+
+[Service]
+Type=exec
+User={{ research_gate_user }}
+Group={{ research_gate_user }}
+WorkingDirectory={{ research_gate_app_dir }}
+# R's launcher under -I (no PYTHON* variables, no user site, no working directory on sys.path): it puts its own
+# root-owned directory, which holds research_gate, forge and library, first on sys.path. -B: no bytecode there.
+ExecStart={{ research_gate_python }} -I -B {{ research_gate_launcher }} --config {{ research_gate_config_file }} serve
+# The library's size cap (R files nothing past it), as the library CLI reads it.
+Environment=AI_LIBRARY_CAP={{ research_gate_library_cap }}
+Restart=on-failure
+RestartSec=30s
+SyslogIdentifier=research-gate
+UMask=0027
+MemoryMax={{ research_gate_memory_max }}
+TasksMax={{ research_gate_tasks_max }}
+
+# Hardening (§12.16.4, as ai-control.service §12.15.7).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+# R stages each fetched file in the temp dir before Library.file copies it in (R's README, "Limits").
+PrivateTmp=yes
+# /run read-only explicitly (found writable despite ProtectSystem=strict on the mediaserver, 2026-10-24).
+ReadOnlyPaths=/run
+ReadWritePaths={{ research_gate_library_root }}
+# IPv4 only (Reviewer E, finding 1): ai-box has global IPv6 on the LAN, and the gate needs none (IPv4 egress
+# works). The IPv6 deny entries below stay as a second layer.
+RestrictAddressFamilies=AF_INET AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+# No ProcSubset=pid (Reviewer E): it hides /proc/self/net, which R reads to refuse the host's own networks;
+# without it every fetch would be refused.
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+# IP filter, defence in depth behind R's own SSRF rules (§12.16.4). systemd checks the destination of
+# outgoing packets and the source of incoming ones; an allow entry wins over a deny entry; anything in
+# neither list (the public internet) is allowed.
+# - SearXNG is reached at its pinned container address {{ research_gate_searxng_ipv4 }} directly (no DNAT), so its /32
+#   is allowed both ways. Through the loopback publish the replies would arrive from 127.0.0.1 and be dropped.
+# - {{ research_gate_dns_stub }} is systemd-resolved's stub: every name the gate fetches is resolved through it.
+IPAddressDeny={{ research_gate_ip_deny | join(' ') }}
+IPAddressAllow={{ research_gate_ip_allow | join(' ') }}
+
+[Install]
+WantedBy=multi-user.target

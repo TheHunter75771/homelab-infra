@@ -1,0 +1,23 @@
+---
+# smbd listens on every address (it can't bind the tailscale0 tun; Lead after Reviewer G), so the
+# listen itself must be the wildcard and nothing else; who may connect is verify_filter.yml's job.
+- name: Verify | listeners on 445
+  ansible.builtin.command:
+    argv: ["{{ ai_library_share_ss }}", -H, -t, -l, -n, sport, "=", ":445"]
+  register: ai_library_share_ss445
+  changed_when: false
+
+- name: Verify | smbd listens on 445 on the wildcard addresses only
+  vars:
+    ai_library_share_listen: >-
+      {{ ai_library_share_ss445.stdout_lines | map('split') | map(attribute=3)
+         | map('regex_replace', ':445$', '') | map('regex_replace', '^\[(.*)\]$', '\1')
+         | map('regex_replace', '%.*$', '') | unique | sort }}
+  ansible.builtin.assert:
+    that:
+      - ai_library_share_listen | length > 0
+      - ai_library_share_listen | difference(['0.0.0.0', '::', '*']) | length == 0
+    fail_msg: >-
+      445 listens on {{ ai_library_share_listen | join(', ') or 'nothing' }}; with bind interfaces only = no
+      smbd must listen on the wildcard address(es) only. See `journalctl -u {{ ai_library_share_smb_unit }}`.
+    quiet: true

@@ -1,0 +1,80 @@
+---
+# Role research_gate (docs/CONTRACTS.md §12.16.4, module H4): the Skill Forge's research gate (module R) on
+# ai-box. Host service research-gate.service, user rgate; code at /opt/research-gate (R's research_gate
+# package plus apps/skill-library's forge and library packages, read-only); config /etc/research-gate/config.json.
+
+# §12.16.4 switch. false (default): installed, but neither enabled nor started (a running one is stopped and
+# disabled). true: preflight first proves research_gate_library_root is the mounted, sentinel-checked library.
+research_gate_enabled: false
+
+# The AI Library on ai-box: role ai_library_share's client automount (§12.17.3, CIFS as uid/gid rgate).
+# Absolute, plain characters only (it goes into the unit unescaped), and not under /home, /root, /run, /tmp
+# (ProtectHome / ProtectSystem / PrivateTmp).
+research_gate_library_root: /srv/ai-library
+# The mount point the library lives on: the root itself, or a parent of it. With the gate enabled, `findmnt
+# --target <root>` must name exactly this mount, and it can't be /.
+research_gate_library_mount: "{{ research_gate_library_root }}"
+
+# R's config (§12.16.3 defaults; R's loader research_gate/config.py sets the ranges preflight.yml checks).
+research_gate_poll_interval: 60
+research_gate_results_per_query: 8
+research_gate_max_bytes: 5242880
+research_gate_fetch_timeout: 30
+# R refuses more than 3 (§12.16.3).
+research_gate_max_redirects: 3
+research_gate_user_agent: "homelab-research-gate/1 (fetches only pages a human approved)"
+# The AI Library's size cap, as the library CLI takes it (AI_LIBRARY_CAP; decimal units unless "i": 500GB,
+# 750GiB). The unit sets it for R, which refuses to file past it. Same default as the library (§12.11).
+research_gate_library_cap: 500GB
+
+# SearXNG (role searxng). The gate connects straight to the container's pinned address, NOT the loopback
+# publish: through 127.0.0.1:8888 Docker DNATs the request to the container, but the replies reach the
+# gate's socket with source 127.0.0.1 again (the DNAT is undone before delivery), and systemd's ingress
+# filter denies loopback. Role searxng's values are read with include_vars; the inventory's win.
+research_gate_searxng_defaults_file: "{{ role_path }}/../searxng/defaults/main.yml"
+
+# The host's DNS: the systemd-resolved stub (role dns). The gate resolves every fetch's name once (§12.16.3),
+# through glibc -> 127.0.0.53:53, so this /32 is the one loopback address the IP filter allows.
+research_gate_dns_stub: 127.0.0.53
+
+# §12.16.4 IP filter (defence in depth; R's own SSRF rules are the primary control). Denied: loopback,
+# RFC 1918, CGNAT/tailnet, link-local, ULA (covers the tailnet's IPv6 range), plus unspecified, multicast,
+# reserved, benchmark, the IETF protocol block, NAT64 and IPv4-mapped forms. Allowed (wins over a deny): the
+# SearXNG container /32 and the resolver stub /32. Everything else (the public internet) stays allowed.
+research_gate_ip_deny:
+  - 127.0.0.0/8
+  - ::1/128
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  - 100.64.0.0/10
+  - 169.254.0.0/16
+  - fe80::/10
+  - fc00::/7
+  - 0.0.0.0/8
+  - 192.0.0.0/24
+  - 198.18.0.0/15
+  - 224.0.0.0/4
+  - 240.0.0.0/4
+  - ::/128
+  - ::ffff:0:0/96
+  - 64:ff9b::/96
+  - 64:ff9b:1::/48
+  - ff00::/8
+
+# Unit limits.
+research_gate_memory_max: 256M
+research_gate_tasks_max: 32
+
+# Sources on the controller (module R's README, "Run"): the launcher apps/research-gate/research-gate and the
+# package apps/research-gate/research_gate; forge and library from apps/skill-library.
+research_gate_src_dir: "{{ role_path }}/../../apps/research-gate"
+research_gate_pkg_src: "{{ research_gate_src_dir }}/research_gate"
+research_gate_launcher_src: "{{ research_gate_src_dir }}/research-gate"
+research_gate_library_src_dir: "{{ role_path }}/../../apps/skill-library"
+# Owner of the installed code (the tests run unprivileged and override it).
+research_gate_owner: root
+
+# Post-start check (enabled only): the unit stays active this long without restarting.
+research_gate_verify_retries: 10
+research_gate_verify_delay: 2

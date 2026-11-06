@@ -1,0 +1,76 @@
+---
+# Role searxng (docs/CONTRACTS.md §12.16.2, module H4): SearXNG on ai-box, for the research gate only.
+# Its own compose project at /srv/searxng on its own bridge network `research` with a pinned subnet, published
+# only on 127.0.0.1:8888 (never the tailnet or the LAN). Image only from versions.yml: images.searxng
+# (tag + digest, pinned by the Lead).
+
+searxng_dir: /srv/searxng
+# settings.yml lives here, bind-mounted read-only at /etc/searxng (the image's config dir).
+searxng_config_dir: "{{ searxng_dir }}/config"
+searxng_project: searxng
+searxng_container: searxng
+searxng_network: research
+# Kernel name of the bridge (<= 15 chars), so firewall rules and `ip link` can name it.
+searxng_bridge_name: br-research
+
+# --- Pinned network (role research_gate reads these through include_vars; the inventory's values win) ---
+# A /28 inside role docker's docker_address_pools_container (172.16.0.0/12), and outside every Docker
+# address pool (172.20.0.0/14, 172.24.0.0/14: ai_stack's `ai` network and every other compose network come
+# from those), docker0 (172.17.0.0/16), the pre-pool networks (172.18.0.0/16, 172.19.0.0/16) and hl-public
+# (172.30.10.0/24). preflight.yml checks all of that against role docker's values, and against the networks
+# that exist on the host.
+searxng_subnet: 172.29.16.0/28
+searxng_gateway: 172.29.16.1
+searxng_ipv4: 172.29.16.2
+# The port SearXNG (granian) listens on inside the container. Role research_gate connects here directly.
+searxng_container_port: 8080
+
+# Host publish: loopback only (Integrator checks and host tools). With userland-proxy off it is a DNAT
+# rule in nat OUTPUT; 127.0.0.1 is always up at boot, so there is no late-address problem (§9b).
+searxng_publish_host: 127.0.0.1
+searxng_publish_port: 8888
+
+# The official image's unprivileged user (searxng, 977:977 in its /etc/passwd). The container runs as this
+# user from the start, so the entrypoint never chowns and never runs update-ca-certificates.
+searxng_uid: 977
+searxng_gid: 977
+
+# §12.16.2: conservative engines, none needs an API key. startpage is dropped (Reviewer F): upstream marks it
+# `inactive: true` (a proof-of-work captcha), so SearXNG would never load it anyway.
+searxng_engines:
+  - duckduckgo
+  - brave
+  - wikipedia
+  - wikidata
+  - mdn
+  - github
+  - stackoverflow
+  - arxiv
+# The gate searches with no category, so only engines in `general` answer it. These engines aren't in general
+# upstream; each gets general added to its own categories (SearXNG merges the override into the default entry
+# by name). Every name must be in searxng_engines, and each list must contain general.
+searxng_engine_categories:
+  mdn: [general, it]
+  github: [general, it, repos]
+  stackoverflow: [general, it, q&a]
+  arxiv: [general, science, scientific publications]
+searxng_instance_name: research
+# More settings.yml keys, merged (recursively) over the role's own. The role-owned keys can't be set here.
+searxng_settings_extra: {}
+
+# Limits. ai-box has 8 GB and ai_stack already budgets about 6.8 GB (ollama-cpu 5g, broker 256m, webui 1536m).
+searxng_mem_limit: 384m
+searxng_pids_limit: 128
+searxng_tmpfs_size: 64m
+
+searxng_compose_wait_timeout: 180
+
+# Post-start checks (host side, read-only).
+searxng_verify_retries: 10
+searxng_verify_delay: 3
+
+# Role docker's defaults (container range, pools, avoid list), read with include_vars so nothing is copied.
+searxng_docker_defaults_file: "{{ role_path }}/../docker/defaults/main.yml"
+
+# Owner of the role's files (the tests run unprivileged and override it).
+searxng_owner: root

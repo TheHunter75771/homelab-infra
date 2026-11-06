@@ -1,0 +1,50 @@
+---
+# Derived values (not meant to be overridden).
+
+# settings.yml (§12.16.2). The secret is NOT here: SearXNG reads server.secret_key from the SEARXNG_SECRET
+# environment variable, which comes from {{ searxng_dir }}/.env (root 0600, generated once, never rendered).
+searxng_settings_base:
+  use_default_settings:
+    engines:
+      keep_only: "{{ searxng_engines }}"
+  general:
+    instance_name: "{{ searxng_instance_name }}"
+    enable_metrics: false
+  search:
+    safe_search: 0
+    autocomplete: ""
+    favicon_resolver: ""
+    formats: [html, json]
+  server:
+    limiter: false
+    public_instance: false
+    image_proxy: false
+    method: GET
+  valkey:
+    url: false
+  engines: "{{ searxng_engine_categories | dict2items(key_name='name', value_name='categories') }}"
+searxng_settings: "{{ searxng_settings_base | combine(searxng_settings_extra, recursive=true) }}"
+searxng_settings_content: "{{ searxng_settings | to_nice_yaml(indent=2, sort_keys=true) }}"
+# Stamped on the container as a label: SearXNG reads settings.yml only at start, so a change recreates it in
+# the same `compose up`.
+searxng_settings_hash: "{{ searxng_settings_content | hash('sha256') }}"
+
+# Role docker's values for the network checks: the inventory's win, else role docker's defaults.
+searxng_docker_container_range: >-
+  {{ docker_address_pools_container | default(searxng_docker_role_defaults.docker_address_pools_container | default('')) }}
+searxng_docker_pools: >-
+  {{ docker_address_pools | default(searxng_docker_role_defaults.docker_address_pools | default([])) }}
+searxng_docker_avoid: >-
+  {{ [docker_dns_bip | default('172.17.0.1/16')]
+     + (docker_address_pools_avoid | default(searxng_docker_role_defaults.docker_address_pools_avoid | default([]))) }}
+
+searxng_compose_file: "{{ searxng_dir }}/compose.yaml"
+searxng_env_file: "{{ searxng_dir }}/.env"
+
+# Writes "SEARXNG_SECRET=<64 hex>\n" to argv[1], mode 0600. O_EXCL|O_NOFOLLOW: refuses an existing path,
+# including a symlink (dangling or not), so it can't follow, clobber or rotate anything. Run with python3 -I.
+searxng_secret_script: |
+  import os, secrets, sys
+  fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+  os.write(fd, ("SEARXNG_SECRET=" + secrets.token_hex(32) + "\n").encode())
+  os.close(fd)

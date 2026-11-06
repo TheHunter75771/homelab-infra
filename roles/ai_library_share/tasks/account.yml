@@ -1,0 +1,18 @@
+---
+# §12.17.2: the Samba account ailib (system, nologin, no home). Its password: password.yml.
+- name: Account | ailib group
+  ansible.builtin.group:
+    name: "{{ ai_library_share_user }}"
+    system: true
+
+- name: Account | ailib system user (no login, no home)
+  ansible.builtin.user:
+    name: "{{ ai_library_share_user }}"
+    group: "{{ ai_library_share_user }}"
+    groups: []
+    append: false
+    system: true
+    comment: AI Library Samba account
+    shell: /usr/sbin/nologin
+    home: /nonexistent
+    create_home: false

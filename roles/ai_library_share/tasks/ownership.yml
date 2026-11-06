@@ -1,0 +1,39 @@
+---
+# Everything under the library belongs to Samba's force user and group (Integrator, first live run:
+# the ntfs3 mount stores real owners, so root-made folders were root:root 0755 and Samba, writing as
+# the force user, was denied). Idempotent: find lists only what is owned by anyone else, without
+# following links (-P, the default), leaving the drive (-xdev) or touching another filesystem type
+# (-fstype). chown runs through -execdir: from inside each entry's own directory on `./name`, so a
+# directory swapped for a symlink after find listed it can't redirect chown outside (Reviewer G
+# round 3); -h changes a link itself, never its target. Changed only when something was fixed.
+# Runs before library.yml, so a root-owned library without its sentinel can still get one.
+- name: Ownership | guard the library folder
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    ai_library_share_guard_dirs:
+      - "{{ ai_library_share_dir }}"
+
+- name: Ownership | is there a library folder yet
+  ansible.builtin.stat:
+    path: "{{ ai_library_share_dir }}"
+    follow: false
+    get_checksum: false
+  register: ai_library_share_owned_stat
+
+- name: Ownership | everything in the library is owned by the force user and group
+  ansible.builtin.command:
+    argv: >-
+      {{ [ai_library_share_find, ai_library_share_dir, '-xdev'] + ai_library_share_fstype_args
+         + ['(', '!', '-user', ai_library_share_force_user, '-o', '!', '-group', ai_library_share_force_group, ')',
+            '-print', '-execdir', ai_library_share_chown, '-h', '--no-dereference',
+            ai_library_share_force_user ~ ':' ~ ai_library_share_force_group, '{}', '+'] }}
+  vars:
+    # ( -fstype ntfs3 [-o -fstype ...] ): only entries on the share drive's filesystem type.
+    ai_library_share_fstype_args: >-
+      {% set a = ['('] %}{% for t in ai_library_share_share_fstypes %}{% if not loop.first %}{% set _ = a.append('-o')
+      %}{% endif %}{% set _ = a.extend(['-fstype', t]) %}{% endfor %}{% set _ = a.append(')') %}{{ a }}
+  register: ai_library_share_owned
+  changed_when: ai_library_share_owned.stdout | length > 0
+  when:
+    - not ansible_check_mode
+    - ai_library_share_owned_stat.stat.isdir | default(false)

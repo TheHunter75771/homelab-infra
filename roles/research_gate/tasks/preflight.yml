@@ -1,0 +1,190 @@
+---
+# Role inputs, checked before anything is written. With research_gate_enabled, also the library mount (§12.16.4:
+# "Preflight refuses enabled: true if library_root isn't the sentinel-checked library mount").
+- name: Preflight | role searxng's defaults (the pinned SearXNG address)
+  ansible.builtin.include_vars:
+    file: "{{ research_gate_searxng_defaults_file }}"
+    name: research_gate_searxng_role_defaults
+
+- name: Preflight | the switch is a boolean
+  ansible.builtin.assert:
+    that: research_gate_enabled is boolean
+    fail_msg: research_gate_enabled must be true or false (got {{ research_gate_enabled }}).
+    quiet: true
+
+# Plain absolute paths: they go into the unit (ReadWritePaths, RequiresMountsFor) unescaped.
+- name: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+  ansible.builtin.assert:
+    that:
+      - item is string
+      - item is match('^/[A-Za-z0-9._/-]+$')
+      - item is not search('//|/$|(^|/)[.]{1,2}(/|$)')
+      - item is not match(research_gate_library_forbidden_re)
+    fail_msg: >-
+      {{ item }} must be an absolute path of plain characters (A-Z a-z 0-9 . _ - /), with no //, trailing /, . or ..
+      components, and not under {{ research_gate_library_forbidden_re }} (the unit's ProtectHome/ProtectSystem/PrivateTmp
+      hide or lock those).
+    quiet: true
+  loop:
+    - "{{ research_gate_library_root }}"
+    - "{{ research_gate_library_mount }}"
+
+- name: Preflight | the library root is the mount or below it
+  ansible.builtin.assert:
+    that:
+      - >-
+        research_gate_library_root == research_gate_library_mount
+        or research_gate_library_root.startswith(research_gate_library_mount ~ '/')
+    fail_msg: >-
+      research_gate_library_root ({{ research_gate_library_root }}) must be research_gate_library_mount
+      ({{ research_gate_library_mount }}) or inside it.
+    quiet: true
+
+- name: Preflight | R's settings
+  ansible.builtin.assert:
+    that:
+      - research_gate_poll_interval | int >= 5 and research_gate_poll_interval | int <= 86400
+      - research_gate_results_per_query | int >= 1 and research_gate_results_per_query | int <= 50
+      - research_gate_max_bytes | int >= 1024 and research_gate_max_bytes | int <= 104857600
+      - research_gate_fetch_timeout | int >= 1 and research_gate_fetch_timeout | int <= 300
+      - research_gate_max_redirects | int >= 0 and research_gate_max_redirects | int <= 3
+      - research_gate_user_agent is string and research_gate_user_agent is match('^[ -~]{1,200}$')
+      - research_gate_user is match('^[a-z_][a-z0-9_-]*$') and research_gate_user not in ['root', 'docker']
+      - research_gate_library_cap is string and research_gate_library_cap is match('^[0-9]+([.][0-9]+)?[A-Za-z]{0,3}$')
+    fail_msg: >-
+      Check the research_gate inputs (R's ranges): poll_interval 5-86400 s, results_per_query 1-50, max_bytes 1 KiB-100 MiB,
+      fetch_timeout 1-300 s, max_redirects 0-3, user_agent printable ASCII (1-200, no line breaks), a plain
+      account name (not root or docker), library cap like 500GB or 750GiB (no spaces: it goes into the unit).
+    quiet: true
+
+- name: Preflight | SearXNG's pinned address, the resolver stub and the IP filter
+  vars:
+    research_gate_ip_issues: >-
+      {{ research_gate_ip_allow | research_gate_ip_problems(research_gate_ip_deny, research_gate_ip_deny_required) }}
+  ansible.builtin.assert:
+    that:
+      - research_gate_searxng_ipv4 is match('^[0-9]{1,3}([.][0-9]{1,3}){3}$')
+      - research_gate_searxng_port | int > 0 and research_gate_searxng_port | int < 65536
+      - research_gate_dns_stub is match('^127([.][0-9]{1,3}){3}$')
+      - research_gate_ip_issues | length == 0
+    fail_msg: >-
+      SearXNG address {{ research_gate_searxng_ipv4 }} port {{ research_gate_searxng_port }} (searxng_ipv4 /
+      searxng_container_port, or role searxng's defaults), resolver stub {{ research_gate_dns_stub }} (a 127.x
+      address): {{ research_gate_ip_issues | join('; ') }}
+    quiet: true
+
+- name: Preflight | the app sources exist on the controller (modules R and L)
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ research_gate_launcher_src }}"
+    - "{{ research_gate_pkg_src }}/__init__.py"
+    - "{{ research_gate_pkg_src }}/__main__.py"
+    - "{{ research_gate_pkg_src }}/config.py"
+    - "{{ research_gate_library_src_dir }}/forge/__init__.py"
+    - "{{ research_gate_library_src_dir }}/library/__init__.py"
+  register: research_gate_src_stat
+  delegate_to: localhost
+  become: false
+
+- name: Preflight | require the app sources
+  ansible.builtin.assert:
+    that: research_gate_src_stat.results | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      Missing on the controller:
+      {{ research_gate_src_stat.results | rejectattr('stat.exists') | map(attribute='item') | join(', ') }}
+    quiet: true
+
+# The library's own size parser (the same code R and the library CLI run), on the controller.
+- name: Preflight | the library cap parses as the library reads it
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -I
+      - -c
+      - "import sys; sys.path.insert(0, sys.argv[1]); from library.naming import parse_size; print(parse_size(sys.argv[2]))"
+      - "{{ research_gate_library_src_dir }}"
+      - "{{ research_gate_library_cap }}"
+  register: research_gate_cap_parsed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  delegate_to: localhost
+  become: false
+
+- name: Preflight | require a valid library cap
+  ansible.builtin.assert:
+    that: research_gate_cap_parsed.rc == 0
+    fail_msg: "research_gate_library_cap {{ research_gate_library_cap }}: {{ research_gate_cap_parsed.stderr_lines | last | default('') }}"
+    quiet: true
+
+# --- Enabled only: the library must really be mounted (§12.11 mount safety; §12.16.4). ---
+- name: Preflight | the library mount (enabled only)
+  when: research_gate_enabled | bool
+  block:
+    - name: Preflight | stat the library root without following links
+      ansible.builtin.stat:
+        path: "{{ research_gate_library_root }}"
+        follow: false
+        get_checksum: false
+      register: research_gate_root_stat
+
+    - name: Preflight | the library root is a real directory
+      ansible.builtin.assert:
+        that:
+          - research_gate_root_stat.stat.exists
+          - research_gate_root_stat.stat.isdir and not research_gate_root_stat.stat.islnk
+        fail_msg: "{{ research_gate_library_root }} is missing, or is a symlink or a file. The gate stays off until the AI Library is mounted there."
+        quiet: true
+
+    - name: Preflight | which mount holds the library root
+      ansible.builtin.command:
+        argv: [findmnt, --noheadings, --first-only, --output, TARGET, --target, "{{ research_gate_library_root }}"]
+      register: research_gate_findmnt
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    # An unmounted share leaves an empty directory on the parent filesystem: findmnt then names that parent.
+    - name: Preflight | the library root is on the declared mount (not the disk under an empty mount point)
+      ansible.builtin.assert:
+        that:
+          - research_gate_findmnt.rc == 0
+          - research_gate_findmnt.stdout | trim == research_gate_library_mount
+          - research_gate_library_mount != '/'
+        fail_msg: >-
+          {{ research_gate_library_root }} is on mount '{{ research_gate_findmnt.stdout | default('') | trim }}', not on
+          research_gate_library_mount ({{ research_gate_library_mount }}). Is the AI Library share mounted? The gate stays off.
+        quiet: true
+
+    - name: Preflight | stat the library sentinel without following links
+      ansible.builtin.stat:
+        path: "{{ research_gate_sentinel }}"
+        follow: false
+        get_checksum: false
+      register: research_gate_sentinel_stat
+
+    - name: Preflight | the library sentinel is a regular file
+      ansible.builtin.assert:
+        that:
+          - research_gate_sentinel_stat.stat.exists
+          - research_gate_sentinel_stat.stat.isreg and not research_gate_sentinel_stat.stat.islnk
+        fail_msg: >-
+          {{ research_gate_sentinel }} is missing (or not a regular file). The share carries it (§12.11); without it this is
+          not the AI Library, and the gate stays off.
+        quiet: true
+
+    - name: Preflight | stat the forge folder without following links
+      ansible.builtin.stat:
+        path: "{{ research_gate_forge_dir }}"
+        follow: false
+        get_checksum: false
+      register: research_gate_forge_stat
+
+    - name: Preflight | the library has its forge folder (an initialized library)
+      ansible.builtin.assert:
+        that:
+          - research_gate_forge_stat.stat.exists
+          - research_gate_forge_stat.stat.isdir and not research_gate_forge_stat.stat.islnk
+        fail_msg: "{{ research_gate_forge_dir }} is missing or not a real folder: the library isn't initialized (python3 -m library --root ... init)."
+        quiet: true

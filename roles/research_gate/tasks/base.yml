@@ -1,0 +1,57 @@
+---
+# forge and library need Python 3.12+ (§12.11); the gate is stdlib only. Ubuntu 26.04 ships newer.
+- name: Base | Python version
+  ansible.builtin.command:
+    argv:
+      - "{{ research_gate_python }}"
+      - -I
+      - -c
+      - "import sys; print(sys.version_info >= (3, 12))"
+  register: research_gate_py
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Base | Python is 3.12 or newer
+  ansible.builtin.assert:
+    that: research_gate_py.rc == 0 and research_gate_py.stdout | trim == 'True'
+    fail_msg: "Need Python >= 3.12 at {{ research_gate_python }}: {{ research_gate_py.stdout | default('') }} {{ research_gate_py.stderr | default('') }}"
+    quiet: true
+
+# §12.16.1: system account, no login, no home, NOT in docker. Role ai_library_share's client creates the same
+# account on ai-box (the CIFS mount's uid=/gid=), so both set EXACTLY these attributes and nothing else (no
+# comment, no groups/append): any extra attribute would make the two roles undo each other on every run
+# (§12.17.3; tests/test_research_gate.yml compares the two tasks). The "not in docker" rule is therefore a
+# read-only check below, not a `groups: []` write.
+- name: Base | rgate group
+  ansible.builtin.group:
+    name: "{{ research_gate_user }}"
+    system: true
+
+- name: Base | rgate system user (no login, no home)
+  ansible.builtin.user:
+    name: "{{ research_gate_user }}"
+    group: "{{ research_gate_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: /nonexistent
+    create_home: false
+  register: research_gate_user_task
+  notify: Restart research-gate
+
+- name: Base | rgate's groups
+  ansible.builtin.command:
+    argv: [id, -Gn, "{{ research_gate_user }}"]
+  register: research_gate_user_groups
+  changed_when: false
+  check_mode: false
+  when: not (ansible_check_mode and research_gate_user_task is changed)
+
+- name: Base | rgate is in its own group only (never docker)
+  ansible.builtin.assert:
+    that: research_gate_user_groups.stdout.split() == [research_gate_user]
+    fail_msg: >-
+      {{ research_gate_user }} is in groups {{ research_gate_user_groups.stdout }}; it must be in {{ research_gate_user }} only
+      (never docker). Remove the extra membership by hand (gpasswd -d {{ research_gate_user }} <group>).
+    quiet: true
+  when: not (ansible_check_mode and research_gate_user_task is changed)

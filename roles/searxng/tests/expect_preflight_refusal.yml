@@ -1,0 +1,43 @@
+---
+# One refusal case for test_searxng.yml: case = {name, vars, task, networks (optional)}. The case's vars are
+# passed as include params (they outrank the test's set_fact values); every other input keeps its good value.
+# `networks` replaces the fake docker's network list for this case only.
+- name: Networks for {{ case.name }}
+  ansible.builtin.copy:
+    content: "{{ case.networks | default(test_good.networks) }}"
+    dest: "{{ test_networks_file }}"
+    mode: "0644"
+
+- name: Preflight refuses {{ case.name }}
+  block:
+    - name: Preflight with {{ case.name }}
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+      vars:
+        images: "{{ case.vars.get('images', test_good.images) }}"
+        searxng_publish_host: "{{ case.vars.get('searxng_publish_host', test_good.searxng_publish_host) }}"
+        searxng_subnet: "{{ case.vars.get('searxng_subnet', test_good.searxng_subnet) }}"
+        searxng_gateway: "{{ case.vars.get('searxng_gateway', test_good.searxng_gateway) }}"
+        searxng_ipv4: "{{ case.vars.get('searxng_ipv4', test_good.searxng_ipv4) }}"
+        searxng_settings_extra: "{{ case.vars.get('searxng_settings_extra', {}) }}"
+        searxng_engines: "{{ case.vars.get('searxng_engines', test_good.searxng_engines) }}"
+        searxng_engine_categories: "{{ case.vars.get('searxng_engine_categories', test_good.searxng_engine_categories) }}"
+
+    - name: Not reached
+      ansible.builtin.set_fact:
+        sx_test_refused_by: ""
+  rescue:
+    - name: Note which task refused
+      ansible.builtin.set_fact:
+        sx_test_refused_by: "{{ ansible_failed_task.name }}"
+
+- name: Restore the networks after {{ case.name }}
+  ansible.builtin.copy:
+    content: "{{ test_good.networks }}"
+    dest: "{{ test_networks_file }}"
+    mode: "0644"
+
+- name: Refused by the expected check for {{ case.name }}
+  ansible.builtin.assert:
+    that: sx_test_refused_by == case.task
+    fail_msg: "{{ case.name }}: refused by '{{ sx_test_refused_by }}', expected '{{ case.task }}'"
+    quiet: true

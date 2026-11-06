@@ -1,0 +1,8 @@
+---
+# Role ai_library_share has two halves on two hosts; use tasks_from (docs/CONTRACTS.md §12.17.1):
+#   include_role: {name: ai_library_share, tasks_from: server}               gaming PC
+#   include_role: {name: ai_library_share, tasks_from: export_credentials}   gaming PC, after server
+#   include_role: {name: ai_library_share, tasks_from: client}               ai-box
+- name: Refuse a bare role call
+  ansible.builtin.fail:
+    msg: Role ai_library_share needs tasks_from server, export_credentials or client (README).

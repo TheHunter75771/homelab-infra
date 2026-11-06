@@ -1,0 +1,24 @@
+---
+# Order matters: handlers run in this order, so units are reloaded before smb or the mount act on them.
+- name: Reload systemd for ai-library-share
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+# A changed smb.service drop-in (the IP filter) applies on a restart.
+- name: Restart smb for ai-library-share
+  ansible.builtin.systemd_service:
+    name: "{{ ai_library_share_smb_unit }}"
+    state: restarted
+
+# §12.17.2: reload on a config change (starts smb if it isn't running).
+- name: Reload smb for ai-library-share
+  ansible.builtin.systemd_service:
+    name: "{{ ai_library_share_smb_unit }}"
+    state: reloaded
+
+# A changed mount unit or credentials file only applies on the next mount. try-restart is a no-op
+# while the share isn't mounted; when it is and something holds it open, this fails loudly.
+- name: Remount ai-library
+  ansible.builtin.command:
+    argv: [systemctl, try-restart, "{{ ai_library_share_mount_unit }}"]
+  changed_when: true
