@@ -1,0 +1,121 @@
+# gitleaks config, read by CI's full-history scan and the pre-commit hook.
+# Keeps every built-in rule and adds narrow allowlists for test fixtures whose
+# fake secrets are the input under test (redactor corpora, token-format and
+# no-leak checks), plus one PEM-shape assert. Every entry is exact paths + the
+# rule ids that fire there + the exact fake value (or match span), so a real
+# secret in the same file is still caught.
+# Editing a pinned fixture re-flags it (fails closed): update its pin here.
+# CI scans full history, so keep a pin while any commit still holds that value.
+# Use this file, not .gitleaksignore: its fingerprints are bound to a commit
+# SHA (lost when history is rebuilt) or to file:line (which then suppresses
+# whatever later lands on that line).
+# Pins spell provider prefixes in escaped form (-{5} for a PEM dash run,
+# glpat\-), so this file holds no token-shaped literal for push protection.
+
+[extend]
+useDefault = true
+
+# Redaction corpus ({in, out}, all synthetic): the flagged "in" values are fake
+# secrets the redactor must scrub.
+[[allowlists]]
+description = "ai-control helper redaction cases: curl -u, glpat, JWT"
+targetRules = ["curl-auth-user", "gitlab-pat", "jwt"]
+condition = "AND"
+paths = ['''(?:^|/)apps/ai-control/helper/tests/redact_cases\.json$''']
+regexes = [
+  '''^admin:(?:pa55(?:word|-fake)?|pw-gap-[39]|pw-long)$''',
+  '''^glpat\-FAKEfake0123456789ab$''',
+  '''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0In0\.c2lnbmF0dXJlXw$''',
+]
+
+[[allowlists]]
+description = "ai-control helper redaction cases: the fake OpenSSH and PGP blocks"
+targetRules = ["private-key"]
+condition = "AND"
+paths = ['''(?:^|/)apps/ai-control/helper/tests/redact_cases\.json$''']
+regexTarget = "match"
+regexes = [
+  '''^-{5}BEGIN OPENSSH PRIVATE KEY-{5} b3BlbnNzaC1rZXktdjEAAAAA AAAAFAKEFAKEFAKE -{5}END OPENSSH PRIVATE KEY-{5} y",\n  "out": "x \[REDACTED\] y"\n },\n \{\n  "in": "x -{5}BEGIN OPENSSH PRIVATE KEY-{5}$''',
+  '''^-{5}BEGIN PGP PRIVATE KEY BLOCK-{5}  lQOYBFAKEFAKEFAKE =AbCd -{5}END PGP PRIVATE KEY BLOCK-{5} done",\n  "out": "key: \[REDACTED\] done"\n },\n \{\n  "in": "-{5}BEGIN PGP PRIVATE KEY BLOCK-{5}$''',
+]
+
+[[allowlists]]
+description = "ai-control sudo I/O redaction tests: the fake bearer and JWT"
+targetRules = ["curl-auth-header", "jwt"]
+condition = "AND"
+paths = ['''(?:^|/)apps/ai-control/helper/tests/test_sudo_io\.py$''']
+regexes = [
+  '''^live-abcdef123456$''',
+  '''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0In0\.c2lnbmF0dXJlXw$''',
+]
+
+[[allowlists]]
+description = "ai-control sudo log parsing: the fake bearer it must redact"
+targetRules = ["curl-auth-header"]
+condition = "AND"
+paths = ['''(?:^|/)apps/ai-control/helper/tests/test_ops\.py$''']
+regexes = ['''^tok-0123456789$''']
+
+# PEM headers as ReDoS inputs: each match runs from the first header-only
+# string to the next header, so pin both ends; a real key block anywhere in
+# the span ends the match early and is reported.
+[[allowlists]]
+description = "ai-control helper hardening: PEM headers as ReDoS inputs"
+targetRules = ["private-key"]
+condition = "AND"
+paths = ['''(?:^|/)apps/ai-control/helper/tests/test_hardening\.py$''']
+regexTarget = "match"
+regexes = ['''^-{5}BEGIN RSA PRIVATE KEY-{5}" \* \(N // 31\),\n[\s\S]*\n    "pgp-begins": "-{5}BEGIN PGP PRIVATE KEY BLOCK-{5}$''']
+
+[[allowlists]]
+description = "ai-control host-agent redaction: PEM headers as ReDoS inputs"
+targetRules = ["private-key"]
+condition = "AND"
+paths = ['''(?:^|/)apps/ai-control/host-agent/tests/test_redact\.py$''']
+regexTarget = "match"
+regexes = ['''^-{5}BEGIN RSA PRIVATE KEY-{5}" \* \(N // 31\),\n[\s\S]*\n +"xox", "AKIA", "eyJ-", "\[REDACTED\]", "-{5}BEGIN RSA PRIVATE KEY-{5}$''']
+
+[[allowlists]]
+description = "ai-control host-agent logs: a synthetic key block split across journal lines"
+targetRules = ["private-key"]
+condition = "AND"
+paths = ['''(?:^|/)apps/ai-control/host-agent/tests/test_endpoints\.py$''']
+regexTarget = "match"
+regexes = ['''^-{5}BEGIN OPENSSH PRIVATE KEY-{5}",\n +"[^"\n]*: b3BlbnNzaC1rZXktdjEAAAAAsynthetic",\n +"[^"\n]*: -{5}END OPENSSH PRIVATE KEY-{5}$''']
+
+# Not a test: an assert on the PEM header and footer. Only that exact span is allowed.
+[[allowlists]]
+description = "ai_backup export_key PEM shape assert"
+targetRules = ["private-key"]
+condition = "AND"
+paths = ['''(?:^|/)roles/ai_backup/tasks/export_key\.yml$''']
+regexTarget = "match"
+regexes = ['''^-{5}BEGIN OPENSSH PRIVATE KEY-{5}\\n'\)\s+- ai_backup_pull_private_key is search\('\\n-{5}END OPENSSH PRIVATE KEY-{5}$''']
+
+[[allowlists]]
+description = "ai_control preflight: a token with a space is refused"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(?:^|/)roles/ai_control/tests/test_ai_control\.yml$''']
+regexes = ['''^0123456789abcdef0123456789abcdef$''']
+
+[[allowlists]]
+description = "research-tool: the fake bearer its stub server expects"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(?:^|/)apps/research-tool/tests/test_research_tool\.py$''']
+regexes = ['''^tok-3f9a2c7d1e5b8a4c6d0e2f1a9b8c7d6e$''']
+
+[[allowlists]]
+description = "ai_backup: the canary stack.env the backup must copy intact"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(?:^|/)roles/ai_backup/tests/test_script\.py$''']
+regexes = ['''^WEBUI_SECRET_KEY=test-canary-0123456789abcdef$''']
+
+[[allowlists]]
+description = "mission-control: a synthetic token_sha256 in a config-validation test"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(?:^|/)apps/mission-control/server/tests/test_notify\.py$''']
+regexes = ['''^0123456789abcdef$''']
