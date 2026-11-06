@@ -1,0 +1,49 @@
+---
+# verify_http.yml against tests/fake_server.py in one mode: http_case = {mode, want: pass|fail}. A free port is picked
+# each time, so parallel runs (the mutant runner) never collide.
+- name: Verify http | a free loopback port for {{ http_case.mode }}
+  ansible.builtin.command:
+    argv: [python3, -I, -c, "import socket; s = socket.socket(); s.bind(('127.0.0.1', 0)); print(s.getsockname()[1])"]
+  register: test_http_free
+  changed_when: false
+
+- name: Verify http | start the fake server for {{ http_case.mode }}
+  ansible.builtin.shell:
+    cmd: |
+      python3 -I -B "{{ playbook_dir }}/fake_server.py" "{{ test_http_port }}" noah@example.com "{{ http_case.mode }}" >/dev/null 2>&1 &
+      echo $!
+      for i in $(seq 50); do python3 -c "import socket; socket.create_connection(('127.0.0.1', {{ test_http_port }}), 1)" 2>/dev/null && exit 0; sleep 0.1; done
+      exit 1
+  register: test_http_pid
+  changed_when: true
+  vars:
+    test_http_port: "{{ test_http_free.stdout | int }}"
+
+- name: Verify http | run for {{ http_case.mode }}
+  block:
+    - name: Verify http | verify_http.yml for {{ http_case.mode }}
+      ansible.builtin.include_tasks: ../tasks/verify_http.yml
+      vars:
+        mission_control_listen_port: "{{ test_http_free.stdout | int }}"
+        mission_control_verify_retries: 1
+        mission_control_verify_delay: 0
+    - name: Passed
+      ansible.builtin.set_fact:
+        test_http_got: pass
+  rescue:
+    - name: Failed
+      ansible.builtin.set_fact:
+        test_http_got: >-
+          {{ 'fail' if ansible_failed_task.name == 'Verify | 200 for Noah, 403 without the header and for another login'
+             else 'error: ' ~ ansible_failed_task.name }}
+  always:
+    - name: Verify http | stop the fake server for {{ http_case.mode }}
+      ansible.builtin.command:
+        argv: [kill, "{{ test_http_pid.stdout_lines[0] }}"]
+      changed_when: true
+
+- name: Verify http | outcome for {{ http_case.mode }}
+  ansible.builtin.assert:
+    that: test_http_got == http_case.want
+    fail_msg: "{{ http_case.mode }}: {{ test_http_got }}, want {{ http_case.want }}"
+    quiet: true

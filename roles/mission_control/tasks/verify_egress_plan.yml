@@ -1,0 +1,47 @@
+---
+# The egress probe's targets (mission_control_probe_plan): see verify_egress.yml.
+- name: Verify | build the probe plan from the IP filter and the inventory
+  vars:
+    # Inventory addresses that must be denied, minus any the filter allows on purpose (the mediaserver, when it is
+    # configured, or Home Assistant): those are probed as allowed hosts instead.
+    mission_control_probe_allowed_hosts: "{{ mission_control_ip_allow | map('regex_replace', '/(32|128)$', '') | list }}"
+    mission_control_probe_denied: >-
+      {{ ([tailnet_ip | default(''), mission_control_guard_ip6 | default(''),
+           gaming_pc_tailnet_ip | default(''), mediaserver_tailnet_ip | default(''),
+           lan_cidr | default('') | mission_control_first_host,
+           ai_stack_ollama_cpu_ip | default(''), ai_stack_broker_ip | default('')]
+          + mission_control_verify_denied_extra)
+         | map('string') | map('regex_replace', '/(32|128)$', '') | reject('equalto', '')
+         | reject('in', mission_control_probe_allowed_hosts) | unique | list }}
+    # TCP through the addresses MC1 really uses: ai-box has no MagicDNS, so ERAU and the mediaserver are reached on
+    # their host_map address (TLS isn't checked here, only the path through the filter). The server's own port is
+    # refused to mc by the local-access guard (Q-1): mc isn't root.
+    mission_control_probe_tcp: >-
+      {{ [['server (the guard refuses mc)', '127.0.0.1', mission_control_listen_port | int, 'ECONNREFUSED'],
+          ['aicontrol', '127.0.0.1', mission_control_aictl_listen_port | int],
+          ['webui', ai_stack_webui_ip | default(''), mission_control_webui_container_port | int],
+          ['moneyhub', mission_control_moneyhub_ip, mission_control_moneyhub_url | mission_control_url_port],
+          ['erau', mission_control_erau_ip, mission_control_erau_url | mission_control_url_port]]
+         + ([['mediaserver', mission_control_mediaserver_ip, mission_control_mediaserver_url | mission_control_url_port]]
+            if mission_control_mediaserver_on | bool else [])
+         + mission_control_verify_push_hosts }}
+    # Q-6: paths that must stay shut although they start on an address or port MC could name: Docker-published ports
+    # DNATed to containers (the broker on the tailnet address, SearXNG on loopback), SSH, AI Control's and Mission
+    # Control's own serve ports on the tailnet address. Blocked = EPERM or a timeout, never a connect or a reset.
+    mission_control_probe_tcp_denied: >-
+      {{ [['broker (DNAT)', tailnet_ip, ai_stack_broker_port | default(11434) | int],
+          ['searxng (DNAT)', '127.0.0.1', searxng_publish_port | default(8888) | int],
+          ['ssh on the tailnet address', tailnet_ip, 22],
+          ['AI Control serve', tailnet_ip, mission_control_aictl_serve_port | int],
+          ['Mission Control serve', tailnet_ip, mission_control_serve_port | int]] }}
+    # Q-2: inside the sandbox, systemctl reaches systemd over the system bus, names resolve, and no other socket
+    # under /run is there.
+    mission_control_probe_runtime:
+      systemctl: "{{ mission_control_systemctl }} {{ mission_control_service }}"
+      dns: "{{ mission_control_verify_push_hosts[:1] }}"
+      absent: "{{ mission_control_run_forbidden }}"
+  ansible.builtin.set_fact:
+    mission_control_probe_plan: >-
+      {{ mission_control_ip_allow | mission_control_probe_plan(mission_control_ip_deny, mission_control_probe_denied,
+         mission_control_verify_public_udp, mission_control_probe_tcp, mission_control_probe_tcp_denied,
+         mission_control_probe_runtime) }}

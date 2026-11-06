@@ -1,0 +1,10 @@
+#!/opt/mission-control/venv/bin/python3 -IB
+# Ansible managed
+# Mission Control CLI (docs/CONTRACTS.md §12.29; module MC1, apps/mission-control/server): runs the mission_control
+# package installed at /opt/mission-control/server with the role's pinned venv. -I: no PYTHON* variables, no user
+# site, no script directory on sys.path; -B: no bytecode written into the root-owned code dir.
+import runpy
+import sys
+
+sys.path.insert(0, "/opt/mission-control/server")
+runpy.run_module("mission_control", run_name="__main__", alter_sys=True)

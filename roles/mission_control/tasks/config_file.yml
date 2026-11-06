@@ -1,0 +1,16 @@
+---
+# After the VAPID keys exist (MC1's loader may check the files it names).
+# Validated with the installed server's own loader under the venv (unknown keys and bad values are errors).
+# -I -B: nothing from the environment or the working directory, no bytecode in the root-owned install.
+- name: Config | config.json (MC1's keys, values from inventory)
+  ansible.builtin.template:
+    src: "{{ mission_control_role_dir }}/templates/config.json.j2"
+    dest: "{{ mission_control_config_file }}"
+    owner: "{{ mission_control_root_owner }}"
+    group: "{{ mission_control_group }}"
+    mode: "0640"
+    follow: false
+    validate: >-
+      {{ mission_control_venv_python }} -I -B -c "import sys; sys.path.insert(0, sys.argv[2]);
+      from mission_control.config import load; load(sys.argv[1])" %s {{ mission_control_server_dir }}
+  notify: Restart mission-control

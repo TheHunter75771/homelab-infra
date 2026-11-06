@@ -1,0 +1,174 @@
+---
+# Role mission_control (docs/CONTRACTS.md §12.29, module H12): Mission Control on ai-box.
+#   server MC1  apps/mission-control/server/mission_control -> /opt/mission-control/server   mission-control.service
+#                                                            (user mc, 127.0.0.1:8097)
+#   web MC2     apps/mission-control/web/public              -> /opt/mission-control/web      (served by MC1)
+#   venv        files/requirements.lock (pywebpush, pinned + hashed) -> /opt/mission-control/venv
+#   briefing    mission-control-briefing.timer, 05:30 America/New_York, Persistent -> `mission-control briefing --send`
+# and `tailscale serve` https :8443 -> 127.0.0.1:8097 next to AI Control's 443 (role tailscale_serve, parameterised).
+#
+# --- Inventory ---
+# Host vars (exist in host_vars/ai-box.yml): tailnet_ip, tailnet_fqdn, moneyhub_url (http://<edge tailnet IPv4>:8710).
+# mission_control_noah_login (REQUIRED, private host_vars): the only Tailscale-User-Login the server answers.
+# ai_control_serve_extra_handlers (REQUIRED, Lead; shared with role ai_control): every serve handler on ai-box
+#   besides AI Control's 443. It must hold exactly Mission Control's handler (README, "tailscale serve").
+# Group vars (role ai_stack's pins): ai_stack_webui_ip, ai_stack_ollama_cpu_ip.
+
+mission_control_src_dir: "{{ mission_control_role_dir }}/../../apps/mission-control"
+mission_control_server_src: "{{ mission_control_src_dir }}/server/mission_control"
+mission_control_web_src: "{{ mission_control_src_dir }}/web/public"
+# The venv's locks (this role's files; preflight checks pywebpush against versions.yml).
+mission_control_requirements_lock_src: "{{ mission_control_role_dir }}/files/requirements.lock"
+mission_control_build_lock_src: "{{ mission_control_role_dir }}/files/build.lock"
+# Owner of the installed code (the tests run unprivileged and override it).
+mission_control_owner: root
+
+# §12.29: system account, no login, no home, no supplementary groups.
+mission_control_user: mc
+
+mission_control_listen_port: 8097
+mission_control_serve_port: 8443
+mission_control_timezone: America/New_York
+# The morning briefing (§12.29: 05:30 local, Persistent=true).
+mission_control_briefing_time: "05:30:00"
+# §12.29 valve: what a push shows on the lock screen ("minimal": counts only, no names or amounts).
+mission_control_lockscreen_detail: minimal
+# The VAPID JWT's `sub` in vapid.json. py_vapid only signs with `https://<host>` (NO port, no path) or
+# `mailto:<address>`; the old default `https://<fqdn>:8443` made every push fail (live, 2026-10-28). A converge
+# rewrites only this field of an existing vapid.json when it differs; the keys never change.
+mission_control_vapid_subject: "https://{{ tailnet_fqdn | default('') }}"
+
+# --- What MC1 reads (apps/mission-control/server/README.md, "Config"; every key the role renders is listed in
+# vars/main.yml mission_control_config, and MC1's loader refuses unknown keys) ---
+# AI Control's local server (role ai_control: 127.0.0.1:<ai_control_listen_port>).
+mission_control_aicontrol_url: "http://127.0.0.1:{{ mission_control_aictl_listen_port }}"
+# Money Hub on homebk-edge, over the tailnet (an IPv4 literal: the IP filter allows exactly that address). Its
+# timestamps are naive UTC (Lead, §12.28 P round 2).
+mission_control_moneyhub_url: "{{ moneyhub_url | default('') }}"
+mission_control_moneyhub_timezone: UTC
+# Tailnet names MC1 reaches through `tailscale serve` (TLS verifies the name). ai-box has no MagicDNS, so each name
+# is pinned to its tailnet address in MC1's host_map, and that address goes in the IP filter.
+mission_control_tailnet_suffix: "{{ (tailnet_fqdn | default('')).split('.', 1)[-1] }}"
+# The ERAU dashboard on homebk-edge (ai-box is a user-owned node, so serve stamps Noah's login; no credential).
+mission_control_erau_url: "https://homebk-edge.{{ mission_control_tailnet_suffix }}"
+mission_control_erau_ip: "{{ mission_control_moneyhub_url | mission_control_url_host }}"
+# The mediaserver dashboard (/api/summary -> backups) behind its own serve 443. Empty URL: not configured.
+mission_control_mediaserver_url: "{{ ('https://mediaserver.' ~ mission_control_tailnet_suffix) if mediaserver_tailnet_ip is defined else '' }}"
+mission_control_mediaserver_ip: "{{ mediaserver_tailnet_ip | default('') }}"
+# Open WebUI's /health, straight on the container's pinned address (role ai_stack) and its in-container port
+# (Reviewer Q, Q-6): no DNAT through ai-box's tailnet address, so the IP filter allows that one /32 and NOT ai-box's
+# tailnet address (which would open everything published there: the broker, SSH, AI Control's 443, MC's 8443).
+mission_control_webui_url: "http://{{ ai_stack_webui_ip | default('') }}:{{ mission_control_webui_container_port }}"
+mission_control_webui_container_port: 8080
+mission_control_container_allow: ["{{ ai_stack_webui_ip | default('') }}/32"]
+# Home Assistant (Lead; optional). Empty: the card says "connect HA". Set: http(s)://<IPv4>:<port>, and its
+# address joins the IP filter. The token file is Noah's to create (root:mc 0640); the role never writes it.
+mission_control_ha_url: ""
+mission_control_ha_entities: []
+# Units MC1 watches with an unprivileged `systemctl show` (at most 32): failed, auto-restart or NRestarts >= 3
+# raise an alert. forge-api's socket and service are in (§12.25 S-1 note).
+mission_control_units:
+  - ai-control.service
+  - aictl-helper.socket
+  - forge-api.socket
+  - forge-api.service
+  - homelab-ai-stack-start.service
+  - ai-openwebui-backup.timer
+  - mission-control-briefing.service
+# Backups on the Servers card (MC1 README, "Backups"): ai_backup's staging is read from systemd (the oneshot's
+# Result + exit time; mc can't read LAST_OK in root:backuppull 0750), the mediaserver's from its dashboard.
+mission_control_backups:
+  - {id: owui-stage, label: "Open WebUI (ai-box)", kind: unit, unit: ai-openwebui-backup.service, max_age_hours: 30}
+  - {id: mediaserver, label: Mediaserver, kind: mediaserver}
+# Tap-through links per card. `ai` is Open WebUI (the AI card's ask box deep-links to it), on its tailnet port.
+mission_control_links:
+  ai: "http://{{ tailnet_fqdn | default('') }}:{{ ai_stack_webui_port | default(8080) }}/"
+  ai_control: "https://{{ tailnet_fqdn | default('') }}/"
+  money: "{{ mission_control_moneyhub_url }}/"
+  school: "{{ mission_control_erau_url }}/"
+# More config keys MC1's loader accepts (e.g. alert_repeat_hours, disk_alert_pct), merged over the role's own.
+mission_control_config_extra: {}
+
+# --- IP filter (systemd IPAddressDeny=/IPAddressAllow=; an address matching an allow entry passes even when a deny
+# entry matches it too, and an address in neither list passes) ---
+# Denied: loopback, RFC 1918, CGNAT/tailnet, link-local, ULA (the tailnet's IPv6 too) and the special ranges.
+# Everything outside them, the public internet where FCM/APNs/Mozilla push live, passes. Allowed back in, one host
+# each: 127.0.0.1 (tailscale serve in, AI Control) and 127.0.0.53 (the resolver stub) but no other loopback address,
+# homebk-edge (Money Hub, ERAU), Open WebUI's container address, the mediaserver when configured, and Home
+# Assistant when configured. Not ai-box's own tailnet address (Q-6).
+mission_control_ip_deny:
+  - 127.0.0.0/8
+  - ::1/128
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  - 100.64.0.0/10
+  - 169.254.0.0/16
+  - fe80::/10
+  - fc00::/7
+  - 0.0.0.0/8
+  - 192.0.0.0/24
+  - 198.18.0.0/15
+  - 224.0.0.0/4
+  - 240.0.0.0/4
+  - ::/128
+  - ::ffff:0:0/96
+  - 64:ff9b::/96
+  - 64:ff9b:1::/48
+  - ff00::/8
+# Money Hub, ERAU and the mediaserver must sit on the tailnet.
+mission_control_tailnet_range: 100.64.0.0/10
+
+# --- Local-access guard (Reviewer Q, Q-1) ---
+# ai-box's tailnet IPv6 (the guard also covers :8443 there). Empty: read from `tailscale ip -6` at preflight.
+mission_control_tailnet_ip6: "{{ tailnet_ip6 | default('') }}"
+mission_control_tailnet_range6: fd7a:115c:a1e0::/48
+# The interface real tailscale serve traffic arrives on (Q2-1: the guard's input rule lets :8443 in only from here).
+# Preflight checks it exists (`ip link show`).
+mission_control_tailscale_iface: tailscale0
+
+# --- tailscale serve ---
+# Role ai_control's defaults (AI Control's port and serve port), read with include_vars so nothing is copied; and
+# its vars file, which must already append ai_control_serve_extra_handlers (README, "tailscale serve").
+mission_control_aictl_defaults_file: "{{ mission_control_role_dir }}/../ai_control/defaults/main.yml"
+mission_control_aictl_vars_file: "{{ mission_control_role_dir }}/../ai_control/vars/main.yml"
+# Role docker's defaults (the container range the Open WebUI allow entry must sit in).
+mission_control_docker_defaults_file: "{{ mission_control_role_dir }}/../docker/defaults/main.yml"
+
+# --- Unit limits (§12.29 budget: mission_control 128m) ---
+mission_control_memory_max: 128M
+mission_control_tasks_max: 64
+mission_control_briefing_memory_max: 128M
+mission_control_briefing_tasks_max: 32
+mission_control_briefing_timeout: 5min
+# CPython, aiohttp and cryptography (Rust bindings) need no W+X memory. If the journal shows an mprotect EPERM
+# crash at start, set false and record it (README).
+mission_control_memory_deny_write_execute: true
+
+# --- Post-start checks (read-only; not in check mode) ---
+mission_control_verify: true
+mission_control_verify_retries: 15
+# The non-root user the guard check connects as (Q-1).
+mission_control_verify_guard_user: nobody
+mission_control_verify_guard_group: nogroup
+mission_control_verify_delay: 2
+# The read endpoint checked with and without the identity header (MC1: GET /api/cards; /healthz needs none).
+mission_control_verify_path: /api/cards
+# Public push hosts the sandboxed probe must reach on 443 (FCM, APNs, Mozilla autopush).
+mission_control_verify_push_hosts:
+  - fcm.googleapis.com
+  - web.push.apple.com
+  - updates.push.services.mozilla.com
+# Addresses the probe must find DENIED (UDP send gets EPERM): besides the ones from inventory (the gaming PC's
+# tailnet address, the LAN's first host, ollama-cpu's and the broker's container addresses; the mediaserver's when
+# it isn't configured) these fixed ones.
+mission_control_verify_denied_extra:
+  # Q-3: other loopback addresses than the server's and the resolver stub's, and IPv6 loopback.
+  - 127.0.0.54
+  - "::1"
+  - 10.255.255.1
+  - 172.31.255.1
+  - 192.168.255.1
+  - 100.100.100.100
+# A public address the probe must find NOT filtered (UDP send succeeds; port 9 discard, no reply expected).
+mission_control_verify_public_udp: 1.1.1.1

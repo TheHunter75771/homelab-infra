@@ -1,0 +1,87 @@
+---
+# /etc/mission-control: root:mc 0750. mc reads config.json and vapid.json (root:mc 0640) and, once Noah creates it,
+# ha-token (root:mc 0640, never written by the role); it can write none of them.
+- name: Config | directory
+  ansible.builtin.file:
+    path: "{{ mission_control_config_dir }}"
+    state: directory
+    owner: "{{ mission_control_root_owner }}"
+    group: "{{ mission_control_group }}"
+    mode: "0750"
+    follow: false
+
+# State: subscriptions.json (single writer: the server), dedup/cache files. Only mc can write anything here.
+- name: Config | state directory (mc only)
+  ansible.builtin.file:
+    path: "{{ mission_control_state_dir }}"
+    state: directory
+    owner: "{{ mission_control_user }}"
+    group: "{{ mission_control_group }}"
+    mode: "0700"
+    follow: false
+
+- name: Config | the subscriptions file is absent or a regular file (never a symlink)
+  ansible.builtin.stat:
+    path: "{{ mission_control_subscriptions_file }}"
+    follow: false
+    get_checksum: false
+  register: mission_control_subs_stat
+  no_log: true
+
+- name: Config | refuse a subscriptions path that isn't a regular file
+  ansible.builtin.assert:
+    that: not mission_control_subs_stat.stat.exists or (mission_control_subs_stat.stat.isreg and not mission_control_subs_stat.stat.islnk)
+    fail_msg: The subscriptions path in the state directory exists but isn't a regular file. Remove it by hand.
+    quiet: true
+
+# Created empty once; never overwritten (it holds the phones' subscriptions). Mode/owner kept to mc 0600.
+- name: Config | subscriptions file (created empty when absent; mc 0600)
+  ansible.builtin.copy:
+    content: "{{ mission_control_subscriptions_initial }}"
+    dest: "{{ mission_control_subscriptions_file }}"
+    owner: "{{ mission_control_user }}"
+    group: "{{ mission_control_group }}"
+    mode: "0600"
+    force: false
+    follow: false
+  diff: false
+  no_log: true
+
+- name: Config | subscriptions file owner and mode (mc 0600, nobody else can write it)
+  ansible.builtin.file:
+    path: "{{ mission_control_subscriptions_file }}"
+    state: file
+    owner: "{{ mission_control_user }}"
+    group: "{{ mission_control_group }}"
+    mode: "0600"
+    follow: false
+  no_log: true
+  # In a check run before the first real one the file doesn't exist yet.
+  when: not ansible_check_mode or mission_control_subs_stat.stat.exists
+
+# Home Assistant's token is Noah's to create (README). When it exists it must be root:mc 0640 and a regular file;
+# the role only fixes owner and mode, never reads or writes the content.
+- name: Config | the Home Assistant token file, if Noah created it
+  ansible.builtin.stat:
+    path: "{{ mission_control_ha_token_file }}"
+    follow: false
+    get_checksum: false
+  register: mission_control_ha_stat
+  no_log: true
+
+- name: Config | the Home Assistant token file is a regular file
+  ansible.builtin.assert:
+    that: not mission_control_ha_stat.stat.exists or (mission_control_ha_stat.stat.isreg and not mission_control_ha_stat.stat.islnk)
+    fail_msg: The Home Assistant token path exists but isn't a regular file. Fix it by hand.
+    quiet: true
+
+- name: Config | Home Assistant token owner and mode (root:mc 0640)
+  ansible.builtin.file:
+    path: "{{ mission_control_ha_token_file }}"
+    state: file
+    owner: "{{ mission_control_root_owner }}"
+    group: "{{ mission_control_group }}"
+    mode: "0640"
+    follow: false
+  no_log: true
+  when: mission_control_ha_stat.stat.exists

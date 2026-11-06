@@ -1,0 +1,23 @@
+---
+# Reviewer D: never prune (or write) through a symlink. Every directory this role creates, fills and
+# prunes must be absent or a real directory, checked without following links, before the first write
+# and again right before each find. Param: mission_control_guard_dirs (absolute paths).
+- name: Guard | stat the pruned directories without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: false
+  loop: "{{ mission_control_guard_dirs }}"
+  register: mission_control_guard_stat
+
+- name: Guard | each pruned directory is absent or a real directory (never a symlink)
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isdir and not item.stat.islnk)
+    fail_msg: >-
+      {{ item.item }} exists but isn't a real directory (a symlink or a file). Refusing to write or prune
+      through it; remove it by hand.
+    quiet: true
+  loop: "{{ mission_control_guard_stat.results }}"
+  loop_control:
+    label: "{{ item.item }}"

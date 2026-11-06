@@ -1,0 +1,7 @@
+# Build-only pin for Mission Control's venv: http-ece 1.2.1 publishes an sdist only (setup.py, no pyproject), and
+# tasks/venv.yml builds it with --no-build-isolation so pip never fetches an unhashed setuptools. Installed first:
+#   pip install --require-hashes --only-binary=:all: -r build.lock
+
+setuptools==84.2.1 \
+    --hash=sha256:3ff8b3b5492a0aa66960f4419365a86b84e013070d4313e4d4a6894f5d64d6bc \
+    --hash=sha256:ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2

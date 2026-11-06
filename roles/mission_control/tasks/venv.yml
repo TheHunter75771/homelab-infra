@@ -1,0 +1,187 @@
+---
+# The pinned venv (/opt/mission-control/venv, root-owned). Built from the role's hashed locks; rebuilt from scratch
+# (in venv.new, swapped in only once it checks out) when what is installed differs from the locks: a pin moved, a
+# package was added or removed by hand, or a distro Python upgrade broke the venv's interpreter. A converge with
+# nothing to do changes nothing.
+- name: Venv | the app dir and the lib dir are real directories (before any write)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    mission_control_guard_dirs:
+      - "{{ mission_control_app_dir }}"
+      - "{{ mission_control_lib_dir }}"
+      - "{{ mission_control_venv_dir }}"
+
+- name: Venv | app and lib directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ mission_control_owner }}"
+    group: "{{ mission_control_owner }}"
+    mode: "0755"
+  loop:
+    - "{{ mission_control_app_dir }}"
+    - "{{ mission_control_lib_dir }}"
+
+# The locks and the role's helper scripts (root 0644; mc runs only the egress probe, as part of verify).
+- name: Venv | locks and helper scripts
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ mission_control_lib_dir }}/{{ item.dest }}"
+    owner: "{{ mission_control_owner }}"
+    group: "{{ mission_control_owner }}"
+    mode: "0644"
+  loop:
+    - {src: "{{ mission_control_requirements_lock_src }}", dest: requirements.lock}
+    - {src: "{{ mission_control_build_lock_src }}", dest: build.lock}
+    - {src: "{{ mission_control_role_dir }}/files/vapid_keygen.py", dest: vapid_keygen.py}
+    - {src: "{{ mission_control_role_dir }}/files/vapid_check.py", dest: vapid_check.py}
+    - {src: "{{ mission_control_role_dir }}/files/vapid_subject.py", dest: vapid_subject.py}
+    - {src: "{{ mission_control_role_dir }}/files/vapid_sign_check.py", dest: vapid_sign_check.py}
+    - {src: "{{ mission_control_role_dir }}/files/journal_scan.py", dest: journal_scan.py}
+    - {src: "{{ mission_control_role_dir }}/files/egress_probe.py", dest: egress_probe.py}
+    - {src: "{{ mission_control_role_dir }}/files/localapi_probe.py", dest: localapi_probe.py}
+  loop_control:
+    label: "{{ item.dest }}"
+
+# What the venv holds now: {name: version} from its own interpreter (importlib.metadata, no pip). A missing venv or
+# a broken interpreter is rc != 0.
+- name: Venv | installed distributions
+  ansible.builtin.command:
+    argv:
+      - "{{ mission_control_venv_python }}"
+      - -I
+      - -B
+      - -c
+      - >-
+        import json, importlib.metadata as m;
+        print(json.dumps({d.metadata['Name']: d.version for d in m.distributions()}, sort_keys=True))
+  register: mission_control_venv_probe
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Venv | compare with the locks
+  ansible.builtin.set_fact:
+    mission_control_venv_drift: >-
+      {{ ['venv missing or its interpreter is broken (rc ' ~ mission_control_venv_probe.rc ~ ')']
+         if mission_control_venv_probe.rc != 0
+         else (mission_control_venv_probe.stdout | from_json | mission_control_dist_drift(mission_control_pins)) }}
+
+- name: Venv | rebuild because it differs from the locks
+  ansible.builtin.debug:
+    msg: "Rebuilding {{ mission_control_venv_dir }}: {{ mission_control_venv_drift | join('; ') }}"
+  when: mission_control_venv_drift | length > 0
+
+# Q-4: built aside in venv.new, checked (exactly the locks, the push stack imports), and only then swapped in. A failed
+# build (a hash mismatch, a network error, a missing wheel) stops here and leaves the working venv untouched; the
+# next run removes the half-built venv.new first.
+- name: Venv | rebuild from the hashed locks (aside, then swap)
+  when:
+    - mission_control_venv_drift | length > 0
+    - not ansible_check_mode
+  block:
+    - name: Venv | the venv dirs are not symlinks (before removing or renaming anything)
+      ansible.builtin.include_tasks: guard_dirs.yml
+      vars:
+        mission_control_guard_dirs:
+          - "{{ mission_control_venv_dir }}"
+          - "{{ mission_control_venv_new_dir }}"
+          - "{{ mission_control_venv_old_dir }}"
+
+    - name: Venv | clear leftovers of an earlier failed build or swap
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ mission_control_venv_new_dir }}"
+        - "{{ mission_control_venv_old_dir }}"
+
+    - name: Venv | create venv.new from the system Python
+      ansible.builtin.command:
+        argv: ["{{ mission_control_python }}", -I, -m, venv, "{{ mission_control_venv_new_dir }}"]
+      changed_when: true
+
+    - name: Venv | build.lock into venv.new (setuptools for http-ece's sdist; wheels only, hashes required)
+      ansible.builtin.command:
+        argv: >-
+          {{ mission_control_pip_argv + mission_control_pip_common + mission_control_pip_build_args
+             + ['-r', mission_control_lib_dir ~ '/build.lock'] }}
+      changed_when: true
+
+    - name: Venv | requirements.lock into venv.new (every file hash-checked; only http-ece from its sdist, no build isolation)
+      ansible.builtin.command:
+        argv: >-
+          {{ mission_control_pip_argv + mission_control_pip_common + mission_control_pip_app_args
+             + ['-r', mission_control_lib_dir ~ '/requirements.lock'] }}
+      changed_when: true
+
+    - name: Venv | what venv.new holds
+      ansible.builtin.command:
+        argv:
+          - "{{ mission_control_venv_new_python }}"
+          - -I
+          - -B
+          - -c
+          - >-
+            import json, importlib.metadata as m;
+            print(json.dumps({d.metadata['Name']: d.version for d in m.distributions()}, sort_keys=True))
+      register: mission_control_venv_reprobe
+      changed_when: false
+
+    - name: Venv | venv.new is exactly the locks
+      vars:
+        mission_control_left: "{{ mission_control_venv_reprobe.stdout | from_json | mission_control_dist_drift(mission_control_pins) }}"
+      ansible.builtin.assert:
+        that: mission_control_left | length == 0
+        fail_msg: "venv.new differs from the locks (the working venv is untouched): {{ mission_control_left | join('; ') }}"
+        quiet: true
+
+    - name: Venv | the push stack imports in venv.new
+      ansible.builtin.command:
+        argv: ["{{ mission_control_venv_new_python }}", -I, -B, -c, "import pywebpush, py_vapid, http_ece, cryptography"]
+      changed_when: false
+
+    # Rename the working venv away, venv.new into place (if that fails, the old one is put back), then drop the old.
+    # A venv's interpreter finds its prefix from its own location, so the renamed venv works; only console-script
+    # shebangs keep the venv.new path, and nothing runs those (pip is always `python -m pip`, the CLI is the role's).
+    - name: Venv | swap venv.new into place
+      ansible.builtin.command:
+        argv:
+          - "{{ mission_control_python }}"
+          - -I
+          - -B
+          - -c
+          - |
+            import os, sys
+            cur, new, old = sys.argv[1:4]
+            had = os.path.lexists(cur)
+            if had:
+                os.rename(cur, old)
+            try:
+                os.rename(new, cur)
+            except OSError:
+                if had:
+                    os.rename(old, cur)
+                raise
+          - "{{ mission_control_venv_dir }}"
+          - "{{ mission_control_venv_new_dir }}"
+          - "{{ mission_control_venv_old_dir }}"
+      changed_when: true
+      notify: Restart mission-control
+
+    - name: Venv | drop the old venv
+      ansible.builtin.file:
+        path: "{{ mission_control_venv_old_dir }}"
+        state: absent
+
+# The push stack imports under the venv's interpreter (it is what MC1 and the VAPID scripts need).
+- name: Venv | pywebpush, py_vapid, http_ece and cryptography import
+  ansible.builtin.command:
+    argv:
+      - "{{ mission_control_venv_python }}"
+      - -I
+      - -B
+      - -c
+      - import pywebpush, py_vapid, http_ece, cryptography
+  changed_when: false
+  when: not ansible_check_mode

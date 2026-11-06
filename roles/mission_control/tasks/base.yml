@@ -1,0 +1,28 @@
+---
+# python3-venv (the venv itself comes from the hashed locks, tasks/venv.yml) and nftables (the guard's `nft`).
+- name: Base | python3-venv and nftables from the Ubuntu archive
+  ansible.builtin.apt:
+    name: "{{ mission_control_packages }}"
+    state: present
+    install_recommends: false
+    update_cache: true
+    cache_valid_time: 3600
+
+# §12.29: system account, no login, no home. append: false with no groups empties the supplementary list.
+- name: Base | mc group
+  ansible.builtin.group:
+    name: "{{ mission_control_user }}"
+    system: true
+
+- name: Base | mc system user (no login, no home, no supplementary groups)
+  ansible.builtin.user:
+    name: "{{ mission_control_user }}"
+    group: "{{ mission_control_user }}"
+    groups: []
+    append: false
+    system: true
+    comment: Mission Control
+    shell: /usr/sbin/nologin
+    home: /nonexistent
+    create_home: false
+  notify: Restart mission-control

@@ -1,0 +1,279 @@
+---
+# Role inputs, checked before anything is written. MC1's own loader validates the rendered config again (config.yml).
+- name: Preflight | role inputs
+  ansible.builtin.assert:
+    that:
+      - tailnet_ip | default('') is match('^[0-9]{1,3}([.][0-9]{1,3}){3}\\Z')
+      - tailnet_fqdn | default('') is match('^[a-z0-9-]+([.][a-z0-9-]+)+\\Z')
+      - mission_control_user is match('^[a-z_][a-z0-9_-]*\\Z')
+      - mission_control_user not in ['root', 'docker', 'aictl']
+      - mission_control_listen_port | int > 0 and mission_control_listen_port | int < 65536
+      - mission_control_serve_port | int > 0 and mission_control_serve_port | int < 65536
+      # The identity the server answers (a tailnet login, e.g. name@example.com or name@github): one token, no
+      # whitespace or newline (it goes into config.json; a trailing newline would never match the header).
+      - mission_control_noah_login | default('') is string
+      - mission_control_noah_login | default('') is match('^[^\\s@]+@[^\\s@]+\\Z')
+      # The briefing schedule: a time of day and a zone (the timer's OnCalendar keeps the zone).
+      - mission_control_briefing_time is match('^([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\Z')
+      - mission_control_timezone is match('^[A-Za-z_]+(/[A-Za-z0-9_+-]+)+\\Z')
+      - mission_control_lockscreen_detail is match('^[a-z_]+\\Z')
+      # py_vapid's own subject rule (and a plain origin or address): https://<host> with NO port or path, or mailto:.
+      - mission_control_vapid_subject | mission_control_vapid_subject_ok
+      - mission_control_ha_entities is sequence and mission_control_ha_entities is not string
+      - mission_control_moneyhub_timezone is match('^[A-Za-z_]+(/[A-Za-z0-9_+-]+)*\\Z')
+      # MC1 validates these in depth (unit names, backup kinds, card ids); here only their shapes.
+      - mission_control_units is sequence and mission_control_units is not string
+      - mission_control_units | reject('string') | list | length == 0
+      - mission_control_units | length <= 32
+      - mission_control_backups is sequence and mission_control_backups is not string
+      - mission_control_backups | reject('mapping') | list | length == 0
+      - mission_control_links is mapping
+      - mission_control_config_extra is mapping
+      - mission_control_config_extra.keys() | intersect(mission_control_config_role_keys) | length == 0
+      - mission_control_container_allow is sequence and mission_control_container_allow is not string
+    fail_msg: >-
+      Check the mission_control inputs: tailnet_ip (IPv4) and tailnet_fqdn (host_vars); a plain account name (not
+      root, docker or aictl); ports 1-65535; mission_control_noah_login (private host_vars) one tailnet login like
+      name@example.com, no spaces or newline; briefing time HH:MM:SS and a zone like America/New_York; the VAPID
+      subject one py_vapid signs with (https://<host> with NO port or path, or mailto:<address>; it is
+      '{{ mission_control_vapid_subject }}'); Money Hub's zone a zone name; ha_entities, units, backups and container_allow
+      lists, links a mapping. The config
+      extras can't set the role-owned keys ({{ mission_control_config_role_keys | join(', ') }}).
+    quiet: true
+
+# Q-1: the guard covers :8443 on ai-box's tailnet IPv6 too. From inventory (tailnet_ip6) or, read-only, from
+# tailscale itself.
+- name: Preflight | ai-box's tailnet IPv6, from tailscale (when the inventory doesn't set it)
+  ansible.builtin.command:
+    argv: [tailscale, ip, "-6"]
+  register: mission_control_ip6_read
+  changed_when: false
+  check_mode: false
+  when: mission_control_tailnet_ip6 | length == 0
+
+- name: Preflight | the guard's IPv6 address
+  ansible.builtin.set_fact:
+    mission_control_guard_ip6: >-
+      {{ mission_control_tailnet_ip6 if mission_control_tailnet_ip6 | length > 0
+         else (mission_control_ip6_read.stdout | default('') | trim) }}
+
+- name: Preflight | the tailscale interface exists (read-only)
+  ansible.builtin.command:
+    argv: "{{ mission_control_iface_check_cmd + [mission_control_tailscale_iface] }}"
+  register: mission_control_iface_check
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface
+  ansible.builtin.assert:
+    that:
+      # IFNAMSIZ, and nothing that could break out of the nft string it goes into.
+      - mission_control_tailscale_iface is match('^[A-Za-z0-9_.-]{1,15}\\Z')
+      - mission_control_iface_check.rc == 0
+      - mission_control_guard_ip6 is match('^[0-9a-f:]+\\Z')
+      - mission_control_guard_ip6 | mission_control_ip_verdict([], [mission_control_tailnet_range6]) == 'deny'
+      - tailnet_ip | mission_control_ip_verdict([], [mission_control_tailnet_range]) == 'deny'
+    fail_msg: >-
+      The guard needs ai-box's tailnet IPv4 (tailnet_ip, {{ tailnet_ip }}) inside {{ mission_control_tailnet_range }}, its
+      IPv6 (tailnet_ip6 or `tailscale ip -6`: '{{ mission_control_guard_ip6 }}') inside {{ mission_control_tailnet_range6 }}, and
+      the interface serve traffic arrives on (mission_control_tailscale_iface: '{{ mission_control_tailscale_iface }}') to exist
+      (`ip link show`: rc {{ mission_control_iface_check.rc }}).
+    quiet: true
+
+# Values owned by other roles, read (never copied): role ai_control's ports, role docker's container range.
+- name: Preflight | role ai_control's defaults (AI Control's port and serve port)
+  ansible.builtin.include_vars:
+    file: "{{ mission_control_aictl_defaults_file }}"
+    name: mission_control_aictl_defaults
+
+- name: Preflight | role docker's defaults (container address range)
+  ansible.builtin.include_vars:
+    file: "{{ mission_control_docker_defaults_file }}"
+    name: mission_control_docker_defaults
+
+# Money Hub and ERAU live on homebk-edge and are reached over the tailnet: IPv4 literals inside the tailnet range,
+# because the IP filter allows exactly those addresses. ERAU's URL is its tailnet name (tailscale serve's TLS
+# certificate is for the name); its address is mission_control_erau_ip.
+- name: Preflight | Money Hub, ERAU and the mediaserver are tailnet addresses
+  vars:
+    mission_control_mh_issues: "{{ mission_control_moneyhub_url | mission_control_url_problems(mission_control_tailnet_range, true) }}"
+    mission_control_erau_issues: "{{ mission_control_erau_url | mission_control_url_problems(mission_control_tailnet_range, false) }}"
+    mission_control_erau_ip_issues: >-
+      {{ ('http://' ~ mission_control_erau_ip ~ '/') | mission_control_url_problems(mission_control_tailnet_range, true) }}
+    mission_control_ms_issues: "{{ mission_control_mediaserver_url | mission_control_url_problems(mission_control_tailnet_range, false) }}"
+    mission_control_ms_ip_issues: >-
+      {{ ('http://' ~ mission_control_mediaserver_ip ~ '/') | mission_control_url_problems(mission_control_tailnet_range, true) }}
+  ansible.builtin.assert:
+    that:
+      - mission_control_mh_issues | length == 0
+      - mission_control_erau_issues | length == 0
+      - mission_control_erau_url is match('^https://')
+      - mission_control_erau_ip_issues | length == 0
+      - mission_control_erau_ip != tailnet_ip
+      - mission_control_moneyhub_ip != tailnet_ip
+      - mission_control_mediaserver_url is string
+      - not mission_control_mediaserver_on | bool or mission_control_ms_issues | length == 0
+      - not mission_control_mediaserver_on | bool or mission_control_mediaserver_url is match('^https://')
+      - not mission_control_mediaserver_on | bool or mission_control_ms_ip_issues | length == 0
+      - >-
+        not mission_control_mediaserver_on | bool
+        or (mission_control_mediaserver_url | mission_control_url_host) != (mission_control_erau_url | mission_control_url_host)
+    fail_msg: >-
+      moneyhub_url ('{{ mission_control_moneyhub_url }}') must be http://<IPv4 in {{ mission_control_tailnet_range }}>:<port>:
+      {{ mission_control_mh_issues | join('; ') }}. mission_control_erau_url ('{{ mission_control_erau_url }}') must be the
+      https origin of the ERAU dashboard: {{ mission_control_erau_issues | join('; ') }}. mission_control_erau_ip
+      ('{{ mission_control_erau_ip }}') must be its tailnet IPv4: {{ mission_control_erau_ip_issues | join('; ') }}.
+      Neither may be ai-box itself. mission_control_mediaserver_url ('{{ mission_control_mediaserver_url }}'; empty = off)
+      must be the https origin of the mediaserver's dashboard on another name, and mission_control_mediaserver_ip
+      ('{{ mission_control_mediaserver_ip }}', default mediaserver_tailnet_ip) its tailnet IPv4.
+    quiet: true
+
+- name: Preflight | the Home Assistant URL, when set, names an IPv4 literal
+  vars:
+    mission_control_opt_issues: >-
+      {{ [] if mission_control_ha_url | length == 0 else mission_control_ha_url | mission_control_url_problems('0.0.0.0/0', true) }}
+  ansible.builtin.assert:
+    that:
+      - mission_control_ha_url is string
+      - mission_control_opt_issues | length == 0
+      - mission_control_ha_ip != (tailnet_ip | default(''))
+    fail_msg: >-
+      mission_control_ha_url must be empty or http(s)://<IPv4>:<port> (its address joins the IP filter), not ai-box:
+      {{ mission_control_opt_issues | join('; ') }}
+    quiet: true
+
+# Open WebUI's container address (DNAT target of tailnet_ip:8080). Host addresses only, inside Docker's container
+# range, and never ollama-cpu's or the broker's (MC1 learns the broker's state from AI Control's summary).
+- name: Preflight | the container allow list is Open WebUI's address only
+  vars:
+    mission_control_octet_re: '(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])'
+    mission_control_host_re: '^({{ mission_control_octet_re }}[.]){3}{{ mission_control_octet_re }}(/32)?\Z'
+    mission_control_bare: "{{ mission_control_container_allow | map('string') | map('regex_replace', '/32$', '') | list }}"
+    mission_control_range: >-
+      {{ docker_address_pools_container
+         | default(mission_control_docker_defaults.docker_address_pools_container | default('')) }}
+  ansible.builtin.assert:
+    that:
+      - mission_control_container_allow | length > 0
+      - mission_control_container_allow | reject('string') | list | length == 0
+      - mission_control_container_allow | reject('match', mission_control_host_re) | list | length == 0
+      - "'0.0.0.0' not in mission_control_bare"
+      - mission_control_range is match('^[0-9.]+/[0-9]{1,2}\\Z')
+      - >-
+        mission_control_bare | map('mission_control_ip_verdict', [], [mission_control_range])
+        | reject('equalto', 'deny') | list | length == 0
+      - (ai_stack_ollama_cpu_ip | default('') | string | regex_replace('/32$', '')) not in mission_control_bare
+      - (ai_stack_broker_ip | default('') | string | regex_replace('/32$', '')) not in mission_control_bare
+    fail_msg: >-
+      mission_control_container_allow must be a non-empty list of IPv4 host addresses (a.b.c.d or a.b.c.d/32) inside
+      Docker's container range {{ mission_control_range }}, and not ollama-cpu's or the broker's address. The default is
+      ["{{ '{{' }} ai_stack_webui_ip {{ '}}' }}/32"]. It is {{ mission_control_container_allow }}.
+    quiet: true
+
+# §12.29 IP filter. systemd: an allow match wins over a deny match; neither passes. So: deny the private and
+# special ranges (the public internet, where the push services are, stays open), and allow back single hosts.
+- name: Preflight | the IP filter denies every private range and allows back single hosts only
+  vars:
+    mission_control_ip_issues: >-
+      {{ mission_control_ip_allow | mission_control_ip_problems(mission_control_ip_deny, mission_control_ip_deny_required) }}
+  ansible.builtin.assert:
+    that:
+      - mission_control_ip_issues | length == 0
+      # Q-3: loopback is exactly the server's own address and the resolver stub, never `localhost` (all of 127/8, ::1).
+      - "'localhost' not in mission_control_ip_allow"
+      - "'127.0.0.1/32' in mission_control_ip_allow and '127.0.0.53/32' in mission_control_ip_allow"
+      - mission_control_ip_allow | select('match', '^127[.]') | list | sort == ['127.0.0.1/32', '127.0.0.53/32']
+      - (tailnet_ip ~ '/32') not in mission_control_ip_allow
+    fail_msg: "The IP filter is wrong: {{ mission_control_ip_issues | join('; ') }}"
+    quiet: true
+
+# The venv's pins: plain name==version lines with sha256 hashes; pywebpush and aiohttp equal versions.yml's pins
+# (pywebpush shared with the mediaserver notifier and the edge heartbeat; aiohttp the broker's, Lead 2026-10-28);
+# cryptography, py-vapid and http-ece are pinned too.
+- name: Preflight | the venv locks are fully pinned and agree with versions.yml
+  vars:
+    mission_control_pywebpush_pin: "{{ python_packages.pywebpush | default('') }}"
+    mission_control_aiohttp_pin: "{{ python_packages.aiohttp | default('') }}"
+    mission_control_lock_issues: >-
+      {{ (mission_control_lock_text | mission_control_lock_problems)
+         + (mission_control_build_lock_text | mission_control_lock_problems) }}
+  ansible.builtin.assert:
+    that:
+      - mission_control_lock_issues | length == 0
+      - mission_control_pywebpush_pin is match('^[0-9]+([.][0-9]+)+\\Z')
+      - mission_control_pins.pywebpush | default('') == mission_control_pywebpush_pin
+      - mission_control_aiohttp_pin is match('^[0-9]+([.][0-9]+)+\\Z')
+      - mission_control_pins.aiohttp | default('') == mission_control_aiohttp_pin
+      - mission_control_pins.cryptography is defined
+      - mission_control_pins['py-vapid'] is defined
+      - mission_control_pins['http-ece'] is defined
+      - (mission_control_build_lock_text | mission_control_lock_pins).keys() | list == ['setuptools']
+    fail_msg: >-
+      The locks (files/requirements.lock, files/build.lock): {{ mission_control_lock_issues | join('; ') }}.
+      pywebpush is {{ mission_control_pins.pywebpush | default('missing') }} in the lock and
+      {{ mission_control_pywebpush_pin or 'missing' }} in versions.yml (python_packages.pywebpush); aiohttp is
+      {{ mission_control_pins.aiohttp | default('missing') }} in the lock and {{ mission_control_aiohttp_pin or 'missing' }} in
+      versions.yml (python_packages.aiohttp, the broker's pin). Regenerate the lock (its header says how) whenever a pin moves.
+    quiet: true
+
+# tailscale serve: role tailscale_serve declares ai-box's WHOLE serve config, and role ai_control applies it too.
+# Both roles must declare the same set or each converge resets the other's handler. The shared source is the
+# inventory's ai_control_serve_extra_handlers, which role ai_control appends to its 443 handler (README,
+# "tailscale serve"): it must hold exactly Mission Control's handler, and role ai_control must already read it.
+- name: Preflight | ai-box's serve set holds AI Control's 443 and Mission Control's :8443, and role ai_control agrees
+  vars:
+    mission_control_extra: "{{ ai_control_serve_extra_handlers | default(none) }}"
+    mission_control_aictl_vars_text: "{{ lookup('ansible.builtin.file', mission_control_aictl_vars_file) }}"
+  ansible.builtin.assert:
+    that:
+      - mission_control_aictl_listen_port | int > 0
+      - mission_control_aictl_serve_port | int > 0
+      - mission_control_aictl_serve_port | int != mission_control_serve_port | int
+      - mission_control_aictl_listen_port | int != mission_control_listen_port | int
+      - mission_control_extra is not none
+      - mission_control_extra is sequence and mission_control_extra is not string and mission_control_extra is not mapping
+      - mission_control_extra | select('equalto', mission_control_own_handler) | list | length == 1
+      # Mission Control's origin carries only its own handler, and its backend appears nowhere else.
+      - >-
+        mission_control_serve_handlers | selectattr('port', 'equalto', mission_control_serve_port | int) | list
+        == [mission_control_own_handler]
+      - >-
+        mission_control_serve_handlers | selectattr('backend', 'search', ':' ~ mission_control_listen_port ~ '(/|$)')
+        | list == [mission_control_own_handler]
+      # Nothing extra lands on AI Control's origin.
+      - mission_control_extra | selectattr('port', 'equalto', mission_control_aictl_serve_port | int) | list | length == 0
+      # Role ai_control appends the shared list (H13, 2026-10-28): its ai_control_serve_handlers line names it.
+      - >-
+        mission_control_aictl_vars_text is search('(?m)^ai_control_serve_handlers:.*\\bai_control_serve_extra_handlers\\b')
+    fail_msg: >-
+      ai-box's tailscale serve set is not shared yet. Lead: role ai_control must declare
+      `ai_control_serve_handlers: [<its 443 handler>] + ai_control_serve_extra_handlers` (default []), and the
+      inventory (host_vars/ai-box.yml) must set
+      ai_control_serve_extra_handlers: [{port: {{ mission_control_serve_port }}, mount: /, backend: "{{ mission_control_serve_backend }}"}].
+      Otherwise playbooks/ai-control.yml resets :{{ mission_control_serve_port }} away and this role resets it back on
+      every run. Now: ai_control_serve_extra_handlers = {{ mission_control_extra | to_json }}; role ai_control reads it:
+      {{ mission_control_aictl_vars_text is search('ai_control_serve_extra_handlers') }}.
+    quiet: true
+
+- name: Preflight | the app sources exist on the controller (modules MC1, MC2)
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ mission_control_server_src }}/__init__.py"
+    - "{{ mission_control_server_src }}/__main__.py"
+    - "{{ mission_control_server_src }}/config.py"
+    - "{{ mission_control_web_src }}/index.html"
+    - "{{ mission_control_web_src }}/sw.js"
+    - "{{ mission_control_web_src }}/manifest.webmanifest"
+  register: mission_control_src_stat
+  delegate_to: localhost
+  become: false
+
+- name: Preflight | require the app sources
+  ansible.builtin.assert:
+    that: mission_control_src_stat.results | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      Missing on the controller:
+      {{ mission_control_src_stat.results | rejectattr('stat.exists') | map(attribute='item') | join(', ') }}
+    quiet: true

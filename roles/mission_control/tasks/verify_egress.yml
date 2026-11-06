@@ -1,0 +1,32 @@
+---
+# The IP filter, live. files/egress_probe.py runs as mc in a transient unit with EXACTLY the units' sandbox
+# (mission_control_sandbox, IP filter included), so it proves the real filter, not a model of it:
+#   - a UDP send to every allowed host succeeds, and to every address that must be denied (the gaming PC's tailnet
+#     address, the LAN's first host, ollama-cpu's and the broker's container addresses, MagicDNS, fixed RFC 1918 /
+#     CGNAT samples, and the mediaserver's tailnet address when it isn't configured) fails with EPERM at once
+#     (cgroup egress drop);
+#   - a UDP send to a public address succeeds (not filtered);
+#   - TCP: the server's own port, Money Hub, ERAU and the mediaserver (on their host_map addresses) and the push
+#     services on 443 (by name, through the resolver) connect;
+#   - pywebpush imports and a P-256 signature works under the sandbox (MemoryDenyWriteExecute, syscall filter).
+# The plan and the check are filters (mission_control_probe_plan/_problems) the offline test exercises.
+- name: Verify | the probe plan
+  ansible.builtin.include_tasks: verify_egress_plan.yml
+
+- name: Verify | run the probe as mc in the units' sandbox
+  ansible.builtin.command:
+    argv: >-
+      {{ ['systemd-run', '--wait', '--pipe', '--collect', '--quiet', '--service-type=oneshot',
+          '--description=mission-control egress probe (Ansible verify)', '--property=TimeoutStartSec=120']
+         + (mission_control_sandbox | map('regex_replace', '^', '--property=') | list)
+         + ['--', mission_control_venv_python, '-I', '-B', mission_control_lib_dir ~ '/egress_probe.py',
+            mission_control_probe_plan | to_json] }}
+  register: mission_control_probe_run
+  changed_when: false
+  failed_when: false
+
+- name: Verify | the probe's results match the IP filter
+  ansible.builtin.include_tasks: verify_egress_assert.yml
+  vars:
+    mission_control_probe_stdout: "{{ mission_control_probe_run.stdout | default('') }}"
+    mission_control_probe_rc: "{{ mission_control_probe_run.rc }}"

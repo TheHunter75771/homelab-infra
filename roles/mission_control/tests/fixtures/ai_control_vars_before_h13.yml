@@ -1,0 +1,10 @@
+---
+# Role ai_control's serve declaration as it was BEFORE H13's change (2026-10-28): its own 443 handler and nothing
+# else, no shared list. With this, ai-control.yml would reset Mission Control's :8443 on every run and this role
+# would put it back. Preflight must refuse it (the test's regression guard); the real roles/ai_control/vars/main.yml
+# is the accepted case.
+ai_control_serve_backend: "http://127.0.0.1:{{ ai_control_listen_port }}"
+ai_control_serve_handlers:
+  - port: "{{ ai_control_serve_port | int }}"
+    mount: /
+    backend: "{{ ai_control_serve_backend }}"

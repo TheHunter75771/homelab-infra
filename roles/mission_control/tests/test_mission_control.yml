@@ -1,0 +1,1425 @@
+---
+# Offline test for role mission_control (no root, nothing applied to this machine, no tailscale, no network; synthetic
+# addresses from the CGNAT range and dummy names). Run it through tests/run.sh, which also checks that no secret
+# reaches the -vvv --diff output.
+#   roles/mission_control/tests/run.sh
+# Play 1 (host box) runs the role's task files into a scratch dir with stub handlers:
+#   preflight (passes; N refusals), venv (real `python3 -m venv`, fake pip: build, idempotence, rebuild on drift),
+#   install (prune, symlink guards), config + state, VAPID (generated once, never rotated, bad files refused),
+#   config.json (validated by the stand-in loader), the CLI launcher, and every verify_*.yml against fakes.
+# Play 2 (host render) renders the units, the CLI and config.json with the role's REAL paths and compares them with
+# tests/expected/ literally, runs systemd-analyze verify, checks the IP filter's verdicts address by address, and
+# runs role tailscale_serve's validate/desired/compare with the role's handler set.
+# The real apps/mission-control trees are installed; MC1's own loader (config.load) and VAPID reader (push.load_vapid,
+# both stdlib-only) check what the role writes. Only the launcher run uses tests/fixtures/launcher, a stand-in package
+# (MC1's CLI imports aiohttp, which no offline venv here has).
+- name: Role mission_control on a scratch box
+  hosts: box
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+    - ../../../inventory/group_vars/all/versions.yml
+  vars: &mc_inventory
+    tailnet_ip: 100.64.0.10
+    tailnet_ip6: "fd7a:115c:a1e0::a"
+    tailnet_fqdn: ai-box.example.ts.net
+    moneyhub_url: http://100.64.0.30:8710
+    gaming_pc_tailnet_ip: 100.64.0.20
+    mediaserver_tailnet_ip: 100.64.0.40
+    lan_cidr: 192.168.77.0/24
+    ai_stack_ollama_cpu_ip: 172.20.0.2
+    ai_stack_broker_ip: 172.20.0.3
+    ai_stack_webui_ip: 172.20.0.4
+    mission_control_noah_login: noah@example.com
+    ai_control_serve_extra_handlers:
+      - {port: 8443, mount: /, backend: "http://127.0.0.1:8097"}
+    ansible_managed: Ansible managed
+    # run.sh passes its scratch dir.
+    test_tmp: ""
+    test_repo: "{{ playbook_dir }}/../../.."
+    test_bin: "{{ playbook_dir }}/bin"
+    test_app: "{{ test_repo }}/apps/mission-control"
+    test_me: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+    test_my_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
+    # A Python with real cryptography (the repo's .venv) for the VAPID scripts and config validation.
+    test_crypto_python: "{{ test_repo }}/.venv/bin/python"
+  handlers:
+    - name: Reload systemd for mission-control
+      ansible.builtin.debug:
+        msg: reload requested
+    - name: Restart mission-control
+      ansible.builtin.debug:
+        msg: restart requested
+  tasks:
+    - name: Run.sh passed a scratch dir
+      ansible.builtin.assert:
+        that: test_tmp is abs
+        fail_msg: Run this through roles/mission_control/tests/run.sh.
+        quiet: true
+
+    - name: Point the role at the scratch dir
+      ansible.builtin.set_fact:
+        # The task files run outside a role here: name the role's directory directly (vars/main.yml uses role_path).
+        mission_control_role_dir: "{{ playbook_dir | dirname }}"
+        mission_control_server_src: "{{ test_tmp }}/src/mission_control"
+        mission_control_web_src: "{{ test_tmp }}/src/public"
+        mission_control_owner: "{{ test_me }}"
+        mission_control_root_owner: "{{ test_me }}"
+        mission_control_user: "{{ test_me }}"
+        mission_control_group: "{{ test_my_group }}"
+        mission_control_app_dir: "{{ test_tmp }}/opt/mission-control"
+        mission_control_launcher: "{{ test_tmp }}/bin/mission-control"
+        mission_control_config_dir: "{{ test_tmp }}/etc/mission-control"
+        mission_control_state_dir: "{{ test_tmp }}/var/lib/mission-control"
+        mission_control_unit_dir: "{{ test_tmp }}/units"
+        mission_control_iface_check_cmd: ["{{ test_bin }}/fake-ip-link"]
+        mission_control_python: python3
+        mission_control_journalctl: "{{ test_bin }}/fake-journalctl"
+
+    - name: Scratch dirs and copies of the apps with never-deployed junk planted
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          mkdir -p "{{ test_tmp }}/bin" "{{ test_tmp }}/src" "{{ test_tmp }}/victim" "{{ test_tmp }}/units"
+          cp -r "{{ test_app }}/server/mission_control" "{{ test_tmp }}/src/mission_control"
+          cp -r "{{ test_app }}/web/public" "{{ test_tmp }}/src/public"
+          mkdir -p "{{ test_tmp }}/src/mission_control/__pycache__" "{{ test_tmp }}/src/mission_control/tests" \
+                   "{{ test_tmp }}/src/public/node_modules/x" "{{ test_tmp }}/src/public/js/tests"
+          touch "{{ test_tmp }}/src/mission_control/__pycache__/config.cpython-314.pyc" \
+                "{{ test_tmp }}/src/mission_control/tests/test_x.py" "{{ test_tmp }}/src/mission_control/README.md" \
+                "{{ test_tmp }}/src/public/node_modules/x/index.js" "{{ test_tmp }}/src/public/js/tests/t.js" \
+                "{{ test_tmp }}/src/public/notes.txt"
+          echo keep > "{{ test_tmp }}/victim/keep"
+      changed_when: true
+
+    # ---------------------------------------------------------------- preflight
+    # Lead 2026-10-28: aiohttp is pinned in versions.yml (python_packages.aiohttp), the broker's version.
+    - name: The broker's aiohttp pin (apps/gpu-broker/requirements.lock)
+      ansible.builtin.set_fact:
+        test_broker_aiohttp: >-
+          {{ (lookup('ansible.builtin.file', test_repo ~ '/apps/gpu-broker/requirements.lock') | mission_control_lock_pins).aiohttp }}
+
+    - name: The role's lock, versions.yml and the broker agree on aiohttp
+      ansible.builtin.assert:
+        that:
+          - python_packages.aiohttp | default('missing') == test_broker_aiohttp
+          - mission_control_pins.aiohttp == test_broker_aiohttp
+        quiet: true
+
+    - name: The good values the refusal cases fall back to (evaluated once)
+      ansible.builtin.set_fact:
+        test_good_deny: "{{ mission_control_ip_deny }}"
+        test_good_packages: "{{ python_packages }}"
+        test_good_extra: "{{ ai_control_serve_extra_handlers }}"
+        test_good_units: "{{ mission_control_units }}"
+        test_good_backups: "{{ mission_control_backups }}"
+        test_good_links: "{{ mission_control_links }}"
+
+    # The good case reads role ai_control's REAL vars file (it appends the shared serve list since H13).
+    - name: Preflight passes with the synthetic inventory and role ai_control's real vars
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+
+    - name: Preflight took the guard's IPv6 from the inventory and never asked this machine's tailscale
+      ansible.builtin.assert:
+        that: mission_control_ip6_read is skipped
+        quiet: true
+
+    - name: The derived values are the contract's
+      ansible.builtin.assert:
+        that:
+          - mission_control_moneyhub_ip == '100.64.0.30'
+          - mission_control_erau_url == 'https://homebk-edge.example.ts.net'
+          - mission_control_erau_ip == '100.64.0.30'
+          - mission_control_ip_allow == ['127.0.0.1/32', '127.0.0.53/32', '100.64.0.30/32', '172.20.0.4/32', '100.64.0.40/32']
+          - mission_control_webui_url == 'http://172.20.0.4:8080'
+          - mission_control_guard_ip6 == 'fd7a:115c:a1e0::a'
+          - mission_control_mediaserver_url == 'https://mediaserver.example.ts.net'
+          - >-
+            mission_control_host_map == {'homebk-edge.example.ts.net': '100.64.0.30', 'mediaserver.example.ts.net': '100.64.0.40'}
+          - mission_control_on_calendar == '*-*-* 05:30:00 America/New_York'
+          - mission_control_pins.pywebpush == python_packages.pywebpush
+          - mission_control_pins.aiohttp == python_packages.aiohttp
+          - >-
+            mission_control_serve_handlers == [{'port': 443, 'mount': '/', 'backend': 'http://127.0.0.1:8095'},
+                                               {'port': 8443, 'mount': '/', 'backend': 'http://127.0.0.1:8097'}]
+        fail_msg: "{{ mission_control_ip_allow }} {{ mission_control_serve_handlers }} {{ mission_control_host_map }}"
+        quiet: true
+
+    - name: Preflight refusals
+      ansible.builtin.include_tasks: expect_preflight_refusal.yml
+      loop:
+        - {name: no login, vars: {mission_control_noah_login: ""}, task: "Preflight | role inputs"}
+        - {name: login with a newline, vars: {mission_control_noah_login: "noah@example.com\n"}, task: "Preflight | role inputs"}
+        - {name: login with a space, vars: {mission_control_noah_login: "noah @example.com"}, task: "Preflight | role inputs"}
+        - {name: login not a login, vars: {mission_control_noah_login: "noah"}, task: "Preflight | role inputs"}
+        - {name: account root, vars: {mission_control_user: root}, task: "Preflight | role inputs"}
+        - {name: account aictl, vars: {mission_control_user: aictl}, task: "Preflight | role inputs"}
+        - {name: time 25:00, vars: {mission_control_briefing_time: "25:00:00"}, task: "Preflight | role inputs"}
+        - {name: time without seconds, vars: {mission_control_briefing_time: "05:30"}, task: "Preflight | role inputs"}
+        - {name: no timezone, vars: {mission_control_timezone: ""}, task: "Preflight | role inputs"}
+        - {name: timezone UTC (no zone path), vars: {mission_control_timezone: "UTC"}, task: "Preflight | role inputs"}
+        - {name: vapid subject http, vars: {mission_control_vapid_subject: "http://x.example"}, task: "Preflight | role inputs"}
+        - name: vapid subject with a port (the live bug; py_vapid won't sign)
+          vars: {mission_control_vapid_subject: "https://ai-box.example.ts.net:8443"}
+          task: "Preflight | role inputs"
+        - {name: vapid subject with a path, vars: {mission_control_vapid_subject: "https://ai-box.example.ts.net/"}, task: "Preflight | role inputs"}
+        - {name: vapid subject mailto without a dotted domain, vars: {mission_control_vapid_subject: "mailto:noah@ai-box"}, task: "Preflight | role inputs"}
+        - {name: extra sets allowed_login, vars: {mission_control_config_extra: {allowed_login: x@y}}, task: "Preflight | role inputs"}
+        - {name: extra sets listen_host, vars: {mission_control_config_extra: {listen_host: 0.0.0.0}}, task: "Preflight | role inputs"}
+        - {name: extra sets host_map, vars: {mission_control_config_extra: {host_map: {}}}, task: "Preflight | role inputs"}
+        - {name: units a string, vars: {mission_control_units: "forge-api.service"}, task: "Preflight | role inputs"}
+        - {name: backups not mappings, vars: {mission_control_backups: [owui]}, task: "Preflight | role inputs"}
+        - {name: links a list, vars: {mission_control_links: []}, task: "Preflight | role inputs"}
+        - {name: moneyhub zone empty, vars: {mission_control_moneyhub_timezone: ""}, task: "Preflight | role inputs"}
+        - name: moneyhub a name
+          vars: {mission_control_moneyhub_url: "http://homebk-edge:8710"}
+          task: "Preflight | Money Hub, ERAU and the mediaserver are tailnet addresses"
+        - name: moneyhub on the LAN
+          vars: {mission_control_moneyhub_url: "http://192.168.77.5:8710"}
+          task: "Preflight | Money Hub, ERAU and the mediaserver are tailnet addresses"
+        - name: moneyhub with a path
+          vars: {mission_control_moneyhub_url: "http://100.64.0.30:8710/api"}
+          task: "Preflight | Money Hub, ERAU and the mediaserver are tailnet addresses"
+        - name: erau over http
+          vars: {mission_control_erau_url: "http://homebk-edge.example.ts.net"}
+          task: "Preflight | Money Hub, ERAU and the mediaserver are tailnet addresses"
+        - name: erau ip on the LAN
+          vars: {mission_control_erau_ip: "192.168.77.5"}
+          task: "Preflight | Money Hub, ERAU and the mediaserver are tailnet addresses"
+        - name: erau ip is ai-box
+          vars: {mission_control_erau_ip: "100.64.0.10"}
+          task: "Preflight | Money Hub, ERAU and the mediaserver are tailnet addresses"
+        - name: mediaserver over http
+          vars: {mission_control_mediaserver_url: "http://mediaserver.example.ts.net"}
+          task: "Preflight | Money Hub, ERAU and the mediaserver are tailnet addresses"
+        - name: mediaserver ip on the LAN
+          vars: {mission_control_mediaserver_ip: "192.168.77.9"}
+          task: "Preflight | Money Hub, ERAU and the mediaserver are tailnet addresses"
+        - name: mediaserver on ERAU's name
+          vars: {mission_control_mediaserver_url: "https://homebk-edge.example.ts.net"}
+          task: "Preflight | Money Hub, ERAU and the mediaserver are tailnet addresses"
+        - name: ha url a name
+          vars: {mission_control_ha_url: "http://ha.local:8123"}
+          task: "Preflight | the Home Assistant URL, when set, names an IPv4 literal"
+        - name: ha url is ai-box
+          vars: {mission_control_ha_url: "http://100.64.0.10:8123"}
+          task: "Preflight | the Home Assistant URL, when set, names an IPv4 literal"
+        - name: container allow the broker
+          vars: {mission_control_container_allow: ["172.20.0.3/32"]}
+          task: "Preflight | the container allow list is Open WebUI's address only"
+        - name: container allow ollama-cpu
+          vars: {mission_control_container_allow: ["172.20.0.2"]}
+          task: "Preflight | the container allow list is Open WebUI's address only"
+        - name: container allow a /24
+          vars: {mission_control_container_allow: ["172.20.0.0/24"]}
+          task: "Preflight | the container allow list is Open WebUI's address only"
+        - name: container allow off the range
+          vars: {mission_control_container_allow: ["192.168.77.4/32"]}
+          task: "Preflight | the container allow list is Open WebUI's address only"
+        - {name: container allow empty, vars: {mission_control_container_allow: []}, task: "Preflight | the container allow list is Open WebUI's address only"}
+        - name: allow widened to the LAN
+          vars: {mission_control_ip_allow: [127.0.0.1/32, 127.0.0.53/32, 100.64.0.30/32, 192.168.0.0/16]}
+          task: "Preflight | the IP filter denies every private range and allows back single hosts only"
+        - name: allow widened to the tailnet
+          vars: {mission_control_ip_allow: [127.0.0.1/32, 127.0.0.53/32, 100.64.0.0/10]}
+          task: "Preflight | the IP filter denies every private range and allows back single hosts only"
+        - name: allow any
+          vars: {mission_control_ip_allow: [127.0.0.1/32, 127.0.0.53/32, any]}
+          task: "Preflight | the IP filter denies every private range and allows back single hosts only"
+        - name: allow localhost (all of 127/8 and ::1; Q-3)
+          vars: {mission_control_ip_allow: [localhost, 100.64.0.30/32]}
+          task: "Preflight | the IP filter denies every private range and allows back single hosts only"
+        - name: allow another loopback address
+          vars: {mission_control_ip_allow: [127.0.0.1/32, 127.0.0.53/32, 127.0.0.54/32, 100.64.0.30/32]}
+          task: "Preflight | the IP filter denies every private range and allows back single hosts only"
+        - name: allow ai-box's own tailnet address (Q-6)
+          vars: {mission_control_ip_allow: [127.0.0.1/32, 127.0.0.53/32, 100.64.0.30/32, 100.64.0.10/32]}
+          task: "Preflight | the IP filter denies every private range and allows back single hosts only"
+        - name: moneyhub with user info
+          vars: {mission_control_moneyhub_url: "http://u:p@100.64.0.30:8710"}
+          task: "Preflight | Money Hub, ERAU and the mediaserver are tailnet addresses"
+        - name: erau with user info
+          vars: {mission_control_erau_url: "https://noah@homebk-edge.example.ts.net"}
+          task: "Preflight | Money Hub, ERAU and the mediaserver are tailnet addresses"
+        - name: guard IPv6 off the tailnet
+          vars: {mission_control_tailnet_ip6: "fd00::1"}
+          task: "Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface"
+        - name: the tailscale interface doesn't exist
+          vars: {mission_control_tailscale_iface: tailscale9}
+          task: "Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface"
+        - name: the tailscale interface name would break out of the nft string
+          vars: {mission_control_tailscale_iface: 'tailscale0" accept'}
+          task: "Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface"
+        - name: guard IPv6 not an address
+          vars: {mission_control_tailnet_ip6: "fd7a:115c:a1e0::a\n"}
+          task: "Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface"
+        - name: deny without 10/8
+          vars:
+            mission_control_ip_deny: [127.0.0.0/8, "::1/128", 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, "fe80::/10", "fc00::/7"]
+          task: "Preflight | the IP filter denies every private range and allows back single hosts only"
+        - name: deny without CGNAT
+          vars:
+            mission_control_ip_deny: [127.0.0.0/8, "::1/128", 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, "fe80::/10", "fc00::/7"]
+          task: "Preflight | the IP filter denies every private range and allows back single hosts only"
+        - name: deny everything (push services cut off)
+          vars: {mission_control_ip_deny: ["0.0.0.0/0", "::/0"]}
+          task: "Preflight | the IP filter denies every private range and allows back single hosts only"
+        - name: pywebpush pin moved in versions.yml
+          vars: {python_packages: {pywebpush: "2.4.0", aiohttp: "3.14.5"}}
+          task: "Preflight | the venv locks are fully pinned and agree with versions.yml"
+        - name: aiohttp pin moved in versions.yml
+          vars: {python_packages: {pywebpush: "2.5.0", aiohttp: "3.13.3"}}
+          task: "Preflight | the venv locks are fully pinned and agree with versions.yml"
+        - name: no aiohttp pin in versions.yml
+          vars: {python_packages: {pywebpush: "2.5.0"}}
+          task: "Preflight | the venv locks are fully pinned and agree with versions.yml"
+        - name: a lock line without hashes
+          vars: {mission_control_build_lock_src: "{{ playbook_dir }}/fixtures/bad.lock"}
+          task: "Preflight | the venv locks are fully pinned and agree with versions.yml"
+        - name: no shared serve list
+          vars: {ai_control_serve_extra_handlers: null}
+          task: "Preflight | ai-box's serve set holds AI Control's 443 and Mission Control's :8443, and role ai_control agrees"
+        - name: shared serve list without Mission Control
+          vars: {ai_control_serve_extra_handlers: []}
+          task: "Preflight | ai-box's serve set holds AI Control's 443 and Mission Control's :8443, and role ai_control agrees"
+        - name: Mission Control replacing AI Control on 443
+          vars:
+            ai_control_serve_extra_handlers:
+              - {port: 8443, mount: /, backend: "http://127.0.0.1:8097"}
+              - {port: 443, mount: /, backend: "http://127.0.0.1:8097"}
+          task: "Preflight | ai-box's serve set holds AI Control's 443 and Mission Control's :8443, and role ai_control agrees"
+        - name: a second handler on Mission Control's origin
+          vars:
+            ai_control_serve_extra_handlers:
+              - {port: 8443, mount: /, backend: "http://127.0.0.1:8097"}
+              - {port: 8443, mount: /webui, backend: "http://127.0.0.1:8080"}
+          task: "Preflight | ai-box's serve set holds AI Control's 443 and Mission Control's :8443, and role ai_control agrees"
+        - name: Mission Control's backend on another port too
+          vars:
+            ai_control_serve_extra_handlers:
+              - {port: 8443, mount: /, backend: "http://127.0.0.1:8097"}
+              - {port: 8444, mount: /, backend: "http://127.0.0.1:8097"}
+          task: "Preflight | ai-box's serve set holds AI Control's 443 and Mission Control's :8443, and role ai_control agrees"
+        - name: role ai_control as it was before H13 (443 only, no shared list)
+          vars: {mission_control_aictl_vars_file: "{{ playbook_dir }}/fixtures/ai_control_vars_before_h13.yml"}
+          task: "Preflight | ai-box's serve set holds AI Control's 443 and Mission Control's :8443, and role ai_control agrees"
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+
+    # ---------------------------------------------------------------- venv (real venv, fake pip)
+    - name: Venv | first run builds it from both locks
+      ansible.builtin.include_tasks: venv_case.yml
+      vars: {venv_case: first build, venv_want_pip_runs: 2}
+
+    - name: Venv | the two pip runs had the hashed, wheels-only flags
+      vars:
+        runs: "{{ lookup('ansible.builtin.file', test_tmp ~ '/pip.log').splitlines() | map('from_json') | list }}"
+      ansible.builtin.assert:
+        that:
+          - runs | length == 2
+          - >-
+            runs[0] == ['install', '--no-input', '--disable-pip-version-check', '--require-hashes', '--only-binary=:all:',
+                        '-r', test_tmp ~ '/opt/mission-control/lib/build.lock']
+          - >-
+            runs[1] == ['install', '--no-input', '--disable-pip-version-check', '--require-hashes', '--only-binary=:all:',
+                        '--no-binary=http-ece', '--no-build-isolation', '-r', test_tmp ~ '/opt/mission-control/lib/requirements.lock']
+        fail_msg: "{{ runs | to_json }}"
+        quiet: true
+
+    - name: Venv | second run changes nothing
+      ansible.builtin.include_tasks: venv_case.yml
+      vars: {venv_case: idempotent, venv_want_pip_runs: 2}
+
+    - name: Venv | a package at another version is rebuilt
+      ansible.builtin.include_tasks: venv_case.yml
+      vars:
+        venv_case: drifted pywebpush
+        venv_want_pip_runs: 4
+        venv_break: |
+          d=$(ls -d "$SITE"/pywebpush-*.dist-info); sed -i 's/^Version: .*/Version: 2.4.0/' "$d/METADATA"
+
+    - name: Venv | an extra package is rebuilt away
+      ansible.builtin.include_tasks: venv_case.yml
+      vars:
+        venv_case: extra package
+        venv_want_pip_runs: 6
+        venv_break: |
+          mkdir -p "$SITE/evil-1.0.dist-info"; printf 'Metadata-Version: 2.1\nName: evil\nVersion: 1.0\n' > "$SITE/evil-1.0.dist-info/METADATA"
+
+    - name: Venv | a broken interpreter (distro Python upgrade) is rebuilt
+      ansible.builtin.include_tasks: venv_case.yml
+      vars:
+        venv_case: broken interpreter
+        venv_want_pip_runs: 8
+        venv_break: |
+          rm -f "$VENV/bin/python3" "$VENV/bin/python"; ln -s /nonexistent/python3 "$VENV/bin/python3"
+
+    # Q-4: a lock whose pin moved but whose hash is wrong (fake pip refuses it, as --require-hashes does): the
+    # build in venv.new fails and the working venv is left exactly as it was.
+    - name: Venv | a lock with pywebpush moved to 2.5.1 and a flipped hash
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -I
+          - "{{ playbook_dir }}/flip_lock.py"
+          - "{{ playbook_dir | dirname }}/files/requirements.lock"
+          - "{{ test_tmp }}/flipped.lock"
+      changed_when: true
+
+    - name: Venv | the rebuild with the flipped hash
+      block:
+        - name: Venv | venv.yml with the flipped lock
+          ansible.builtin.include_tasks: ../tasks/venv.yml
+          vars:
+            mission_control_requirements_lock_src: "{{ test_tmp }}/flipped.lock"
+            mission_control_pip_argv: ["{{ test_bin }}/fake-pip", "{{ test_tmp }}/opt/mission-control/venv.new"]
+        - name: Not reached
+          ansible.builtin.set_fact:
+            test_flipped_by: ""
+      rescue:
+        - name: Note which task failed
+          ansible.builtin.set_fact:
+            test_flipped_by: "{{ ansible_failed_task.name }}"
+
+    - name: Venv | the working venv after the failed build
+      ansible.builtin.command:
+        argv:
+          - "{{ test_tmp }}/opt/mission-control/venv/bin/python3"
+          - -I
+          - -c
+          - "import json, importlib.metadata as m, pywebpush; print(m.version('pywebpush'))"
+      register: test_venv_after_flip
+      changed_when: false
+
+    - name: Venv | failed in venv.new at the hash check; the working venv still runs 2.5.0; no venv.old left behind
+      ansible.builtin.assert:
+        that:
+          - test_flipped_by is search('requirements[.]lock into venv[.]new')
+          - test_venv_after_flip.stdout == '2.5.0'
+          - lookup('ansible.builtin.fileglob', test_tmp ~ '/opt/mission-control/venv.old', wantlist=True) == []
+        fail_msg: "failed at '{{ test_flipped_by }}'; the venv now has pywebpush {{ test_venv_after_flip.stdout }}"
+        quiet: true
+
+    - name: Venv | with the good lock again nothing is rebuilt (the old venv still matches)
+      ansible.builtin.include_tasks: venv_case.yml
+      vars: {venv_case: idempotent, venv_want_pip_runs: 10}
+
+    # From here on the VAPID scripts and config validation need real cryptography: the repo's .venv.
+    - name: Use a Python with real cryptography as the venv's interpreter from here on
+      ansible.builtin.set_fact:
+        mission_control_venv_python: "{{ test_crypto_python }}"
+
+    # ---------------------------------------------------------------- install
+    - name: Install | first run
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Install | plant strays in the installed trees
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          o="{{ test_tmp }}/opt/mission-control"
+          touch "$o/server/mission_control/stray.py" "$o/server/README.md" "$o/web/stray.js" "$o/web/js/old.js"
+          mkdir -p "$o/server/mission_control/__pycache__" "$o/web/tests"
+          touch "$o/server/mission_control/__pycache__/x.pyc" "$o/web/tests/t.js"
+      changed_when: true
+
+    - name: Install | second run prunes them
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Install | the installed trees are exactly the deployable files
+      ansible.builtin.shell:
+        cmd: set -o pipefail; cd "{{ test_tmp }}/opt/mission-control" && find server web -mindepth 1 | sort
+        executable: /bin/bash
+      register: test_installed
+      changed_when: false
+
+    - name: Install | server package only (no tests, cache, README); web without node_modules, tests or .txt
+      ansible.builtin.assert:
+        that:
+          - test_installed.stdout_lines | select('match', '^server/') | list ==
+            ['server/mission_control'] + (test_installed.stdout_lines | select('match', '^server/mission_control/') | list)
+          - test_installed.stdout_lines | select('search', '(__pycache__|/tests?(/|$)|node_modules|README|stray|old[.]js|[.]txt$)') | list == []
+          - "'server/mission_control/config.py' in test_installed.stdout_lines"
+          - "'server/mission_control/__main__.py' in test_installed.stdout_lines"
+          - "'web/index.html' in test_installed.stdout_lines and 'web/sw.js' in test_installed.stdout_lines"
+          - "'web/manifest.webmanifest' in test_installed.stdout_lines"
+          - "'web/icons/icon-192.png' in test_installed.stdout_lines and 'web/css/app.css' in test_installed.stdout_lines"
+        fail_msg: "{{ test_installed.stdout_lines }}"
+        quiet: true
+
+    - name: Install | the service worker's precache list (SHELL in sw.js) is exactly the deployed web files
+      vars:
+        sw: "{{ lookup('ansible.builtin.file', test_tmp ~ '/opt/mission-control/web/sw.js') }}"
+        shell: >-
+          {{ (sw.split('const SHELL = [')[1].split('];')[0] if 'const SHELL = [' in sw else '') | regex_findall("'([^']+)'") | sort }}
+        deployed: >-
+          {{ test_installed.stdout_lines | select('match', '^web/.+[.][a-z]+$') | map('regex_replace', '^web', '')
+             | map('regex_replace', '^/index[.]html$', '/') | reject('equalto', '/sw.js') | sort }}
+      ansible.builtin.assert:
+        that:
+          - shell | length > 0
+          - shell == deployed
+        fail_msg: "SHELL {{ shell }} vs deployed {{ deployed }}"
+        quiet: true
+
+    - name: Install | the CLI launcher (shebang = the venv's python -IB, mode 0755)
+      ansible.builtin.stat:
+        path: "{{ test_tmp }}/bin/mission-control"
+      register: test_launcher
+
+    - name: Install | launcher checks
+      vars:
+        text: "{{ lookup('ansible.builtin.file', test_tmp ~ '/bin/mission-control') }}"
+      ansible.builtin.assert:
+        that:
+          - test_launcher.stat.mode == '0755'
+          - text.splitlines()[0] == '#!' ~ test_crypto_python ~ ' -IB'
+          - text is search('(?m)^sys.path.insert\(0, "' ~ test_tmp ~ '/opt/mission-control/server"\)$')
+          - text is search('(?m)^runpy.run_module\("mission_control", run_name="__main__", alter_sys=True\)$')
+        quiet: true
+
+    - name: Install | the guard refuses a symlinked directory
+      ansible.builtin.include_tasks: expect_guard_refusal.yml
+      loop:
+        - {name: server dir, path: "{{ test_tmp }}/opt/mission-control/server"}
+        - {name: web dir, path: "{{ test_tmp }}/opt/mission-control/web"}
+        - {name: web/js, path: "{{ test_tmp }}/opt/mission-control/web/js"}
+        - {name: the package, path: "{{ test_tmp }}/opt/mission-control/server/mission_control"}
+      loop_control:
+        loop_var: guard_case
+        label: "{{ guard_case.name }}"
+
+    # ---------------------------------------------------------------- config dir, state, HA token
+    - name: Config | plant Noah's HA token (a canary, wrong mode) and run config.yml
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          mkdir -p "{{ test_tmp }}/etc/mission-control"
+          printf 'HA-TOKEN-%s\n' "$(cat "{{ test_tmp }}/canary")" > "{{ test_tmp }}/etc/mission-control/ha-token"
+          chmod 0644 "{{ test_tmp }}/etc/mission-control/ha-token"
+      changed_when: true
+
+    - name: Config | run
+      ansible.builtin.include_tasks: ../tasks/config.yml
+
+    - name: Config | change the subscriptions (as the server would) and loosen modes
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          s="{{ test_tmp }}/var/lib/mission-control/subscriptions.json"
+          printf '[{"endpoint": "https://push.example/SUB-%s", "keys": {"auth": "AUTH-%s", "p256dh": "P256-%s"}}]\n' \
+            "$(cat "{{ test_tmp }}/canary")" "$(cat "{{ test_tmp }}/canary")" "$(cat "{{ test_tmp }}/canary")" > "$s"
+          chmod 0666 "$s"; chmod 0755 "{{ test_tmp }}/var/lib/mission-control"
+      changed_when: true
+
+    - name: Config | run again
+      ansible.builtin.include_tasks: ../tasks/config.yml
+
+    - name: Config | modes, and nothing the server or Noah wrote was replaced
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -euo pipefail
+          stat -c '%n %a' "{{ test_tmp }}/etc/mission-control" "{{ test_tmp }}/var/lib/mission-control" \
+            "{{ test_tmp }}/var/lib/mission-control/subscriptions.json" "{{ test_tmp }}/etc/mission-control/ha-token" \
+            | sed "s#{{ test_tmp }}/##"
+          grep -c SUB- "{{ test_tmp }}/var/lib/mission-control/subscriptions.json"
+          grep -c HA-TOKEN- "{{ test_tmp }}/etc/mission-control/ha-token"
+      register: test_config_modes
+      changed_when: false
+
+    - name: Config | config dir 0750, state dir 0700, subscriptions 0600 (kept), HA token 0640 (kept)
+      ansible.builtin.assert:
+        that:
+          - >-
+            test_config_modes.stdout_lines == ['etc/mission-control 750', 'var/lib/mission-control 700',
+            'var/lib/mission-control/subscriptions.json 600', 'etc/mission-control/ha-token 640', '1', '1']
+        fail_msg: "{{ test_config_modes.stdout_lines }}"
+        quiet: true
+
+    - name: Config | a symlinked subscriptions file is refused (never written through)
+      block:
+        - name: Config | plant a state dir whose subscriptions.json is a symlink
+          ansible.builtin.shell:
+            cmd: |
+              set -eu
+              mkdir -p "{{ test_tmp }}/state-symlink"
+              ln -sfn "{{ test_tmp }}/victim/keep" "{{ test_tmp }}/state-symlink/subscriptions.json"
+          changed_when: true
+        - name: Config | config.yml with it
+          ansible.builtin.include_tasks: ../tasks/config.yml
+          vars:
+            mission_control_state_dir: "{{ test_tmp }}/state-symlink"
+        - name: Not reached
+          ansible.builtin.set_fact:
+            test_subs_by: ""
+      rescue:
+        - name: Note which task refused
+          ansible.builtin.set_fact:
+            test_subs_by: "{{ ansible_failed_task.name }}"
+
+    - name: Config | refused by the symlink check, the victim untouched
+      ansible.builtin.assert:
+        that:
+          - test_subs_by == "Config | refuse a subscriptions path that isn't a regular file"
+          - lookup('ansible.builtin.file', test_tmp ~ '/victim/keep') == 'keep'
+        fail_msg: "refused by '{{ test_subs_by }}'"
+        quiet: true
+
+    # ---------------------------------------------------------------- VAPID
+    - name: VAPID | first run generates the keys
+      ansible.builtin.include_tasks: ../tasks/vapid.yml
+
+    - name: VAPID | it was created
+      ansible.builtin.assert:
+        that: mission_control_vapid_gen.stdout == 'created' and mission_control_vapid_gen is changed
+        quiet: true
+
+    - name: VAPID | the key file (mode, and its checksum to compare after the rerun)
+      ansible.builtin.stat:
+        path: "{{ test_tmp }}/etc/mission-control/vapid.json"
+        checksum_algorithm: sha256
+      register: test_vapid_1
+
+    - name: VAPID | second run
+      ansible.builtin.include_tasks: ../tasks/vapid.yml
+
+    - name: VAPID | on a rerun the generator doesn't even run (the stat guard holds, not just the script's refusal)
+      ansible.builtin.assert:
+        that: mission_control_vapid_gen is skipped
+        quiet: true
+
+    - name: VAPID | third run with the generator forced to run (it must refuse to overwrite)
+      ansible.builtin.include_tasks: ../tasks/vapid.yml
+      vars:
+        mission_control_vapid_stat: {stat: {exists: false}}
+
+    - name: VAPID | the key file again
+      ansible.builtin.stat:
+        path: "{{ test_tmp }}/etc/mission-control/vapid.json"
+        checksum_algorithm: sha256
+      register: test_vapid_2
+
+    - name: VAPID | never rotated, 0640, the house format
+      vars:
+        keys: "{{ lookup('ansible.builtin.file', test_tmp ~ '/etc/mission-control/vapid.json') | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - test_vapid_1.stat.mode == '0640'
+          - test_vapid_2.stat.checksum == test_vapid_1.stat.checksum
+          - test_vapid_2.stat.mtime == test_vapid_1.stat.mtime
+          - test_vapid_2.stat.mode == '0640'
+          - keys.keys() | list | sort == ['privateKey', 'publicKey', 'subject']
+          - keys.publicKey is match('^[A-Za-z0-9_-]{87}$')
+          - keys.subject == 'https://ai-box.example.ts.net'
+        fail_msg: The VAPID key file changed on a rerun, or its mode/format is wrong.
+        quiet: true
+      no_log: true
+
+    - name: VAPID | MC1's own reader (push.load_vapid) accepts the file
+      ansible.builtin.command:
+        argv:
+          - "{{ test_crypto_python }}"
+          - -I
+          - -B
+          - -c
+          - >-
+            import sys; sys.path.insert(0, sys.argv[1]); from mission_control.push import load_vapid;
+            v = load_vapid(sys.argv[2]); print(sorted(v), v['subject'])
+          - "{{ test_tmp }}/opt/mission-control/server"
+          - "{{ test_tmp }}/etc/mission-control/vapid.json"
+      register: test_mc1_vapid
+      changed_when: false
+      no_log: true
+
+    - name: VAPID | MC1 read it
+      ansible.builtin.assert:
+        that: test_mc1_vapid.stdout == "['privateKey', 'publicKey', 'subject'] https://ai-box.example.ts.net"
+        fail_msg: "rc {{ test_mc1_vapid.rc }}"
+        quiet: true
+
+    # Live bug 2026-10-28: the deployed vapid.json holds the old subject with a port. A converge must rewrite ONLY the
+    # subject: both key strings byte-identical (subscriptions are bound to the public key), same owner and mode.
+    - name: VAPID | the keys as they are now (sha256 of the two strings; no_log)
+      ansible.builtin.set_fact:
+        test_keys_before: >-
+          {{ (lookup('ansible.builtin.file', test_tmp ~ '/etc/mission-control/vapid.json') | from_json).privateKey ~ '|'
+             ~ (lookup('ansible.builtin.file', test_tmp ~ '/etc/mission-control/vapid.json') | from_json).publicKey | hash('sha256') }}
+      no_log: true
+
+    - name: VAPID | put the deployed state back (the subject with :8443), keys untouched
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -I
+          - -c
+          - |
+            import json, sys
+            p = sys.argv[1]
+            d = json.load(open(p))
+            d["subject"] = "https://ai-box.example.ts.net:8443"
+            open(p, "w").write(json.dumps(d, indent=2, sort_keys=True) + "\n")
+          - "{{ test_tmp }}/etc/mission-control/vapid.json"
+      changed_when: true
+      no_log: true
+
+    - name: VAPID | converge with the bad subject on disk
+      ansible.builtin.include_tasks: ../tasks/vapid.yml
+
+    - name: VAPID | the subject was rewritten and nothing else
+      vars:
+        after: "{{ lookup('ansible.builtin.file', test_tmp ~ '/etc/mission-control/vapid.json') | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - mission_control_vapid_subject_set.stdout == 'updated'
+          - mission_control_vapid_subject_set is changed
+          - (after.privateKey ~ '|' ~ after.publicKey | hash('sha256')) == test_keys_before
+          - after.subject == 'https://ai-box.example.ts.net'
+          - after.keys() | list | sort == ['privateKey', 'publicKey', 'subject']
+        fail_msg: The subject update changed more than the subject, or didn't run.
+        quiet: true
+      no_log: true
+
+    - name: VAPID | its mode after the rewrite
+      ansible.builtin.stat:
+        path: "{{ test_tmp }}/etc/mission-control/vapid.json"
+        checksum_algorithm: sha256
+      register: test_vapid_rewritten
+
+    - name: VAPID | still 0640 with the same owner and group; no temporary file left
+      ansible.builtin.assert:
+        that:
+          - test_vapid_rewritten.stat.mode == '0640'
+          - test_vapid_rewritten.stat.pw_name == test_vapid_1.stat.pw_name
+          - test_vapid_rewritten.stat.gr_name == test_vapid_1.stat.gr_name
+          - lookup('ansible.builtin.fileglob', test_tmp ~ '/etc/mission-control/.vapid-subject.*', wantlist=True) == []
+        quiet: true
+
+    - name: VAPID | converge again (idempotent)
+      ansible.builtin.include_tasks: ../tasks/vapid.yml
+
+    - name: VAPID | the file after the second converge
+      ansible.builtin.stat:
+        path: "{{ test_tmp }}/etc/mission-control/vapid.json"
+        checksum_algorithm: sha256
+      register: test_vapid_again
+
+    - name: VAPID | nothing to do the second time (same bytes, same mtime)
+      ansible.builtin.assert:
+        that:
+          - mission_control_vapid_subject_set.stdout == 'unchanged'
+          - mission_control_vapid_subject_set is not changed
+          - test_vapid_again.stat.checksum == test_vapid_rewritten.stat.checksum
+          - test_vapid_again.stat.mtime == test_vapid_rewritten.stat.mtime
+        quiet: true
+
+    - name: VAPID | an older file without a subject gets one, keys untouched
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -I
+          - -c
+          - |
+            import json, sys
+            p = sys.argv[1]
+            d = json.load(open(p))
+            del d["subject"]
+            open(p, "w").write(json.dumps(d, indent=2, sort_keys=True) + "\n")
+          - "{{ test_tmp }}/etc/mission-control/vapid.json"
+      changed_when: true
+      no_log: true
+
+    - name: VAPID | converge with the subject missing
+      ansible.builtin.include_tasks: ../tasks/vapid.yml
+
+    - name: VAPID | the subject is back and the keys are the same
+      vars:
+        after: "{{ lookup('ansible.builtin.file', test_tmp ~ '/etc/mission-control/vapid.json') | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - mission_control_vapid_subject_set.stdout == 'updated'
+          - (after.privateKey ~ '|' ~ after.publicKey | hash('sha256')) == test_keys_before
+          - after.subject == 'https://ai-box.example.ts.net'
+        quiet: true
+      no_log: true
+
+    - name: VAPID | the subject rule equals py_vapid's (tests/subject_vectors.json; the filter and the script agree)
+      ansible.builtin.command:
+        argv:
+          - "{{ test_crypto_python }}"
+          - -I
+          - -B
+          - -c
+          - |
+            import json, sys
+            sys.path.insert(0, sys.argv[1] + "/files")
+            sys.path.insert(0, sys.argv[1] + "/filter_plugins")
+            from vapid_check import subject_ok
+            from mission_control_net import mission_control_vapid_subject_ok
+            bad = [s for s, want in json.load(open(sys.argv[2]))
+                   if subject_ok(s) != want or mission_control_vapid_subject_ok(s) != want]
+            print(json.dumps(bad))
+          - "{{ playbook_dir | dirname }}"
+          - "{{ playbook_dir }}/subject_vectors.json"
+      register: test_subject_vectors
+      changed_when: false
+
+    - name: VAPID | every vector agrees
+      ansible.builtin.assert:
+        that: test_subject_vectors.stdout == '[]'
+        fail_msg: "disagreeing subjects: {{ test_subject_vectors.stdout }}"
+        quiet: true
+
+    - name: VAPID | refusals (a broken file is never replaced)
+      ansible.builtin.include_tasks: expect_vapid_refusal.yml
+      loop:
+        - {name: not JSON, content: "garbage\n", task: "VAPID | the key file is good"}
+        - {name: extra key, content: '{"privateKey": "x", "publicKey": "y", "subject": "mailto:a@b", "x": 1}', task: "VAPID | the key file is good"}
+        - {name: no subject, content: '{"privateKey": "x", "publicKey": "y"}', task: "VAPID | the key file is good"}
+        - name: public key of another pair
+          content: >-
+            {"privateKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE", "subject": "mailto:a@b",
+            "publicKey": "BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
+          task: "VAPID | the key file is good"
+        - {name: a symlink, symlink: true, task: "VAPID | an existing key path is a regular file (never a symlink)"}
+      loop_control:
+        loop_var: vapid_case
+        label: "{{ vapid_case.name }}"
+
+    # ---------------------------------------------------------------- config.json and the CLI
+    - name: Config file | render and validate with the stand-in loader
+      ansible.builtin.include_tasks: ../tasks/config_file.yml
+
+    - name: Config file | exactly the role's keys and values
+      vars:
+        cfg: "{{ lookup('ansible.builtin.file', test_tmp ~ '/etc/mission-control/config.json') | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - >-
+            cfg.keys() | list | sort == ['aicontrol_url', 'allowed_login', 'backups', 'erau_url', 'ha_entities', 'ha_token_file',
+            'ha_url', 'host_map', 'links', 'listen_host', 'listen_port', 'lockscreen_detail', 'mediaserver_url',
+            'moneyhub_timezone', 'moneyhub_url', 'state_dir', 'static_dir', 'timezone', 'units', 'vapid_file', 'webui_url']
+          - cfg.listen_host == '127.0.0.1' and cfg.listen_port == 8097
+          - cfg.allowed_login == 'noah@example.com'
+          - cfg.timezone == 'America/New_York'
+          - cfg.lockscreen_detail == 'minimal'
+          - cfg.vapid_file == test_tmp ~ '/etc/mission-control/vapid.json'
+          - cfg.state_dir == test_tmp ~ '/var/lib/mission-control'
+          - cfg.static_dir == test_tmp ~ '/opt/mission-control/web'
+          - cfg.aicontrol_url == 'http://127.0.0.1:8095'
+          - cfg.moneyhub_url == 'http://100.64.0.30:8710' and cfg.moneyhub_timezone == 'UTC'
+          - cfg.erau_url == 'https://homebk-edge.example.ts.net'
+          - cfg.mediaserver_url == 'https://mediaserver.example.ts.net'
+          - >-
+            cfg.host_map == {'homebk-edge.example.ts.net': '100.64.0.30', 'mediaserver.example.ts.net': '100.64.0.40'}
+          - cfg.webui_url == 'http://172.20.0.4:8080'
+          - cfg.ha_url is none and cfg.ha_entities == []
+          - "'forge-api.socket' in cfg.units and 'forge-api.service' in cfg.units"
+          - cfg.backups | map(attribute='id') | list == ['owui-stage', 'mediaserver']
+          - >-
+            cfg.links == {'ai': 'http://ai-box.example.ts.net:8080/', 'ai_control': 'https://ai-box.example.ts.net/',
+                          'money': 'http://100.64.0.30:8710/', 'school': 'https://homebk-edge.example.ts.net/'}
+        fail_msg: "{{ cfg | to_json }}"
+        quiet: true
+
+    - name: Config file | the stand-in refuses an unknown key (proves validate runs)
+      block:
+        - name: Config file | with an unknown key
+          ansible.builtin.include_tasks: ../tasks/config_file.yml
+          vars:
+            mission_control_config_extra: {surprise: 1}
+        - name: Not reached
+          ansible.builtin.set_fact:
+            test_cfg_refused: false
+      rescue:
+        - name: Refused
+          ansible.builtin.set_fact:
+            test_cfg_refused: >-
+              {{ ansible_failed_task.name == "Config | config.json (MC1's keys, values from inventory)" }}
+            test_cfg_refusal_msg: "{{ ansible_failed_result.msg | default('') }}"
+
+    - name: Config file | refused, and the good file is still in place
+      ansible.builtin.assert:
+        that:
+          - test_cfg_refused | bool
+          - (lookup('ansible.builtin.file', test_tmp ~ '/etc/mission-control/config.json') | from_json).surprise is not defined
+        quiet: true
+
+    - name: The launcher, rendered over the stand-in package (MC1's CLI needs aiohttp)
+      ansible.builtin.template:
+        src: "{{ playbook_dir | dirname }}/templates/mission-control.j2"
+        dest: "{{ test_tmp }}/bin/mission-control-standin"
+        mode: "0755"
+      vars:
+        mission_control_server_dir: "{{ playbook_dir }}/fixtures/launcher"
+
+    - name: The launcher runs the package with the units' argv, isolated and without bytecode
+      ansible.builtin.command:
+        argv: "{{ [test_tmp ~ '/bin/mission-control-standin'] + item[1:] }}"
+      loop:
+        - "{{ mission_control_serve_argv }}"
+        - "{{ mission_control_briefing_argv }}"
+        - "{{ mission_control_check_config_argv }}"
+      register: test_cli
+      changed_when: false
+      environment:
+        PYTHONPATH: /nonexistent-must-be-ignored
+
+    - name: The launcher's answers
+      vars:
+        cfgfile: "{{ test_tmp }}/etc/mission-control/config.json"
+      ansible.builtin.assert:
+        that:
+          - >-
+            test_cli.results | map(attribute='stdout') | list
+            == ['stand-in --config ' ~ cfgfile ~ ' serve isolated=1 dont_write_bytecode=True',
+                'stand-in --config ' ~ cfgfile ~ ' briefing --send isolated=1 dont_write_bytecode=True',
+                'stand-in --config ' ~ cfgfile ~ ' check-config isolated=1 dont_write_bytecode=True']
+        fail_msg: "{{ test_cli.results | map(attribute='stdout') | list }}"
+        quiet: true
+
+    # ---------------------------------------------------------------- verify files against fakes
+    - name: Verify http | against the fake server
+      ansible.builtin.include_tasks: verify_http_case.yml
+      loop:
+        - {mode: good, want: pass}
+        - {mode: open, want: fail}
+        - {mode: deny-all, want: fail}
+        - {mode: any-login, want: fail}
+        - {mode: no-header, want: fail}
+      loop_control:
+        loop_var: http_case
+        label: "{{ http_case.mode }}"
+
+    - name: Verify check-config | through the fake systemd-run
+      ansible.builtin.include_tasks: verify_check_config_case.yml
+      loop:
+        - {name: ok, out: "mission-control: CONFIG OK", want: pass}
+        - {name: a problem, out: "note: static_dir has no index.html yet", want: fail}
+      loop_control:
+        loop_var: cc_case
+        label: "{{ cc_case.name }}"
+
+    - name: Verify serve | against status --json shaped inputs
+      ansible.builtin.include_tasks: verify_serve_case.yml
+      loop:
+        - name: both handlers
+          json: >-
+            {"TCP":{"443":{"HTTPS":true},"8443":{"HTTPS":true}},"Web":{"ai-box.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8095"}}},
+            "ai-box.example.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8097"}}}}}
+          want: pass
+        - name: AI Control's 443 gone
+          json: >-
+            {"TCP":{"8443":{"HTTPS":true}},"Web":{"ai-box.example.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8097"}}}}}
+          want: fail
+        - name: AI Control's 443 replaced by Mission Control
+          json: >-
+            {"TCP":{"443":{"HTTPS":true},"8443":{"HTTPS":true}},"Web":{"ai-box.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8097"}}},
+            "ai-box.example.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8097"}}}}}
+          want: fail
+        - name: Mission Control missing
+          json: >-
+            {"TCP":{"443":{"HTTPS":true}},"Web":{"ai-box.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8095"}}}}}
+          want: fail
+        - name: funnel on
+          json: >-
+            {"TCP":{"443":{"HTTPS":true},"8443":{"HTTPS":true}},"Web":{"ai-box.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8095"}}},
+            "ai-box.example.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8097"}}}},"AllowFunnel":{"ai-box.example.ts.net:8443":true}}
+          want: fail
+      loop_control:
+        loop_var: serve_case
+        label: "{{ serve_case.name }}"
+
+    - name: Verify egress | the plan
+      ansible.builtin.include_tasks: ../tasks/verify_egress_plan.yml
+
+    - name: Verify egress | the plan covers the contract's addresses
+      vars:
+        by_role: "{{ dict(mission_control_probe_plan | groupby('role')) }}"
+      ansible.builtin.assert:
+        that:
+          - >-
+            by_role.allow | map(attribute='host') | list == ['127.0.0.1', '127.0.0.53', '100.64.0.30', '172.20.0.4', '100.64.0.40']
+          - >-
+            by_role.deny | selectattr('kind', 'equalto', 'udp') | map(attribute='host') | list
+            == ['100.64.0.10', 'fd7a:115c:a1e0::a', '100.64.0.20', '192.168.77.1', '172.20.0.2', '172.20.0.3', '127.0.0.54', '::1',
+                '10.255.255.1', '172.31.255.1', '192.168.255.1', '100.100.100.100']
+          - by_role.deny | selectattr('kind', 'equalto', 'udp') | map(attribute='want') | unique | list == ['EPERM']
+          # Q-6: the DNAT paths and the tailnet-address services, by TCP.
+          - >-
+            by_role.deny | selectattr('kind', 'equalto', 'tcp') | map(attribute='host') | zip(by_role.deny
+            | selectattr('kind', 'equalto', 'tcp') | map(attribute='port')) | map('join', ':') | list
+            == ['100.64.0.10:11434', '127.0.0.1:8888', '100.64.0.10:22', '100.64.0.10:443', '100.64.0.10:8443']
+          - by_role.deny | selectattr('kind', 'equalto', 'tcp') | map(attribute='want') | unique | list == ['blocked']
+          - by_role.public | map(attribute='host') | list == ['1.1.1.1']
+          - >-
+            by_role.tcp | map(attribute='name') | list == ['tcp server (the guard refuses mc)', 'tcp aicontrol', 'tcp webui',
+            'tcp moneyhub', 'tcp erau', 'tcp mediaserver',
+            'tcp push fcm.googleapis.com', 'tcp push web.push.apple.com', 'tcp push updates.push.services.mozilla.com']
+          - >-
+            (by_role.tcp | map(attribute='host') | list)[:6]
+            == ['127.0.0.1', '127.0.0.1', '172.20.0.4', '100.64.0.30', '100.64.0.30', '100.64.0.40']
+          - by_role.tcp | map(attribute='port') | list == [8097, 8095, 8080, 8710, 443, 443, 443, 443, 443]
+          - by_role.tcp | map(attribute='want') | list == ['ECONNREFUSED'] + ['ok'] * 8
+          # Q-2: the in-sandbox runtime checks.
+          - >-
+            by_role.runtime | map(attribute='name') | list == ['runtime systemctl', 'runtime dns fcm.googleapis.com',
+            'runtime absent /run/tailscale/tailscaled.sock', 'runtime absent /run/snapd.socket',
+            'runtime absent /run/docker.sock', 'runtime absent /run/aictl-helper.sock']
+          - (by_role.runtime | first).host == '/usr/bin/systemctl mission-control.service'
+        fail_msg: "{{ mission_control_probe_plan | to_json }}"
+        quiet: true
+
+    - name: Verify egress | canned probe results through the fake systemd-run
+      ansible.builtin.include_tasks: verify_egress_case.yml
+      loop:
+        - {name: all as the filter says, change: {}, want: pass}
+        - {name: the LAN reachable, change: {"udp deny 192.168.77.1": sent}, want: fail}
+        - {name: the gaming PC reachable, change: {"udp deny 100.64.0.20": sent}, want: fail}
+        - {name: ollama-cpu reachable, change: {"udp deny 172.20.0.2": sent}, want: fail}
+        - {name: MagicDNS reachable, change: {"udp deny 100.100.100.100": sent}, want: fail}
+        - {name: Money Hub blocked, change: {"udp allow 100.64.0.30": EPERM}, want: fail}
+        - {name: public internet blocked, change: {"udp public 1.1.1.1": EPERM}, want: fail}
+        - {name: a push host times out, change: {"tcp push web.push.apple.com": ETIMEDOUT}, want: fail}
+        - {name: ERAU unreachable through the filter, change: {"tcp erau": ETIMEDOUT}, want: fail}
+        - {name: mc reaches the server past the guard, change: {"tcp server (the guard refuses mc)": ok}, want: fail}
+        - {name: Open WebUI blocked, change: {"tcp webui": ETIMEDOUT}, want: fail}
+        - {name: the broker reachable through DNAT, change: {"tcp deny broker (DNAT)": ok}, want: fail}
+        - {name: SearXNG answers with a reset (the packet got through), change: {"tcp deny searxng (DNAT)": ECONNREFUSED}, want: fail}
+        - {name: ssh on the tailnet address reachable, change: {"tcp deny ssh on the tailnet address": ok}, want: fail}
+        - {name: ai-box's own tailnet address reachable, change: {"udp deny 100.64.0.10": sent}, want: fail}
+        - {name: another loopback address reachable, change: {"udp deny 127.0.0.54": sent}, want: fail}
+        - {name: IPv6 loopback reachable, change: {"udp deny ::1": sent}, want: fail}
+        - {name: tailscaled's socket visible, change: {"runtime absent /run/tailscale/tailscaled.sock": present}, want: fail}
+        - {name: systemctl can't reach systemd, change: {"runtime systemctl": "error: rc 1"}, want: fail}
+        - {name: names don't resolve, change: {"runtime dns fcm.googleapis.com": "error: resolve"}, want: fail}
+        - {name: the mediaserver blocked, change: {"udp allow 100.64.0.40": EPERM}, want: fail}
+        - {name: crypto broken under the sandbox, change: {crypto: "error: ImportError"}, want: fail}
+        - {name: a target missing, change: {"udp deny 10.255.255.1": null}, want: fail}
+        - {name: garbage output, change: null, want: fail}
+      loop_control:
+        loop_var: egress_case
+        label: "{{ egress_case.name }}"
+
+    - name: Verify egress | a plan whose deny target is allowed fails before probing (the filter was widened)
+      vars:
+        test_wide_plan: >-
+          {{ ['127.0.0.1/32', '192.168.77.1/32'] | mission_control_probe_plan(mission_control_ip_deny, ['192.168.77.1'], '1.1.1.1', []) }}
+        test_wide_results: "{{ dict(test_wide_plan | map(attribute='name') | zip(test_wide_plan | map(attribute='want'))) | combine({'crypto': 'ok'}) }}"
+      ansible.builtin.assert:
+        that:
+          - test_wide_plan | mission_control_probe_problems(test_wide_results) | length == 1
+          - (test_wide_plan | mission_control_probe_problems(test_wide_results))[0] is search('verdict is allow, it must be deny')
+        quiet: true
+
+    - name: Verify VAPID signing | canned answers
+      ansible.builtin.include_tasks: verify_vapid_sign_case.yml
+      loop:
+        - {out: OK, want: pass}
+        - {out: FAIL VapidException, want: fail}
+        - {out: FAIL ModuleNotFoundError, want: fail}
+        - {out: "", want: fail}
+      loop_control:
+        loop_var: sign_case
+        label: "{{ sign_case.out }}"
+
+    - name: Verify guard | canned answers (nobody, root, local API, nft list before/after ufw reload)
+      ansible.builtin.include_tasks: verify_guard_case.yml
+      loop:
+        - name: as it must be
+          nobody: [ECONNREFUSED, ECONNRESET, ECONNREFUSED]
+          root: [ok, ECONNREFUSED, ECONNREFUSED]
+          localapi: ["error EPIPE", reset]
+          want: pass
+        - {name: nobody reaches the server, nobody: [ok, ECONNREFUSED, ECONNREFUSED], want: fail}
+        - {name: nobody reaches serve on IPv6, nobody: [ECONNREFUSED, ECONNREFUSED, ok], want: fail}
+        - {name: root refused on the server (no skuid match), root: [ECONNREFUSED, ECONNREFUSED, ECONNREFUSED], want: fail}
+        - {name: root reaches serve on IPv4 from the box (Q2-1), root: [ok, ok, ECONNREFUSED], want: fail}
+        - {name: root reaches serve on IPv6 from the box (Q2-1), root: [ok, ECONNREFUSED, ok], want: fail}
+        - {name: the local API dial gets an HTTP answer (Q2-1), localapi: ["error EPIPE", "http HTTP/1.1 200 OK"], want: fail}
+        - {name: the local API dial gets a 403 from serve, localapi: ["http HTTP/1.1 403 Forbidden", reset], want: fail}
+        - {name: nobody times out instead of a reset, nobody: [ETIMEDOUT, ECONNREFUSED, ECONNREFUSED], want: fail}
+        - {name: the table is missing, rc: 1, want: fail}
+        - {name: ufw reload changed the table, after_changed: true, want: fail}
+        - {name: no interface rule in the table, no_iif: true, want: fail}
+        - {name: garbage output, nobody: null, want: fail}
+      loop_control:
+        loop_var: guard_case
+        label: "{{ guard_case.name }}"
+
+    - name: Verify journal | against a fake journal
+      ansible.builtin.include_tasks: verify_journal_case.yml
+      loop:
+        - {name: clean, journal: "started\nbriefing sent to 1 device\n", want: pass}
+        - {name: VAPID private key, leak: privateKey, want: fail}
+        - {name: VAPID private key as hex, leak: hex, want: fail}
+        - {name: VAPID private key as base64, leak: b64, want: fail}
+        - {name: a push endpoint, journal: "push failed for https://push.example/SUB-CANARY\n", want: fail}
+        - {name: the HA token, journal: "ha: using HA-TOKEN-CANARY\n", want: fail}
+        - {name: journalctl fails, journal: "", rc: 1, want: fail}
+        - {name: no secret found to look for (all three files missing), journal: "started\n", missing: true, want: fail}
+      loop_control:
+        loop_var: journal_case
+        label: "{{ journal_case.name }}"
+
+    - name: Egress probe script | real UDP and TCP probes on loopback (no sandbox here)
+      ansible.builtin.command:
+        argv:
+          - "{{ test_crypto_python }}"
+          - -I
+          - -B
+          - "{{ playbook_dir }}/../files/egress_probe.py"
+          - >-
+            [{"name": "u", "kind": "udp", "host": "127.0.0.1", "port": 9},
+             {"name": "t", "kind": "tcp", "host": "127.0.0.1", "port": 1}]
+      register: test_probe_script
+      changed_when: false
+
+    - name: Egress probe script | its answers
+      vars:
+        out: "{{ test_probe_script.stdout | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - out.u == 'sent'
+          - out.t == 'ECONNREFUSED'
+          # The repo's .venv has cryptography but not pywebpush: the probe reports, never raises.
+          - "out.crypto is match('^(ok|error: ModuleNotFoundError)$')"
+        fail_msg: "{{ out | to_json }}"
+        quiet: true
+
+- name: Role mission_control renders its units and serve set with the real paths
+  hosts: render
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+    - ../../../inventory/group_vars/all/versions.yml
+  vars:
+    <<: *mc_inventory
+    test_render: "{{ test_tmp }}/render"
+  tasks:
+    - name: The role's directory (the templates and files are named through it), and the guard's IPv6 (preflight's fact)
+      ansible.builtin.set_fact:
+        mission_control_role_dir: "{{ playbook_dir | dirname }}"
+        mission_control_guard_ip6: "{{ mission_control_tailnet_ip6 }}"
+
+    - name: Wiring | include order, conditions, enabled units, is-active coverage, pip flags, the probe includes (Q-5)
+      ansible.builtin.command:
+        argv: ["{{ ansible_playbook_python }}", -I, -B, "{{ playbook_dir }}/check_wiring.py", "{{ playbook_dir | dirname }}"]
+      changed_when: false
+
+    - name: Role ai_control's defaults (as preflight.yml loads them)
+      ansible.builtin.include_vars:
+        file: "{{ mission_control_aictl_defaults_file }}"
+        name: mission_control_aictl_defaults
+
+    - name: Render dir
+      ansible.builtin.file:
+        path: "{{ test_render }}"
+        state: directory
+        mode: "0755"
+
+    - name: Render the units, the CLI and config.json with the real paths
+      ansible.builtin.template:
+        src: "{{ playbook_dir | dirname }}/templates/{{ item.src }}"
+        dest: "{{ test_render }}/{{ item.dest }}"
+        mode: "0644"
+      loop:
+        - {src: mission-control.service.j2, dest: mission-control.service}
+        - {src: mission-control-briefing.service.j2, dest: mission-control-briefing.service}
+        - {src: mission-control-briefing.timer.j2, dest: mission-control-briefing.timer}
+        - {src: mission-control.j2, dest: mission-control}
+        - {src: config.json.j2, dest: config.json}
+        - {src: guard.nft.j2, dest: guard.nft}
+        - {src: mission-control-guard.service.j2, dest: mission-control-guard.service}
+      loop_control:
+        label: "{{ item.dest }}"
+
+    # Reviewer M's lesson: pin the literal text, not just a few greps. tests/expected/ is the reviewed render.
+    - name: The renders equal tests/expected/ literally
+      ansible.builtin.command:
+        argv: [diff, -u, "{{ playbook_dir }}/expected/{{ item }}", "{{ test_render }}/{{ item }}"]
+      loop:
+        - mission-control.service
+        - mission-control-briefing.service
+        - mission-control-briefing.timer
+        - mission-control
+        - config.json
+        - guard.nft
+        - mission-control-guard.service
+      changed_when: false
+
+    # Q-1, Q2-1: the guard, loaded for real in a private network namespace (a user namespace maps root and uid 1000),
+    # with a stand-in container on a veth and a stand-in tailnet peer on an interface named like the tailscale var.
+    - name: Guard | load the rendered guard in a private netns, connect from the box, a container and the tailnet side
+      ansible.builtin.command:
+        argv:
+          - unshare
+          - --map-auto
+          - --map-root-user
+          - --net
+          - python3
+          - -I
+          - -B
+          - "{{ playbook_dir }}/guard_netns.py"
+          - "{{ test_render }}/guard.nft"
+          - "{{ tailnet_ip }}"
+          - "{{ mission_control_guard_ip6 }}"
+          - "{{ mission_control_listen_port }}"
+          - "{{ mission_control_serve_port }}"
+          - "{{ mission_control_tailscale_iface }}"
+      register: test_guard_netns
+      changed_when: false
+
+    - name: Guard | 8097 root only; :8443 only from the tailscale interface; unchanged by UFW- and Docker-style rule loads
+      vars:
+        out: "{{ test_guard_netns.stdout | from_json }}"
+        want:
+          root: {server: ok, serve4: ECONNREFUSED, serve6: ECONNREFUSED, control: ok}
+          user: {server: ECONNREFUSED, serve4: ECONNREFUSED, serve6: ECONNREFUSED, control: ok}
+          ctr: {serve4: ECONNREFUSED, serve6: ECONNREFUSED}
+          ts: {serve4: ok, serve6: ok}
+      ansible.builtin.assert:
+        that:
+          - out.loads == [0, 0]
+          - out.first == want
+          - out.second == want
+          - out.rules_have_iif
+          - out.unchanged_after_ufw
+          - out.unchanged_after_docker
+          - out.other_table_kept
+          - out.guard_tables == 1
+        fail_msg: "{{ test_guard_netns.stdout }}"
+        quiet: true
+
+    - name: Guard | the local-API probe against a fake tailscaled (refused, upgraded then closed, upgraded then answered)
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -euo pipefail
+          d="{{ test_render }}/localapi"; mkdir -p "$d"
+          for m in refuse close leak; do
+            "{{ test_crypto_python }}" -I -B "{{ playbook_dir }}/fake_localapi.py" "$d/$m.sock" "$m" "$d" > "$d/$m.out" &
+            pid=$!
+            for i in $(seq 100); do grep -q ready "$d/$m.out" && break; sleep 0.1; done
+            python3 -I -B "{{ playbook_dir | dirname }}/files/localapi_probe.py" "$d/$m.sock" ai-box.example.ts.net \
+              '[{"name": "'$m'", "host": "fd7a:115c:a1e0::a", "port": 8443}]'
+            kill "$pid"
+          done
+      register: test_localapi
+      changed_when: false
+
+    - name: Guard | only the answered dial reads as a leak
+      vars:
+        res: "{{ test_localapi.stdout_lines | map('from_json') | combine }}"
+      ansible.builtin.assert:
+        that:
+          - res.refuse == 'refused 403'
+          - res.close is not match('^http ')
+          - res.leak == 'http HTTP/1.1 200 OK'
+        fail_msg: "{{ res | to_json }}"
+        quiet: true
+
+    - name: The contract's settings, named (so a reviewed change to expected/ can't drop them silently)
+      vars:
+        server: "{{ lookup('ansible.builtin.file', test_render ~ '/mission-control.service') }}"
+        briefing: "{{ lookup('ansible.builtin.file', test_render ~ '/mission-control-briefing.service') }}"
+        timer: "{{ lookup('ansible.builtin.file', test_render ~ '/mission-control-briefing.timer') }}"
+        deny_line: >-
+          IPAddressDeny=127.0.0.0/8 ::1/128 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 fe80::/10
+          fc00::/7 0.0.0.0/8 192.0.0.0/24 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4 ::/128 ::ffff:0:0/96 64:ff9b::/96 64:ff9b:1::/48 ff00::/8
+      ansible.builtin.assert:
+        that:
+          # The timer: 05:30 in New York's zone, Persistent, the briefing unit.
+          - timer is search('(?m)^OnCalendar=\*-\*-\* 05:30:00 America/New_York$')
+          - timer | regex_findall('(?m)^OnCalendar=') | length == 1
+          - timer is search('(?m)^Persistent=true$')
+          - timer is search('(?m)^Unit=mission-control-briefing[.]service$')
+          - timer is search('(?m)^WantedBy=timers[.]target$')
+          # The two ExecStarts (the CLI the contract names).
+          - server is search('(?m)^ExecStart=/usr/local/bin/mission-control --config /etc/mission-control/config.json serve$')
+          - briefing is search('(?m)^ExecStart=/usr/local/bin/mission-control --config /etc/mission-control/config.json briefing --send$')
+          - briefing is search('(?m)^Type=oneshot$') and briefing is not search('(?m)^\[Install\]')
+          - server is search('(?m)^Type=exec$') and server is search('(?m)^WantedBy=multi-user[.]target$')
+          - server is search('(?m)^MemoryMax=128M$') and briefing is search('(?m)^MemoryMax=128M$')
+          # Q-1: the server never runs without the guard.
+          - server is search('(?m)^Requires=mission-control-guard[.]service$')
+          - server is search('(?m)^After=network-online[.]target mission-control-guard[.]service$')
+          # Q-2: /run is an empty read-only tmpfs with three paths bound in, read-only; no ReadOnlyPaths=/run.
+          - server | regex_findall('(?m)^TemporaryFileSystem=.*$') == ['TemporaryFileSystem=/run:ro']
+          - >-
+            server | regex_findall('(?m)^BindReadOnlyPaths=.*$')
+            == ['BindReadOnlyPaths=/run/dbus/system_bus_socket /run/systemd/system /run/systemd/resolve']
+          - server is not search('(?m)^(ReadOnlyPaths|BindPaths)=')
+          - briefing | regex_findall('(?m)^TemporaryFileSystem=.*$') == ['TemporaryFileSystem=/run:ro']
+          # Both units: the same sandbox, mc, no capabilities, writes only the state dir, the IP filter lines.
+          - (server.splitlines() | select('in', mission_control_sandbox) | list | length) == mission_control_sandbox | length
+          - (briefing.splitlines() | select('in', mission_control_sandbox) | list | length) == mission_control_sandbox | length
+          - server is search('(?m)^User=mc$') and server is search('(?m)^Group=mc$')
+          - server is not search('(?m)^SupplementaryGroups=')
+          - server is search('(?m)^CapabilityBoundingSet=$') and server is search('(?m)^AmbientCapabilities=$')
+          - server is search('(?m)^NoNewPrivileges=yes$') and server is search('(?m)^ProtectSystem=strict$')
+          - server | regex_findall('(?m)^ReadWritePaths=.*$') == ['ReadWritePaths=/var/lib/mission-control']
+          - server is not search('(?m)^(Environment|EnvironmentFile|PassEnvironment|BindPaths)=')
+          - server | regex_findall('(?m)^IPAddressAllow=.*$') == ['IPAddressAllow=127.0.0.1/32 127.0.0.53/32 100.64.0.30/32 172.20.0.4/32 100.64.0.40/32']
+          - server | regex_findall('(?m)^IPAddressDeny=.*$') == [deny_line]
+          - briefing | regex_findall('(?m)^IPAddressAllow=.*$') == ['IPAddressAllow=127.0.0.1/32 127.0.0.53/32 100.64.0.30/32 172.20.0.4/32 100.64.0.40/32']
+          - briefing | regex_findall('(?m)^IPAddressDeny=.*$') == [deny_line]
+        quiet: true
+
+    - name: Systemd-analyze verify (a copy with the CLI swapped for /usr/bin/true, which exists here)
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          mkdir -p "{{ test_render }}/verify"
+          for u in mission-control.service mission-control-briefing.service mission-control-briefing.timer mission-control-guard.service; do
+            sed 's#^ExecStart=/usr/local/bin/mission-control #ExecStart=/usr/bin/true #' "{{ test_render }}/$u" > "{{ test_render }}/verify/$u"
+          done
+          cd "{{ test_render }}/verify"
+          systemd-analyze verify mission-control.service mission-control-briefing.service mission-control-briefing.timer \
+            mission-control-guard.service
+      register: test_analyze
+      changed_when: false
+      failed_when: test_analyze.rc != 0 or test_analyze.stderr | length > 0
+
+    # The IP filter's verdicts, address by address, with systemd's semantics (allow wins; neither = pass).
+    - name: IP filter | verdicts
+      vars:
+        allow: "{{ mission_control_ip_allow }}"
+        deny: "{{ mission_control_ip_deny }}"
+      ansible.builtin.assert:
+        that:
+          - item.addr | mission_control_ip_verdict(allow, deny) == item.want
+        fail_msg: "{{ item.addr }}: {{ item.addr | mission_control_ip_verdict(allow, deny) }}, want {{ item.want }}"
+        quiet: true
+      loop:
+        - {addr: 127.0.0.1, want: allow}
+        - {addr: 127.0.0.53, want: allow}
+        - {addr: 127.0.0.54, want: deny}
+        - {addr: 127.0.0.2, want: deny}
+        - {addr: "::1", want: deny}
+        - {addr: 100.64.0.30, want: allow}
+        - {addr: 100.64.0.10, want: deny}
+        - {addr: "fd7a:115c:a1e0::a", want: deny}
+        - {addr: 172.20.0.4, want: allow}
+        - {addr: 100.64.0.20, want: deny}
+        - {addr: 100.64.0.40, want: allow}
+        - {addr: 100.64.0.41, want: deny}
+        - {addr: 100.64.0.31, want: deny}
+        - {addr: 100.100.100.100, want: deny}
+        - {addr: 100.127.255.254, want: deny}
+        - {addr: 172.20.0.2, want: deny}
+        - {addr: 172.20.0.3, want: deny}
+        - {addr: 172.17.0.1, want: deny}
+        - {addr: 10.0.0.1, want: deny}
+        - {addr: 192.168.77.1, want: deny}
+        - {addr: 192.168.1.20, want: deny}
+        - {addr: 169.254.169.254, want: deny}
+        - {addr: "fd7a:115c:a1e0::1", want: deny}
+        - {addr: "fe80::1", want: deny}
+        - {addr: "::ffff:192.168.77.1", want: deny}
+        - {addr: 0.0.0.0, want: deny}
+        - {addr: 224.0.0.251, want: deny}
+        - {addr: 142.250.80.10, want: pass}
+        - {addr: 17.253.144.10, want: pass}
+        - {addr: 34.117.237.239, want: pass}
+        - {addr: 1.1.1.1, want: pass}
+        - {addr: "2607:f8b0:4004:c1b::5f", want: pass}
+        - {addr: 100.63.255.255, want: pass}
+        - {addr: 100.128.0.1, want: pass}
+      loop_control:
+        label: "{{ item.addr }} {{ item.want }}"
+
+    # tailscale serve, parameterised exactly as tasks/serve.yml does it.
+    - name: Serve | role tailscale_serve's preconditions pass with both handlers
+      ansible.builtin.include_role:
+        name: tailscale_serve
+        tasks_from: validate
+      vars:
+        tailscale_serve_handlers: "{{ mission_control_serve_handlers }}"
+        tailscale_serve_dashboard_port: "{{ mission_control_aictl_serve_port | int }}"
+        tailscale_serve_dashboard_backend: "{{ mission_control_aictl_backend }}"
+        tailscale_serve_node_name: "{{ tailnet_fqdn }}"
+        tailscale_serve_backend_state: Running
+
+    - name: Serve | the declared config
+      ansible.builtin.include_role:
+        name: tailscale_serve
+        tasks_from: desired
+      vars:
+        tailscale_serve_handlers: "{{ mission_control_serve_handlers }}"
+        tailscale_serve_node_name: "{{ tailnet_fqdn }}"
+
+    - name: Serve | exactly AI Control on 443 and Mission Control on 8443, HTTPS, no funnel
+      ansible.builtin.assert:
+        that:
+          - >-
+            tailscale_serve_desired == {'TCP': {'443': {'HTTPS': true}, '8443': {'HTTPS': true}},
+              'Web': {'ai-box.example.ts.net:443': {'Handlers': {'/': {'Proxy': 'http://127.0.0.1:8095'}}},
+                      'ai-box.example.ts.net:8443': {'Handlers': {'/': {'Proxy': 'http://127.0.0.1:8097'}}}}}
+        fail_msg: "{{ tailscale_serve_desired | to_json }}"
+        quiet: true
+
+    - name: Serve | drift compare
+      ansible.builtin.include_tasks: serve_drift.yml
+      loop:
+        - name: both, Go key order
+          json: >-
+            {"TCP":{"443":{"HTTPS":true},"8443":{"HTTPS":true}},"Web":{"ai-box.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8095"}}},
+            "ai-box.example.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8097"}}}}}
+          want: false
+        - name: both, scrambled order
+          json: >-
+            {"Web":{"ai-box.example.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8097"}}},
+            "ai-box.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8095"}}}},"TCP":{"8443":{"HTTPS":true},"443":{"HTTPS":true}}}
+          want: false
+        - name: ai-box before the first converge (AI Control only)
+          json: >-
+            {"TCP":{"443":{"HTTPS":true}},"Web":{"ai-box.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8095"}}}}}
+          want: true
+        - {name: nothing served, json: "{}", want: true}
+        - name: funnel on 8443
+          json: >-
+            {"TCP":{"443":{"HTTPS":true},"8443":{"HTTPS":true}},"Web":{"ai-box.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8095"}}},
+            "ai-box.example.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8097"}}}},"AllowFunnel":{"ai-box.example.ts.net:8443":true}}
+          want: true
+      loop_control:
+        loop_var: drift_case
+        label: "{{ drift_case.name }}"
+
+    # Both roles must declare the same set, or each converge resets the other's handler. Role ai_control's REAL files:
+    # its defaults are loaded under a name (an unnamed include_vars would outrank the play's inventory and reset
+    # ai_control_serve_extra_handlers to its default []), and only the two ports its vars need are taken from them;
+    # its vars file is loaded as it is, so ai_control_serve_handlers is its own expression over the inventory's
+    # ai_control_serve_extra_handlers (the 8443 handler, as in host_vars/ai-box.yml).
+    - name: Serve | role ai_control's real defaults (under a name)
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../../ai_control/defaults/main.yml"
+        name: test_aictl_defaults
+
+    - name: Serve | the two values role ai_control's serve expression reads from its defaults
+      ansible.builtin.set_fact:
+        ai_control_serve_port: "{{ test_aictl_defaults.ai_control_serve_port }}"
+        ai_control_listen_port: "{{ test_aictl_defaults.ai_control_listen_port }}"
+
+    - name: Serve | role ai_control's real vars
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../../ai_control/vars/main.yml"
+
+    - name: Serve | the inventory's extra list is still in force (not reset by the loads above)
+      ansible.builtin.assert:
+        that: >-
+          ai_control_serve_extra_handlers == [{'port': 8443, 'mount': '/', 'backend': 'http://127.0.0.1:8097'}]
+        quiet: true
+
+    - name: Serve | both roles declare the identical set (AI Control's 443 first, Mission Control's 8443)
+      ansible.builtin.assert:
+        that:
+          - ai_control_serve_handlers == mission_control_serve_handlers
+          - >-
+            ai_control_serve_handlers == [{'port': 443, 'mount': '/', 'backend': 'http://127.0.0.1:8095'},
+                                          {'port': 8443, 'mount': '/', 'backend': 'http://127.0.0.1:8097'}]
+        fail_msg: "ai_control: {{ ai_control_serve_handlers }}; mission_control: {{ mission_control_serve_handlers }}"
+        quiet: true

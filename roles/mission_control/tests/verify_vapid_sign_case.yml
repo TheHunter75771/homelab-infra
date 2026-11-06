@@ -1,0 +1,21 @@
+---
+# verify_vapid_sign_assert.yml with one canned line: sign_case = {out, want}.
+- name: Verify VAPID signing | outcome for {{ sign_case.out }}
+  block:
+    - name: Verify VAPID signing | verify_vapid_sign_assert.yml for {{ sign_case.out }}
+      ansible.builtin.include_tasks: ../tasks/verify_vapid_sign_assert.yml
+      vars:
+        mission_control_vapid_sign_out: "{{ sign_case.out }}"
+    - name: Passed
+      ansible.builtin.set_fact:
+        test_sign_got: pass
+  rescue:
+    - name: Failed
+      ansible.builtin.set_fact:
+        test_sign_got: "{{ 'fail' if ansible_failed_task.name == 'Verify | pushes can be signed' else 'error: ' ~ ansible_failed_task.name }}"
+
+- name: Verify VAPID signing | expected for {{ sign_case.out }}
+  ansible.builtin.assert:
+    that: test_sign_got == sign_case.want
+    fail_msg: "{{ sign_case.out }}: {{ test_sign_got }}, want {{ sign_case.want }}"
+    quiet: true
