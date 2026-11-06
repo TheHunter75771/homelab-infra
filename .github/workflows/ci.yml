@@ -82,6 +82,24 @@ jobs:
         working-directory: apps/dashboard/server
       - run: npm ci
       - run: npm test
+
+  mission-control-web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/mission-control/web
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Tests (no dependencies, no install step)
+        run: npm test
+      - name: Icons match their generator
+        run: node scripts/make-icons.mjs --check
   opentofu:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -120,6 +138,8 @@ jobs:
           pip install pyyaml jinja2==3.1.6  # jinja2: the dashboard helper's drift test renders the real template
           PIN=$(python3 -c 'import yaml;v=yaml.safe_load(open("inventory/group_vars/all/versions.yml"));print(v["python_packages"]["pywebpush"])')
           pip install "pywebpush==$PIN"
+          AIOHTTP=$(python3 -c 'import yaml;v=yaml.safe_load(open("inventory/group_vars/all/versions.yml"));print(v["python_packages"]["aiohttp"])')
+          pip install "aiohttp==$AIOHTTP"  # Mission Control server (§12.29)
       - name: shellcheck
         run: shellcheck roles/*/files/*.sh roles/*/tests/*.sh terraform/cloudflare/*.sh terraform/cloudflare/tests/*.sh
       - name: backups
@@ -184,6 +204,45 @@ jobs:
         run: python3 -m unittest discover -s apps/skill-library/tests -t apps/skill-library -v
       - name: gpu-gate
         run: python3 -m unittest discover -s apps/gpu-gate/tests -t apps/gpu-gate -v
+      - name: writing-tool
+        run: python3 -m unittest discover -s apps/writing-tool/tests -t apps/writing-tool -v
+      - name: voice-profile
+        run: python3 -m unittest discover -s apps/voice-profile/tests -t apps/voice-profile -v
+      - name: agent-router
+        run: python3 -m unittest discover -s apps/agent-router/tests -t apps/agent-router -v
+      - name: research-tool
+        run: python3 -m unittest discover -s apps/research-tool/tests -t apps/research-tool -v
+      - name: forge-api
+        run: python3 -m unittest discover -s apps/forge-api/tests -t apps/forge-api -v
+      - name: auto-compact
+        run: python3 -m unittest discover -s apps/auto-compact/tests -t apps/auto-compact -v
+      - name: payday-tool
+        run: python3 -m unittest discover -s apps/payday-tool/tests -t apps/payday-tool -v
+      - name: mission-control server
+        run: python3 -m unittest discover -s apps/mission-control/server/tests -t apps/mission-control/server -v
+      - name: mission_control role (offline)
+        run: TMPDIR=/dev/shm ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass roles/mission_control/tests/run.sh
+      - name: ai_control role (offline)
+        run: TMPDIR=/dev/shm ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass roles/ai_control/tests/run.sh
+      - name: ai_backup role (offline)
+        run: TMPDIR=/dev/shm ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass roles/ai_backup/tests/run.sh
+      - name: unit_hardening role (offline; must not run as root)
+        # Not /dev/shm: the role's scanner skips /dev, so its fixtures must live elsewhere (Reviewer Q6-2).
+        run: TMPDIR=${{ runner.temp }} ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass roles/unit_hardening/tests/run.sh
+      - name: forge_api role (offline)
+        run: TMPDIR=/dev/shm ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass roles/forge_api/tests/run.sh
+      - name: voice_profile role (offline)
+        run: TMPDIR=/dev/shm ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass roles/voice_profile/tests/run.sh
+      - name: skills-tool
+        run: python3 -m unittest discover -s apps/skills-tool/tests -t apps/skills-tool -v
+      - name: skill-drafter
+        run: python3 -m unittest discover -s apps/skill-drafter/tests -t apps/skill-drafter -v
+      - name: ai_stack extraction scripts
+        run: python3 -m unittest discover -s roles/ai_stack/tests -p 'test_*.py' -v
+      - name: finance-digest
+        run: python3 -m unittest discover -s apps/finance-digest/tests -t apps/finance-digest -v
+      - name: research-gate
+        run: python3 -m unittest discover -s apps/research-gate/tests -t apps/research-gate -v
       - name: finance-tools (Money Hub read-only Open WebUI tool)
         # pydantic + langchain-core let the two Open WebUI spec tests run instead of skipping
         run: |

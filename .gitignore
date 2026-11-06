@@ -33,3 +33,10 @@ override.tf
 *_override.tf
 override.tf.json
 *_override.tf.json
+
+# Tool caches, and the venv/collections when they're symlinks (the patterns above only match directories)
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+/.venv
+/collections
