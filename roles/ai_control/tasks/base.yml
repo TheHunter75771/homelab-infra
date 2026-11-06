@@ -1,0 +1,50 @@
+---
+- name: Base | python3-aiohttp and nftables from the Ubuntu archive
+  ansible.builtin.apt:
+    name: "{{ ai_control_packages }}"
+    state: present
+    install_recommends: false
+    update_cache: true
+    cache_valid_time: 3600
+  notify: Restart ai-control
+
+# §12.15.1: Python >= 3.11 syntax; aiohttp from the archive (3.13 on 26.04).
+- name: Base | Python and aiohttp versions
+  ansible.builtin.command:
+    argv:
+      - "{{ ai_control_python }}"
+      - -I
+      - -c
+      - "import sys, aiohttp; print(sys.version_info >= (3, 11), aiohttp.__version__)"
+  register: ai_control_py
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Base | Python is 3.11 or newer and aiohttp imports
+  ansible.builtin.assert:
+    that: ai_control_py.rc == 0 and ai_control_py.stdout is match('^True ')
+    fail_msg: "Need Python >= 3.11 with python3-aiohttp: {{ ai_control_py.stdout | default('') }} {{ ai_control_py.stderr | default('') }}"
+    quiet: true
+  # In a check run before the package exists there is nothing to import yet.
+  when: not ansible_check_mode or ai_control_py.rc == 0
+
+# §12.15.1: system account, no login, no home. append: false with no groups makes the supplementary
+# list empty, so a stray docker membership is removed (Docker goes through the helper only).
+- name: Base | aictl group
+  ansible.builtin.group:
+    name: "{{ ai_control_user }}"
+    system: true
+
+- name: Base | aictl system user (no login; no supplementary groups, never docker)
+  ansible.builtin.user:
+    name: "{{ ai_control_user }}"
+    group: "{{ ai_control_user }}"
+    groups: []
+    append: false
+    system: true
+    comment: AI Control dashboard
+    shell: /usr/sbin/nologin
+    home: /nonexistent
+    create_home: false
+  notify: Restart ai-control

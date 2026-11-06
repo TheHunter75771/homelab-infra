@@ -1,0 +1,36 @@
+---
+# One canned case for verify_guard_assert.yml: guard_case = {name, want: pass|fail, and any of list_rc, root, nobody,
+# users, dial6, dial4, dials: one, pid, ns_tailscaled, ns_helper}; anything not given is the healthy answer.
+- name: Verify guard case {{ guard_case.name }}
+  block:
+    - name: Verify guard assert for {{ guard_case.name }}
+      ansible.builtin.include_tasks: ../tasks/verify_guard_assert.yml
+      vars:
+        ai_control_guard_round: "{{ guard_case.name }}"
+        ai_control_guard_list_rc: "{{ guard_case.list_rc | default(0) }}"
+        ai_control_guard_root_out: >-
+          {{ guard_case.root | default('{"serve4": "ECONNREFUSED", "serve6": "ECONNREFUSED", "server": "ok"}') }}
+        ai_control_guard_nobody_out: >-
+          {{ guard_case.nobody | default('{"serve4": "ECONNREFUSED", "serve6": "ECONNRESET", "server": "ECONNREFUSED"}') }}
+        ai_control_guard_users_out: "{{ guard_case.users | default({'mc': '{\"server\": \"ok\"}'}) }}"
+        ai_control_guard_dial_out: >-
+          {{ ([guard_case.dial6 | default('{"dial": 502, "upstream": null, "exposed": false}')]
+              + ([] if guard_case.dials | default('') == 'one'
+                 else [guard_case.dial4 | default('{"dial": 101, "upstream": "reset", "exposed": false}')])) }}
+        ai_control_guard_main_pid: "{{ guard_case.pid | default('4242') }}"
+        ai_control_guard_ns_tailscaled: "{{ guard_case.ns_tailscaled | default(false) }}"
+        ai_control_guard_ns_helper: "{{ guard_case.ns_helper | default(true) }}"
+
+    - name: Passed for {{ guard_case.name }}
+      ansible.builtin.set_fact:
+        ctl_test_guard_result: pass
+  rescue:
+    - name: Failed for {{ guard_case.name }}
+      ansible.builtin.set_fact:
+        ctl_test_guard_result: fail
+
+- name: Verify guard gives the expected result for {{ guard_case.name }}
+  ansible.builtin.assert:
+    that: ctl_test_guard_result == guard_case.want
+    fail_msg: "{{ guard_case.name }}: {{ ctl_test_guard_result }}, expected {{ guard_case.want }}"
+    quiet: true

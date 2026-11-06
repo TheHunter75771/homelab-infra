@@ -1,0 +1,20 @@
+---
+# §12.15.1: aictl-agent is a system account with no login and no home. append: false makes the
+# supplementary list exact (systemd-journal only), so a stray membership is removed.
+- name: User | aictl-agent group
+  ansible.builtin.group:
+    name: "{{ ai_host_agent_user }}"
+    system: true
+
+- name: User | aictl-agent system user (no login; systemd-journal only)
+  ansible.builtin.user:
+    name: "{{ ai_host_agent_user }}"
+    group: "{{ ai_host_agent_user }}"
+    groups: "{{ ai_host_agent_groups }}"
+    append: false
+    system: true
+    comment: AI Control host agent
+    shell: /usr/sbin/nologin
+    home: /nonexistent
+    create_home: false
+  notify: Restart ai-host-agent

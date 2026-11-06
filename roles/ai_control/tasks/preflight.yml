@@ -1,0 +1,325 @@
+---
+# Role inputs, checked before anything is written. The installed apps' own loaders validate the
+# rendered configs again (config.yml, helper.yml).
+- name: Preflight | role inputs
+  ansible.builtin.assert:
+    that:
+      - tailnet_ip | default('') is match('^[0-9]{1,3}([.][0-9]{1,3}){3}$')
+      - gaming_pc_tailnet_ip | default('') is match('^[0-9]{1,3}([.][0-9]{1,3}){3}$')
+      - tailnet_fqdn | default('') | length > 0
+      - ai_control_user is match('^[a-z_][a-z0-9_-]*$')
+      - ai_control_user not in ['root', 'docker']
+      - ai_control_listen_port | int > 0 and ai_control_listen_port | int < 65536
+      - ai_control_agent_port | int > 0 and ai_control_agent_port | int < 65536
+      - ai_control_gate_threshold | int >= 1 and ai_control_gate_threshold | int <= 100
+      - ai_control_gate_window | int > 0
+      - ai_control_helper_sudo_exes is sequence and ai_control_helper_sudo_exes is not string
+      - ai_control_helper_sudo_exes | length > 0
+      - ai_control_helper_sudo_exes | reject('match', '^/[A-Za-z0-9_./-]+$') | list | length == 0
+      - ai_control_helper_max_connections | int >= 1
+      - ai_control_config_extra is mapping
+      - ai_control_helper_config_extra is mapping
+      # Keys the role owns: the unit, the helper socket, the token and the serve backend depend on them.
+      - >-
+        ai_control_config_extra.keys() | intersect(['listen_host', 'listen_port', 'helper_socket',
+        'agent_token_file', 'static_dir', 'gate_samples_path']) | length == 0
+      - ai_control_helper_config_extra.keys() | intersect(['user']) | length == 0
+    fail_msg: >-
+      Check the ai_control inputs: tailnet_ip and gaming_pc_tailnet_ip must be IPv4 literals and
+      tailnet_fqdn set (host_vars); the account must be a plain name (not root or docker); ports
+      1-65535; gate threshold 1-100 and window > 0; helper sudo_exes a non-empty list of absolute paths.
+      The config extras can't set the role-owned keys (listen address and port, helper socket, token
+      file, static dir, samples path; the helper's user).
+    quiet: true
+
+# Other roles' serve handlers on ai-box (§12.29, defaults/main.yml). Each is exactly {port, mount, backend}: an
+# integer port 1-65535 that isn't AI Control's serve port (nothing lands on its origin) and isn't another extra's, a
+# mount like role tailscale_serve takes, and a backend http://127.0.0.1:<port> (loopback, no path) that isn't AI
+# Control's own. Checked in this order so a bad shape refuses here instead of erroring in a later filter. The
+# patterns end in \Z, not $ (a final newline would pass $; Reviewer N, A-1).
+- name: Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports
+  vars:
+    ai_control_extra: "{{ ai_control_serve_extra_handlers }}"
+    ai_control_extra_backend_re: '^http://127[.]0[.]0[.]1:[1-9][0-9]{0,4}\Z'
+    # Segments of [A-Za-z0-9._-]+, none of them `.` or `..` (no traversal), and no empty one (no `//`).
+    ai_control_extra_mount_re: '^(/|(/(?![.][.]?(/|\Z))[A-Za-z0-9._-]+)+)\Z'
+  ansible.builtin.assert:
+    that:
+      - ai_control_extra is sequence and ai_control_extra is not string and ai_control_extra is not mapping
+      - ai_control_extra | reject('mapping') | list | length == 0
+      - ai_control_extra | map('list') | flatten | difference(['port', 'mount', 'backend']) | length == 0
+      - ai_control_extra | rejectattr('port', 'defined') | list | length == 0
+      - ai_control_extra | rejectattr('mount', 'defined') | list | length == 0
+      - ai_control_extra | rejectattr('backend', 'defined') | list | length == 0
+      - ai_control_extra | map(attribute='port') | reject('integer') | list | length == 0
+      - ai_control_extra | map(attribute='port') | select('lt', 1) | list | length == 0
+      - ai_control_extra | map(attribute='port') | select('gt', 65535) | list | length == 0
+      - ai_control_serve_port | int not in (ai_control_extra | map(attribute='port') | list)
+      - ai_control_extra | map(attribute='port') | unique | length == ai_control_extra | length
+      - ai_control_extra | map(attribute='mount') | reject('string') | list | length == 0
+      - ai_control_extra | map(attribute='mount') | reject('match', ai_control_extra_mount_re) | list | length == 0
+      - ai_control_extra | map(attribute='backend') | reject('string') | list | length == 0
+      - ai_control_extra | map(attribute='backend') | reject('match', ai_control_extra_backend_re) | list | length == 0
+      - >-
+        ai_control_extra | map(attribute='backend') | map('regex_replace', '^http://127[.]0[.]0[.]1:', '')
+        | map('int') | select('gt', 65535) | list | length == 0
+      - >-
+        ai_control_listen_port | int not in (ai_control_extra | map(attribute='backend')
+        | map('regex_replace', '^http://127[.]0[.]0[.]1:', '') | map('int') | list)
+    fail_msg: >-
+      ai_control_serve_extra_handlers (host_vars) must be a list of {port, mount, backend} and nothing else, e.g.
+      [{port: 8443, mount: /, backend: "http://127.0.0.1:8097"}] for Mission Control: integer ports 1-65535, none of
+      them {{ ai_control_serve_port }} (AI Control's origin) and no port twice; a mount `/` or `/name[/...]` (no `.` or `..` segment, no `//`); a backend
+      http://127.0.0.1:<port> with no path, not AI Control's own {{ ai_control_serve_backend }}.
+      It is {{ ai_control_serve_extra_handlers | to_json }}.
+    quiet: true
+
+# The local-access guard (Reviewer Q). Its allowed users: plain account names, no repeats, and root among them
+# (tailscaled runs as root and proxies serve to S; without root AI Control is unreachable). Whether each exists is
+# checked at converge (guard.yml): a missing one is skipped with a warning, never opened.
+- name: Preflight | the guard's allowed users are account names and include root
+  ansible.builtin.assert:
+    that:
+      - ai_control_guard_allow_users is sequence
+      - ai_control_guard_allow_users is not string and ai_control_guard_allow_users is not mapping
+      - ai_control_guard_allow_users | reject('string') | list | length == 0
+      - ai_control_guard_allow_users | reject('match', '^[a-z_][a-z0-9_-]{0,31}\Z') | list | length == 0
+      - ai_control_guard_allow_users | unique | length == ai_control_guard_allow_users | length
+      - "'root' in ai_control_guard_allow_users"
+    fail_msg: >-
+      ai_control_guard_allow_users must be a list of account names (no repeats) that includes root, e.g. [root, mc]
+      (host_vars/ai-box.yml). It is {{ ai_control_guard_allow_users | to_json }}.
+    quiet: true
+
+# The guard covers serve's 443 on ai-box's tailnet IPv6 too: from inventory (tailnet_ip6) or, read-only, from tailscale.
+- name: Preflight | ai-box's tailnet IPv6, from tailscale (when the inventory doesn't set it)
+  ansible.builtin.command:
+    argv: [tailscale, ip, "-6"]
+  register: ai_control_ip6_read
+  changed_when: false
+  check_mode: false
+  when: ai_control_tailnet_ip6 | length == 0
+
+- name: Preflight | the guard's IPv6 address
+  ansible.builtin.set_fact:
+    ai_control_guard_ip6: >-
+      {{ ai_control_tailnet_ip6 if ai_control_tailnet_ip6 | length > 0
+         else (ai_control_ip6_read.stdout | default('') | trim) }}
+
+- name: Preflight | the tailscale interface exists (read-only)
+  ansible.builtin.command:
+    argv: "{{ ai_control_iface_check_argv }}"
+  register: ai_control_iface_check
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# Tailscale's ranges: IPv4 100.64.0.0/10 (CGNAT), IPv6 fd7a:115c:a1e0::/48. One address each, lowercase, no prefix
+# length; `nft -c` checks the literal again when the rules file is written. Patterns end in \Z (Reviewer N, A-1).
+- name: Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface
+  vars:
+    ai_control_ip4_parts: "{{ tailnet_ip | default('') | string | split('.') }}"
+  ansible.builtin.assert:
+    that:
+      - ai_control_tailscale_iface is match('^[A-Za-z0-9_.-]{1,15}\Z')
+      - ai_control_iface_check.rc == 0
+      - tailnet_ip | default('') is match('^100[.][0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}\Z')
+      - ai_control_ip4_parts[1] | int >= 64 and ai_control_ip4_parts[1] | int <= 127
+      - ai_control_ip4_parts[2] | int <= 255 and ai_control_ip4_parts[3] | int <= 255
+      - ai_control_guard_ip6 is match('^fd7a:115c:a1e0:[0-9a-f:]*[0-9a-f]\Z')
+      - ai_control_guard_ip6 is not search(':::')
+      - ai_control_guard_ip6 | regex_findall('::') | length <= 1
+      - ai_control_guard_ip6.split(':') | select('match', '^[0-9a-f]{5,}') | list | length == 0
+    fail_msg: >-
+      The guard needs ai-box's tailnet IPv4 (tailnet_ip, {{ tailnet_ip | default('') }}) inside 100.64.0.0/10, its IPv6
+      (tailnet_ip6 or `tailscale ip -6`: '{{ ai_control_guard_ip6 }}') inside fd7a:115c:a1e0::/48, and the interface serve
+      traffic arrives on (ai_control_tailscale_iface: '{{ ai_control_tailscale_iface }}') to exist (`ip link show`: rc
+      {{ ai_control_iface_check.rc }}).
+    quiet: true
+
+# Values owned by other roles, read (never copied): role docker's container range for the IP
+# allowlist, and role ai_host_agent's default port.
+- name: Preflight | role docker's defaults (container address range)
+  ansible.builtin.include_vars:
+    file: "{{ ai_control_docker_defaults_file }}"
+    name: ai_control_docker_role_defaults
+
+- name: Preflight | role ai_host_agent's defaults (agent port)
+  ansible.builtin.include_vars:
+    file: "{{ ai_control_agent_defaults_file }}"
+    name: ai_control_agent_role_defaults
+
+- name: Preflight | the IP allowlist has Docker's container range (the broker and Open WebUI are DNATed into it)
+  ansible.builtin.assert:
+    that:
+      - ai_control_docker_pools | length == 1
+      - ai_control_docker_pools[0] is match('^[0-9]{1,3}([.][0-9]{1,3}){3}/[0-9]{1,2}$')
+    fail_msg: >-
+      Can't find docker_address_pools_container (inventory or roles/docker/defaults/main.yml); without it
+      ai-control.service's IPAddressAllow would drop its connections to the broker and Open WebUI.
+    quiet: true
+  when: ai_control_ip_allowlist | bool
+
+# §12.23, R12-5: when set, ai_control_container_allow replaces the container range in IPAddressAllow.
+# Host addresses only: a /32 or a bare address (systemd reads that as /32), nothing wider, no 0.0.0.0,
+# no names. Each must sit inside Docker's container range (it's there for the DNATed broker and Open
+# WebUI, not to open another host), and none may be ollama-cpu's pinned address (what R12-5 shuts).
+# The pattern ends in \Z, not $: `match` lets $ match before a final newline, which would split the
+# IPAddressAllow line (Reviewer N, A-1).
+- name: Preflight | the container allow list is IPv4 host addresses
+  vars:
+    ai_control_octet_re: '(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])'
+    ai_control_host_re: '^({{ ai_control_octet_re }}[.]){3}{{ ai_control_octet_re }}(/32)?\Z'
+  ansible.builtin.assert:
+    that:
+      - ai_control_container_allow is sequence
+      - ai_control_container_allow is not string
+      - ai_control_container_allow is not mapping
+      - ai_control_container_allow | length > 0
+      - ai_control_container_allow | reject('string') | list | length == 0
+      - ai_control_container_allow | reject('match', ai_control_host_re) | list | length == 0
+      - ai_control_container_allow | map('regex_replace', '/32$', '') | select('equalto', '0.0.0.0') | list | length == 0
+      - ai_control_docker_pools | length == 1
+      - ai_control_docker_pools[0] is match('^[0-9]{1,3}([.][0-9]{1,3}){3}/[0-9]{1,2}$')
+    fail_msg: >-
+      ai_control_container_allow must be a non-empty list of IPv4 host addresses (a.b.c.d or a.b.c.d/32, not
+      0.0.0.0, nothing wider than /32), e.g. ["{{ '{{' }} ai_stack_broker_ip {{ '}}' }}/32", "{{ '{{' }} ai_stack_webui_ip {{ '}}' }}/32"].
+      Leave it unset (null) to allow Docker's whole container range. It is {{ ai_control_container_allow }}.
+    quiet: true
+  when: ai_control_container_allow is not none
+
+- name: Preflight | each container allow entry is inside Docker's container range
+  vars:
+    ai_control_pool_parts: "{{ ai_control_docker_pools[0].split('/') }}"
+    ai_control_pool_block: "{{ 2 ** (32 - ai_control_pool_parts[1] | int) }}"
+    ai_control_pool_o: "{{ ai_control_pool_parts[0].split('.') | map('int') | list }}"
+    ai_control_entry_o: "{{ (item | regex_replace('/32$', '')).split('.') | map('int') | list }}"
+  ansible.builtin.assert:
+    that:
+      - ai_control_pool_parts[1] | int <= 32
+      - >-
+        ((ai_control_entry_o[0] * 16777216 + ai_control_entry_o[1] * 65536 + ai_control_entry_o[2] * 256
+          + ai_control_entry_o[3]) // (ai_control_pool_block | int))
+        == ((ai_control_pool_o[0] * 16777216 + ai_control_pool_o[1] * 65536 + ai_control_pool_o[2] * 256
+             + ai_control_pool_o[3]) // (ai_control_pool_block | int))
+    fail_msg: >-
+      ai_control_container_allow entry {{ item }} is outside Docker's container range {{ ai_control_docker_pools[0] }}
+      (docker_address_pools_container). It is for the broker's and Open WebUI's container addresses only.
+    quiet: true
+  # Unset: no entries (a loop can't take null, and `when` is checked per item).
+  loop: "{{ [] if ai_control_container_allow is none else ai_control_container_allow }}"
+
+- name: Preflight | the container allow list leaves out ollama-cpu
+  vars:
+    ai_control_ollama_cpu: "{{ ai_stack_ollama_cpu_ip | default('') | string | regex_replace('/32$', '') }}"
+  ansible.builtin.assert:
+    that:
+      - >-
+        ai_control_container_allow | map('regex_replace', '/32$', '')
+        | select('equalto', ai_control_ollama_cpu) | list | length == 0
+    fail_msg: >-
+      ai_control_container_allow lists ollama-cpu's address ({{ ai_control_ollama_cpu }}, ai_stack_ollama_cpu_ip): S must reach
+      CPU Ollama only through the broker (§12.23, R12-5). Allow the broker's and Open WebUI's addresses only.
+    quiet: true
+  when:
+    - ai_control_container_allow is not none
+    - ai_stack_ollama_cpu_ip is defined
+
+# The token from play 1 (hostvars[<pc>].ai_host_agent_token | default('')). no_log on every task that
+# sees it, so a failure never prints the value. No token (play 1 skipped, failed or unreachable, or
+# --limit ai-box): the token file already on ai-box is kept, and it must exist. In check mode before
+# any real run there may be neither.
+- name: Preflight | was a token passed in (a boolean the later tasks use, never the value)
+  ansible.builtin.set_fact:
+    ai_control_token_given: "{{ ai_control_agent_token | default('') | length > 0 }}"
+  no_log: true
+
+- name: Preflight | the agent token file already on ai-box
+  ansible.builtin.stat:
+    path: "{{ ai_control_token_file }}"
+    follow: false
+    get_checksum: false
+  register: ai_control_token_stat
+
+- name: Preflight | a well-formed token was passed in, or ai-box keeps the one it has
+  ansible.builtin.assert:
+    that:
+      - ai_control_agent_token | default('') is string
+      - >-
+        ai_control_agent_token | default('') is match('^[A-Za-z0-9._~+/=-]{32,}$')
+        or (ai_control_agent_token | default('') == ''
+            and (ai_control_token_stat.stat.isreg | default(false) or ansible_check_mode))
+    fail_msg: >-
+      No usable agent token: play 1 of playbooks/ai-control.yml exports it from the gaming PC (role
+      ai_host_agent, tasks_from export_token), and {{ ai_control_token_file }} doesn't exist yet to fall back on.
+      Run both plays once with the gaming PC on. The token is never set in inventory.
+    quiet: true
+  no_log: true
+
+- name: Preflight | note that the existing agent token is kept
+  ansible.builtin.debug:
+    msg: >-
+      No agent token was exported this run (play 1 skipped, failed or unreachable): {{ ai_control_token_file }}
+      is kept as it is, and the host agent isn't required to be ok in the checks.
+  when: not ai_control_token_given | bool
+
+# The agent's port, three ways that must agree (Lead, 2026-10-26): what S calls, what the agent
+# serves (exported by play 1, else the gaming PC's inventory, else role ai_host_agent's default) and
+# module G's firewalld list (the gaming PC's inventory group, seen through hostvars).
+- name: Preflight | the agent port matches the agent and module G's firewalld policy list
+  vars:
+    ai_control_pc: "{{ groups['workstations_root'] | default([]) | first | default('') }}"
+    ai_control_pc_vars: "{{ hostvars[ai_control_pc] | default({}) if ai_control_pc | length > 0 else {} }}"
+    ai_control_agent_serves: >-
+      {{ ai_control_pc_vars.ai_host_agent_exported_port
+         | default(ai_control_pc_vars.ai_host_agent_port | default(ai_control_agent_role_defaults.ai_host_agent_port)) }}
+  ansible.builtin.assert:
+    that:
+      - ai_control_pc | length > 0
+      - ai_control_agent_port | int == ai_control_agent_serves | int
+      - ai_control_agent_port | int in (ai_control_pc_vars.ollama_rocm_policy_extra_ports | default([]) | map('int') | list)
+    fail_msg: >-
+      S calls the agent on port {{ ai_control_agent_port }}; the agent serves {{ ai_control_agent_serves }}; module G's
+      list (ollama_rocm_policy_extra_ports of the workstations_root host) is
+      {{ ai_control_pc_vars.ollama_rocm_policy_extra_ports | default('undefined') }}. All three must agree.
+    quiet: true
+
+# Lead, after Reviewer A round 2: _EXE can be faked through an unprivileged user namespace, so the
+# sudo audit relies on Ubuntu's AppArmor restriction of unprivileged user namespaces. Read-only.
+- name: Preflight | read kernel.apparmor_restrict_unprivileged_userns
+  ansible.builtin.slurp:
+    src: "{{ ai_control_userns_sysctl }}"
+  register: ai_control_userns
+  failed_when: false
+
+- name: Preflight | unprivileged user namespaces are restricted (sudo audit rows can't be forged)
+  ansible.builtin.assert:
+    that:
+      - ai_control_userns.content is defined
+      - (ai_control_userns.content | b64decode | trim) == '1'
+    fail_msg: >-
+      kernel.apparmor_restrict_unprivileged_userns must be 1 on ai-box (it is
+      {{ (ai_control_userns.content | b64decode | trim) if ai_control_userns.content is defined else 'missing' }}).
+      Without it a local user can forge _EXE in the journal (CONTRACTS §12.15.6, Lead after Reviewer A round 2).
+    quiet: true
+
+- name: Preflight | the app sources exist on the controller (modules S, W, X)
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ ai_control_server_src }}/__main__.py"
+    - "{{ ai_control_server_src }}/config.py"
+    - "{{ ai_control_web_src }}/index.html"
+    - "{{ ai_control_web_src }}/sw.js"
+    - "{{ ai_control_helper_src }}"
+  register: ai_control_src_stat
+  delegate_to: localhost
+  become: false
+
+- name: Preflight | require the app sources
+  ansible.builtin.assert:
+    that: ai_control_src_stat.results | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      Missing on the controller:
+      {{ ai_control_src_stat.results | rejectattr('stat.exists') | map(attribute='item') | join(', ') }}
+    quiet: true

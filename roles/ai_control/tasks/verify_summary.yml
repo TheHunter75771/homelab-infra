@@ -1,0 +1,52 @@
+---
+# End to end through S, under the hardened unit (IP allowlist included):
+#   helper  the real peer check;
+#   broker, webui  Docker-published on tailnet_ip and DNATed to the container range, which the
+#           allowlist must carry (Reviewer D);
+#   agent   the token from play 1 through the gaming PC's firewall policy. Required ok only when play 1
+#           exported a token this run. Without one (PC off), a down agent is fine, EXCEPT when S says
+#           the agent refused the token or the token file is bad: then ai-box's kept token is stale or
+#           broken, and the run must not go green (Reviewer D round 2). S reports that only as text
+#           ("agent rejected the token (401)", "agent token file ..."; apps/ai-control/server
+#           clients.py), so the check matches the detail.
+# tests/test_ai_control.yml runs this file against a fake /api/summary.
+- name: Verify | /api/summary
+  ansible.builtin.uri:
+    url: http://127.0.0.1:{{ ai_control_listen_port }}/api/summary
+    status_code: 200
+    timeout: 15
+  register: ai_control_summary
+  until: >-
+    ai_control_summary.status | default(-1) == 200
+    and (ai_control_summary.json.services | default([])
+         | selectattr('id', 'in', ai_control_verify_services) | selectattr('status', 'equalto', 'ok')
+         | list | length) == ai_control_verify_services | length
+  retries: "{{ ai_control_verify_retries }}"
+  delay: "{{ ai_control_verify_delay }}"
+  failed_when: false
+  vars:
+    ai_control_verify_services: "{{ ['helper', 'broker', 'webui'] + (['agent'] if ai_control_verify_agent | bool else []) }}"
+
+- name: Verify | the summary shows the helper, broker, Open WebUI (and the host agent) ok; the agent never refuses the token
+  vars:
+    ai_control_verify_services: "{{ ['helper', 'broker', 'webui'] + (['agent'] if ai_control_verify_agent | bool else []) }}"
+    services: "{{ ai_control_summary.json.services | default([]) }}"
+    status_of: "{{ dict(services | map(attribute='id') | zip(services | map(attribute='status'))) }}"
+    detail_of: "{{ dict(services | map(attribute='id') | zip(services | map(attribute='detail'))) }}"
+    ok_ids: "{{ services | selectattr('status', 'equalto', 'ok') | map(attribute='id') | list }}"
+  ansible.builtin.assert:
+    that:
+      - ai_control_summary.status | default(-1) == 200
+      - ai_control_verify_services | reject('in', ok_ids) | list == []
+      - "'agent' in status_of"
+      - status_of.agent == 'ok' or not ((detail_of.agent | default('') | string) is search('(?i)token|\\b401\\b'))
+    fail_msg: >-
+      /api/summary {{ ai_control_summary.status | default('no answer') }}; required ok: {{ ai_control_verify_services | join(', ') }};
+      services: {{ services | map(attribute='id') | zip(services | map(attribute='status'), services | map(attribute='detail'))
+         | list | to_json }}.
+      broker/webui down while `curl http://<tailnet_ip>:11434/` works from a shell: the unit's IPAddressAllow misses the
+      Docker container range, or ai_control_container_allow is set but doesn't hold the broker's or Open WebUI's
+      current container address (README, "Container allow list"). An agent "401" or token-file error means ai-box's token differs from the gaming PC's
+      or is unreadable: run both plays with the PC on. A timeout means 11510 isn't open to ai-box (module G's policy,
+      ollama_rocm_policy_extra_ports).
+    quiet: true

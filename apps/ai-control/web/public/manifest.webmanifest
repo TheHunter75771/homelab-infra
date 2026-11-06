@@ -1,0 +1,16 @@
+{
+  "id": "/",
+  "name": "AI Control",
+  "short_name": "AI Control",
+  "description": "Status of the local AI: where answers go, models, audit and logs.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#161826",
+  "theme_color": "#161826",
+  "icons": [
+    { "src": "/icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

@@ -1,0 +1,33 @@
+---
+# Role ai_control (docs/CONTRACTS.md §12.15.7). Play 2 of playbooks/ai-control.yml (hosts: ai_servers),
+# after play 1 exported the host agent's token (passed in as ai_control_agent_token).
+# Order: inputs, package, account, code, config + token, helper, the local-access guard, server unit + start,
+# tailscale serve, read-only checks.
+
+- name: Preflight checks
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Package and account
+  ansible.builtin.import_tasks: base.yml
+
+- name: Code (server S, web W, helper X)
+  ansible.builtin.import_tasks: install.yml
+
+- name: Config, agent token and state directory
+  ansible.builtin.import_tasks: config.yml
+
+- name: Root helper units
+  ansible.builtin.import_tasks: helper.yml
+
+- name: Local-access guard (nftables; nothing on ai-box reaches serve's 443, only the listed users reach S)
+  ansible.builtin.import_tasks: guard.yml
+
+- name: Server unit and start
+  ansible.builtin.import_tasks: service.yml
+
+- name: Publish on the tailnet (tailscale serve 443)
+  ansible.builtin.import_tasks: serve.yml
+
+- name: Read-only checks after start
+  ansible.builtin.include_tasks: verify.yml
+  when: not ansible_check_mode

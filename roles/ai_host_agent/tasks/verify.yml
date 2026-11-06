@@ -1,0 +1,195 @@
+---
+# Read-only checks after start (skipped in check mode). Nothing here changes the host. The token is
+# read with slurp and sent only in no_log tasks; every assert below looks at status codes and
+# shapes only, never at a response body or the token.
+- name: Verify | the unit is active
+  ansible.builtin.command:
+    argv: [systemctl, is-active, "{{ ai_host_agent_unit_name }}"]
+  register: ai_host_agent_active
+  changed_when: false
+  failed_when: ai_host_agent_active.stdout | trim != 'active'
+
+- name: Verify | read the token for the checks
+  ansible.builtin.slurp:
+    src: "{{ ai_host_agent_token_file }}"
+  register: ai_host_agent_verify_slurp
+  no_log: true
+
+- name: Verify | bearer header for the checks
+  ansible.builtin.set_fact:
+    ai_host_agent_verify_auth: "Bearer {{ ai_host_agent_verify_slurp.content | b64decode | trim }}"
+  no_log: true
+
+- name: Verify | /healthz with the token on 127.0.0.1 (waits for the start)
+  ansible.builtin.uri:
+    url: http://127.0.0.1:{{ ai_host_agent_port }}/healthz
+    headers:
+      Authorization: "{{ ai_host_agent_verify_auth }}"
+    status_code: 200
+    timeout: 5
+  register: ai_host_agent_health_ok
+  until: ai_host_agent_health_ok.status | default(-1) == 200
+  retries: "{{ ai_host_agent_verify_retries }}"
+  delay: "{{ ai_host_agent_verify_delay }}"
+  failed_when: false
+  no_log: true
+
+- name: Verify | /healthz with the token on the tailnet bind
+  ansible.builtin.uri:
+    url: http://{{ gaming_pc_tailnet_ip }}:{{ ai_host_agent_port }}/healthz
+    headers:
+      Authorization: "{{ ai_host_agent_verify_auth }}"
+    status_code: 200
+    timeout: 5
+  register: ai_host_agent_health_tailnet
+  failed_when: false
+  no_log: true
+
+- name: Verify | /healthz without a token
+  ansible.builtin.uri:
+    url: http://127.0.0.1:{{ ai_host_agent_port }}/healthz
+    status_code: 401
+    timeout: 5
+  register: ai_host_agent_health_none
+  failed_when: false
+
+- name: Verify | /healthz with a wrong token
+  ansible.builtin.uri:
+    url: http://127.0.0.1:{{ ai_host_agent_port }}/healthz
+    headers:
+      Authorization: "Bearer {{ '0' * 64 }}"
+    status_code: 401
+    timeout: 5
+  register: ai_host_agent_health_wrong
+  failed_when: false
+
+- name: Verify | the agent answers only with the token
+  ansible.builtin.assert:
+    that:
+      - ai_host_agent_health_ok.status | default(-1) == 200
+      - ai_host_agent_health_tailnet.status | default(-1) == 200
+      - ai_host_agent_health_none.status | default(-1) == 401
+      - ai_host_agent_health_wrong.status | default(-1) == 401
+    fail_msg: >-
+      /healthz: with token {{ ai_host_agent_health_ok.status | default('no answer') }} (want 200), on the tailnet
+      bind {{ ai_host_agent_health_tailnet.status | default('no answer') }} (want 200), no token
+      {{ ai_host_agent_health_none.status | default('no answer') }} (want 401), wrong token
+      {{ ai_host_agent_health_wrong.status | default('no answer') }} (want 401).
+      See `journalctl -u {{ ai_host_agent_unit_name }}`.
+    quiet: true
+
+# Y's README: systemctl show and journalctl must work UNDER the unit (syscall filter,
+# ProtectProc=invisible, the systemd-journal group). A failing systemctl gives the entry an
+# "error" key; journalctl without the group returns no lines.
+- name: Verify | /v1/services under the unit
+  ansible.builtin.uri:
+    url: http://127.0.0.1:{{ ai_host_agent_port }}/v1/services
+    headers:
+      Authorization: "{{ ai_host_agent_verify_auth }}"
+    timeout: 15
+  register: ai_host_agent_services
+  failed_when: false
+  no_log: true
+
+- name: Verify | /v1/logs?unit=ollama under the unit
+  ansible.builtin.uri:
+    url: http://127.0.0.1:{{ ai_host_agent_port }}/v1/logs?unit=ollama&lines=1
+    headers:
+      Authorization: "{{ ai_host_agent_verify_auth }}"
+    timeout: 15
+  register: ai_host_agent_logs
+  failed_when: false
+  no_log: true
+
+# Ollama listens on the tailnet address only: the agent must reach it there (ollama_url), through
+# the unit's IP allowlist (which carries this PC's own tailnet address).
+- name: Verify | /v1/ollama under the unit
+  ansible.builtin.uri:
+    url: http://127.0.0.1:{{ ai_host_agent_port }}/v1/ollama
+    headers:
+      Authorization: "{{ ai_host_agent_verify_auth }}"
+    timeout: 15
+  register: ai_host_agent_ollama
+  failed_when: false
+  no_log: true
+
+- name: Verify | systemctl show and journalctl work under the hardened unit
+  ansible.builtin.assert:
+    that:
+      - ai_host_agent_services.status | default(-1) == 200
+      - ai_host_agent_services.json.services | default([]) | length == 2
+      - ai_host_agent_services.json.services | selectattr('error', 'defined') | list | length == 0
+      - ai_host_agent_logs.status | default(-1) == 200
+      - ai_host_agent_logs.json.lines | default([]) | length >= 1
+      # A list, not {"error": ...}: Ollama answered the agent at ollama_url.
+      - ai_host_agent_ollama.status | default(-1) == 200
+      - ai_host_agent_ollama.json.models is defined
+      - ai_host_agent_ollama.json.models is sequence and ai_host_agent_ollama.json.models is not mapping
+    # Only the failing units' fixed error strings, never log text.
+    fail_msg: >-
+      /v1/services {{ ai_host_agent_services.status | default('no answer') }}, errors:
+      {{ ai_host_agent_services.json.services | default([]) | selectattr('error', 'defined')
+         | map(attribute='error') | list | to_json }};
+      /v1/logs {{ ai_host_agent_logs.status | default('no answer') }} with
+      {{ ai_host_agent_logs.json.lines | default([]) | length }} line(s); /v1/ollama
+      {{ ai_host_agent_ollama.status | default('no answer') }}, models
+      {{ (ai_host_agent_ollama.json.models.error | default('a list')) if ai_host_agent_ollama.json.models is mapping
+         else 'a list' }} (ollama_url {{ ai_host_agent_ollama_url }}).
+      If systemctl failed, set ai_host_agent_protect_proc: default (README, host checks); if journalctl
+      returned nothing, check the systemd-journal group.
+    quiet: true
+
+# Lead correction (§12.15.6): the _EXE match must see real sudo rows. This play's own become
+# just wrote some for the operator account, so at least one must come back.
+- name: Verify | /v1/sudo sees this play's own sudo rows
+  ansible.builtin.uri:
+    url: http://127.0.0.1:{{ ai_host_agent_port }}/v1/sudo?user={{ ai_host_agent_verify_sudo_user }}&limit=1
+    headers:
+      Authorization: "{{ ai_host_agent_verify_auth }}"
+    timeout: 15
+  register: ai_host_agent_sudo
+  failed_when: false
+  no_log: true
+  when: ai_host_agent_verify_sudo_user in ['claude', 'localai']
+
+- name: Verify | the _EXE match returns real sudo rows
+  ansible.builtin.assert:
+    that:
+      - ai_host_agent_sudo.status | default(-1) == 200
+      - ai_host_agent_sudo.json.entries | default([]) | length == 1
+    fail_msg: >-
+      /v1/sudo?user={{ ai_host_agent_verify_sudo_user }} gave {{ ai_host_agent_sudo.status | default('no answer') }} with
+      {{ ai_host_agent_sudo.json.entries | default([]) | length }} row(s); this play's sudo calls should be there.
+      Check sudo_exes ({{ ai_host_agent_sudo_exes | join(', ') }}) against `journalctl -o verbose SYSLOG_IDENTIFIER=sudo -n 1`.
+    quiet: true
+  when: ai_host_agent_sudo is not skipped
+
+- name: Verify | the bearer header is dropped
+  ansible.builtin.set_fact:
+    ai_host_agent_verify_auth: ""
+    ai_host_agent_verify_slurp: {}
+  no_log: true
+
+- name: Verify | SELinux domain and AVCs
+  when: ai_host_agent_selinux.rc | default(1) == 0
+  block:
+    - name: Verify | the agent's main PID
+      ansible.builtin.command:
+        argv: [systemctl, show, --property=MainPID, --value, "{{ ai_host_agent_unit_name }}"]
+      register: ai_host_agent_pid
+      changed_when: false
+
+    - name: Verify | the agent's SELinux label
+      ansible.builtin.command:
+        argv: [ps, -o, label=, -p, "{{ ai_host_agent_pid.stdout | trim }}"]
+      register: ai_host_agent_label
+      changed_when: false
+
+    - name: Verify | the agent runs as unconfined_service_t
+      ansible.builtin.assert:
+        that: "':unconfined_service_t:' in ai_host_agent_label.stdout"
+        fail_msg: "ai-host-agent runs as {{ ai_host_agent_label.stdout | trim }}, expected unconfined_service_t."
+        quiet: true
+
+    - name: Verify | no recent AVC denial for the agent's uid
+      ansible.builtin.include_tasks: verify_avc.yml

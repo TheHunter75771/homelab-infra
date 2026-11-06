@@ -1,0 +1,29 @@
+---
+# Role ai_host_agent (docs/CONTRACTS.md §12.15.3, §12.15.7). Play 1 of playbooks/ai-control.yml
+# (hosts: workstations_root); the playbook then includes tasks_from: export_token for play 2.
+# Order: inputs, account, code, config, token, labels, unit + start, read-only checks.
+
+- name: Preflight checks
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Service account
+  ansible.builtin.import_tasks: user.yml
+
+- name: Code
+  ansible.builtin.import_tasks: install.yml
+
+- name: Config
+  ansible.builtin.import_tasks: config.yml
+
+- name: Bearer token (generated once, on the host)
+  ansible.builtin.import_tasks: token.yml
+
+- name: SELinux labels
+  ansible.builtin.import_tasks: selinux.yml
+
+- name: Unit and start
+  ansible.builtin.import_tasks: service.yml
+
+- name: Read-only checks after start
+  ansible.builtin.include_tasks: verify.yml
+  when: not ansible_check_mode

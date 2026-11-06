@@ -1,0 +1,10 @@
+---
+# Order matters: handlers run in this order, so the unit is reloaded before the restart.
+- name: Reload systemd for ai-host-agent
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Restart ai-host-agent
+  ansible.builtin.systemd_service:
+    name: "{{ ai_host_agent_unit_name }}"
+    state: restarted

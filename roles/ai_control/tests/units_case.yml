@@ -1,0 +1,105 @@
+---
+# Render the three units for one allowlist setting and verify them together (the socket finds its
+# Accept=yes template next to it). Any warning fails. units_tag names the scratch dir (default: the
+# allowlist setting); units_allow is the exact IPAddressAllow value expected when the allowlist is on.
+- name: Unit dir for allowlist={{ allowlist }}
+  ansible.builtin.file:
+    path: "{{ test_tmp }}/units-{{ units_tag | default(allowlist) }}"
+    state: directory
+    mode: "0755"
+
+- name: Render the units (allowlist={{ allowlist }})
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ test_tmp }}/units-{{ units_tag | default(allowlist) }}/{{ item }}"
+    mode: "0644"
+  loop:
+    - ai-control.service
+    - aictl-helper.socket
+    - aictl-helper@.service
+    - ai-control-guard.service
+  vars:
+    ai_control_ip_allowlist: "{{ allowlist }}"
+
+- name: Systemd-analyze verify (allowlist={{ allowlist }})
+  ansible.builtin.command:
+    argv:
+      - systemd-analyze
+      - verify
+      - "{{ test_tmp }}/units-{{ units_tag | default(allowlist) }}/ai-control.service"
+      - "{{ test_tmp }}/units-{{ units_tag | default(allowlist) }}/aictl-helper.socket"
+      - "{{ test_tmp }}/units-{{ units_tag | default(allowlist) }}/ai-control-guard.service"
+  register: ctl_test_verify
+  changed_when: false
+  failed_when: ctl_test_verify.rc != 0 or ctl_test_verify.stderr | length > 0
+
+- name: Read the rendered units (allowlist={{ allowlist }})
+  ansible.builtin.slurp:
+    src: "{{ test_tmp }}/units-{{ units_tag | default(allowlist) }}/{{ item }}"
+  loop:
+    - ai-control.service
+    - aictl-helper.socket
+    - aictl-helper@.service
+    - ai-control-guard.service
+  register: ctl_test_units
+
+- name: The units carry the contract's settings (allowlist={{ allowlist }})
+  vars:
+    server: "{{ ctl_test_units.results[0].content | b64decode }}"
+    socket: "{{ ctl_test_units.results[1].content | b64decode }}"
+    helper: "{{ ctl_test_units.results[2].content | b64decode }}"
+    guard: "{{ ctl_test_units.results[3].content | b64decode }}"
+  ansible.builtin.assert:
+    that:
+      # S: aictl, no capabilities, writes only its state dir, the three address families.
+      - server is search('(?m)^User=aictl$')
+      - server is not search('(?m)^SupplementaryGroups=')
+      - server is search('(?m)^ExecStart=/usr/bin/python3 -E -s -B -m ai_control --config /etc/ai-control/config.json$')
+      - server is search('(?m)^WorkingDirectory=/opt/ai-control/server$')
+      - server is search('(?m)^ReadWritePaths=/var/lib/ai-control$')
+      - server is search('(?m)^RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6$')
+      - server is search('(?m)^CapabilityBoundingSet=$')
+      - server is search('(?m)^NoNewPrivileges=yes$') and server is search('(?m)^ProtectSystem=strict$')
+      - server is search('(?m)^ProtectHome=yes$') and server is search('(?m)^PrivateTmp=yes$')
+      # Unset: Docker's container range is in (the broker and Open WebUI are DNATed into it, Reviewer D).
+      # Set (§12.23, R12-5): exactly the container allow list instead. One line, only with the allowlist on.
+      - >-
+        (server is search('(?m)^IPAddressAllow=' ~ (units_allow | default('localhost 100.64.0.10 100.64.0.20 172.16.0.0/12')
+        | regex_escape) ~ '$')) == (allowlist | bool)
+      - server | regex_findall('(?m)^IPAddressAllow=') | length == (1 if allowlist | bool else 0)
+      - (server is search('(?m)^IPAddressDeny=any$')) == (allowlist | bool)
+      # X: the socket's contract settings.
+      - socket is search('(?m)^ListenStream=/run/aictl-helper.sock$')
+      - socket is search('(?m)^SocketUser=root$') and socket is search('(?m)^SocketGroup=aictl$')
+      - socket is search('(?m)^SocketMode=0660$') and socket is search('(?m)^Accept=yes$')
+      - socket is search('(?m)^MaxConnections=16$')
+      # X's service: root, the script under -I, journald identifier, 30 s, the README's hardening.
+      - helper is search('(?m)^ExecStart=/usr/bin/python3 -I /usr/local/sbin/aictl-helper$')
+      - helper is not search('(?m)^User=')
+      - helper is search('(?m)^SyslogIdentifier=aictl-helper$') and helper is search('(?m)^RuntimeMaxSec=30$')
+      - helper is search('(?m)^StandardInput=socket$')
+      - helper is search('(?m)^ProtectSystem=strict$') and helper is search('(?m)^PrivateTmp=yes$')
+      - helper is search('(?m)^NoNewPrivileges=yes$') and helper is search('(?m)^RestrictAddressFamilies=AF_UNIX$')
+      - helper is search('(?m)^ProtectHome=tmpfs$')
+      # Reviewer Q: S never runs without the guard, and restarts with the helper socket (bound into its /run by inode).
+      - server is search('(?m)^Requires=ai-control-guard[.]service$')
+      - server is search('(?m)^After=network-online[.]target aictl-helper[.]socket ai-control-guard[.]service$')
+      - server is search('(?m)^PartOf=aictl-helper[.]socket$')
+      # Q-2: /run is an empty read-only tmpfs; S gets only the helper socket, the helper only its tools' paths.
+      - server | regex_findall('(?m)^TemporaryFileSystem=.*$') == ['TemporaryFileSystem=/run:ro']
+      - server | regex_findall('(?m)^BindReadOnlyPaths=.*$') == ['BindReadOnlyPaths=/run/aictl-helper.sock']
+      - server is not search('(?m)^(ReadOnlyPaths|BindPaths|ReadWritePaths=/run)')
+      - helper | regex_findall('(?m)^TemporaryFileSystem=.*$') == ['TemporaryFileSystem=/run:ro']
+      - >-
+        helper | regex_findall('(?m)^BindReadOnlyPaths=.*$') == ['BindReadOnlyPaths=-/run/docker.sock /run/systemd/private
+        /run/systemd/system -/run/dbus/system_bus_socket -/run/log/journal']
+      - helper is not search('(?m)^(ReadOnlyPaths|BindPaths|ReadWritePaths)=')
+      # The guard's oneshot: loads the file on start and reload, before S and tailscaled, after nftables.service.
+      - guard is search('(?m)^Type=oneshot$') and guard is search('(?m)^RemainAfterExit=yes$')
+      - guard is search('(?m)^ExecStart=/usr/sbin/nft -f /etc/ai-control/guard[.]nft$')
+      - guard is search('(?m)^ExecReload=/usr/sbin/nft -f /etc/ai-control/guard[.]nft$')
+      - guard is search('(?m)^Before=ai-control[.]service tailscaled[.]service$')
+      - guard is search('(?m)^After=nftables[.]service$')
+      - guard is search('(?m)^WantedBy=multi-user[.]target$')
+      - guard is search('(?m)^CapabilityBoundingSet=CAP_NET_ADMIN$')
+    quiet: true

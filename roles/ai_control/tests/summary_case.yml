@@ -1,0 +1,37 @@
+---
+# One case for the offline test of tasks/verify_summary.yml: case = {name, token, services, want, msg?}.
+# services: S's [{id, status, detail}] rows for the fake S; want: pass | fail; msg (optional): a pattern
+# the failure message must contain, else the result is "fail without msg".
+- name: Summary case | write the fake summary for {{ case.name }}
+  ansible.builtin.copy:
+    dest: "{{ test_tmp }}/summary.json"
+    content: "{{ {'services': case.services} | to_json }}"
+    mode: "0644"
+
+- name: Summary case | run verify_summary.yml for {{ case.name }}
+  block:
+    - name: Summary case | verify for {{ case.name }}
+      ansible.builtin.include_tasks: ../tasks/verify_summary.yml
+      vars:
+        ai_control_listen_port: "{{ ctl_test_fake_port }}"
+        ai_control_token_given: "{{ case.token }}"
+        ai_control_verify_retries: 1
+        ai_control_verify_delay: 0
+
+    - name: Summary case | result for {{ case.name }}
+      ansible.builtin.set_fact:
+        ctl_test_summary_result: pass
+  rescue:
+    - name: Summary case | result (refused) for {{ case.name }}
+      ansible.builtin.set_fact:
+        ctl_test_summary_result: >-
+          {{ ('fail' if (ansible_failed_result.msg | default('') | string) is search(case.msg | default(''))
+              else 'fail without msg ' ~ case.msg)
+             if ansible_failed_task.name is search('the agent never refuses the token')
+             else 'error: ' ~ ansible_failed_task.name }}
+
+- name: Summary case | outcome is as expected for {{ case.name }}
+  ansible.builtin.assert:
+    that: ctl_test_summary_result == case.want
+    fail_msg: "{{ case.name }}: got {{ ctl_test_summary_result }}, want {{ case.want }}"
+    quiet: true

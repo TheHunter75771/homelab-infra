@@ -1,0 +1,16 @@
+{
+  "name": "ai-control-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI Control PWA (static files in public/, served by apps/ai-control/server). No dependencies, no build step.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "stamp": "node scripts/stamp-sw.mjs",
+    "dev": "node scripts/dev-server.mjs"
+  }
+}

@@ -1,0 +1,97 @@
+---
+# The app's code only (launcher + package; no tests, README, example config or caches) ->
+# ai_host_agent_install_dir, owned by ai_host_agent_owner: 0755 dirs and launcher, 0644 modules.
+# A module that no longer exists in the source is removed. Same pattern as role gpu_gate.
+# tests/test_ai_host_agent.yml runs this unprivileged into a scratch dir.
+- name: Install | find the package modules
+  ansible.builtin.set_fact:
+    ai_host_agent_modules: >-
+      {{ query('ansible.builtin.fileglob', ai_host_agent_src_dir ~ '/' ~ ai_host_agent_package ~ '/*.py')
+         | map('basename') | sort }}
+
+- name: Install | the source tree looks like the host agent
+  ansible.builtin.assert:
+    that:
+      - "'__main__.py' in ai_host_agent_modules"
+      - "'config.py' in ai_host_agent_modules"
+      - (ai_host_agent_src_dir ~ '/' ~ ai_host_agent_launcher) is file
+    fail_msg: "{{ ai_host_agent_src_dir }} doesn't contain the ai-host-agent launcher and package."
+    quiet: true
+
+# The prune below deletes everything else in the install dir: never point it at a shared directory.
+- name: Install | the install dir is a dedicated ai-host-agent directory
+  ansible.builtin.assert:
+    that:
+      - ai_host_agent_install_dir | basename == 'ai-host-agent'
+      - ai_host_agent_install_dir is abs
+    fail_msg: ai_host_agent_install_dir must be an absolute path ending in /ai-host-agent (it is pruned), not {{ ai_host_agent_install_dir }}.
+    quiet: true
+
+- name: Install | the install dirs are real directories (before any write)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    ai_host_agent_guard_dirs: &ai_host_agent_install_guard
+      - "{{ ai_host_agent_install_dir }}"
+      - "{{ ai_host_agent_install_dir }}/{{ ai_host_agent_package }}"
+
+- name: Install | code directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ ai_host_agent_owner }}"
+    group: "{{ ai_host_agent_owner }}"
+    mode: "0755"
+  loop:
+    - "{{ ai_host_agent_install_dir }}"
+    - "{{ ai_host_agent_install_dir }}/{{ ai_host_agent_package }}"
+  register: ai_host_agent_install_dirs
+
+- name: Install | launcher
+  ansible.builtin.copy:
+    src: "{{ ai_host_agent_src_dir }}/{{ ai_host_agent_launcher }}"
+    dest: "{{ ai_host_agent_install_dir }}/{{ ai_host_agent_launcher }}"
+    owner: "{{ ai_host_agent_owner }}"
+    group: "{{ ai_host_agent_owner }}"
+    mode: "0755"
+  notify: Restart ai-host-agent
+  register: ai_host_agent_install_launcher
+
+- name: Install | package modules
+  ansible.builtin.copy:
+    src: "{{ ai_host_agent_src_dir }}/{{ ai_host_agent_package }}/{{ item }}"
+    dest: "{{ ai_host_agent_install_dir }}/{{ ai_host_agent_package }}/{{ item }}"
+    owner: "{{ ai_host_agent_owner }}"
+    group: "{{ ai_host_agent_owner }}"
+    mode: "0644"
+  loop: "{{ ai_host_agent_modules }}"
+  notify: Restart ai-host-agent
+  register: ai_host_agent_install_modules
+
+- name: Install | the install dirs are still real directories (before the find and prune)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    ai_host_agent_guard_dirs: *ai_host_agent_install_guard
+
+- name: Install | find installed files
+  ansible.builtin.find:
+    paths:
+      - "{{ ai_host_agent_install_dir }}"
+      - "{{ ai_host_agent_install_dir }}/{{ ai_host_agent_package }}"
+    follow: false
+    file_type: any
+    hidden: true
+  register: ai_host_agent_installed
+
+- name: Install | anything else in the install dir is removed
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ ai_host_agent_installed.files | map(attribute='path') | reject('in', ai_host_agent_wanted) | sort }}"
+  vars:
+    ai_host_agent_wanted: >-
+      {{ [ai_host_agent_install_dir ~ '/' ~ ai_host_agent_launcher,
+          ai_host_agent_install_dir ~ '/' ~ ai_host_agent_package]
+         + (ai_host_agent_modules
+            | map('regex_replace', '^', ai_host_agent_install_dir ~ '/' ~ ai_host_agent_package ~ '/') | list) }}
+  notify: Restart ai-host-agent
+  register: ai_host_agent_install_pruned

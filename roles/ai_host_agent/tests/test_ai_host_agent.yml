@@ -1,0 +1,482 @@
+---
+# Offline test for role ai_host_agent (no root, nothing applied to this machine; documentation
+# addresses only, RFC 5737 / RFC 3849 / the CGNAT range). Run it through tests/run.sh, which also
+# checks that no token value reaches the -v output:
+#   roles/ai_host_agent/tests/run.sh
+# It runs the role's own task files into a scratch dir (stub handlers):
+#   1. install.yml twice with strays planted in between (pruned), a third time changing nothing, and a
+#      refusal of a dir not named ai-host-agent;
+#   2. config.yml: the config rendered and validated by the installed agent's own loader;
+#   3. token.yml: generated once (64 hex, 0640), left alone on a re-run, an existing token kept, a
+#      symlink refused; the real agent's --check accepts the result;
+#   4. export_token.yml: the fact equals the file (checked in no_log asserts only);
+#   5. the unit: rendered in all four knob combinations, systemd-analyze verify clean, and
+#      line-for-line equal to the unit in Y's README apart from the IP allowlist.
+- name: Role ai_host_agent installs the code, config, token and unit
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  vars:
+    gaming_pc_tailnet_ip: 100.64.0.20
+    gaming_pc_tailnet_ip6: "2001:db8::20"
+    ai_box_tailnet_ip: 100.64.0.10
+    ollama_rocm_policy_extra_ports: [11510]
+    ansible_managed: Ansible managed
+    # run.sh passes its scratch dir and the canary token it planted (synthetic).
+    test_tmp: ""
+    test_canary: ""
+  handlers:
+    - name: Reload systemd for ai-host-agent
+      ansible.builtin.debug:
+        msg: reload requested
+    - name: Restart ai-host-agent
+      ansible.builtin.debug:
+        msg: restart requested
+  tasks:
+    - name: Run.sh passed a scratch dir and a canary
+      ansible.builtin.assert:
+        that:
+          - test_tmp is abs
+          - test_canary is match('^[0-9a-f]{64}$')
+        fail_msg: Run this through roles/ai_host_agent/tests/run.sh.
+        quiet: true
+
+    - name: Point the role at the repo's app and the scratch dir
+      ansible.builtin.set_fact:
+        ai_host_agent_src_dir: "{{ playbook_dir }}/../../../apps/ai-control/host-agent"
+        ai_host_agent_install_dir: "{{ test_tmp }}/opt/ai-host-agent"
+        ai_host_agent_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        ai_host_agent_token_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        ai_host_agent_token_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
+        ai_host_agent_config_dir: "{{ test_tmp }}/etc/ai-host-agent"
+        ai_host_agent_config_file: "{{ test_tmp }}/etc/ai-host-agent/config.json"
+        ai_host_agent_token_file: "{{ test_tmp }}/etc/ai-host-agent/token"
+
+    - name: Preflight accepts the synthetic inputs
+      ansible.builtin.assert:
+        that:
+          - ai_host_agent_ip_allow == ['localhost', '100.64.0.20', '100.64.0.10', '2001:db8::20']
+          - ai_host_agent_binds == ['127.0.0.1', '100.64.0.20']
+        fail_msg: "{{ ai_host_agent_ip_allow }} {{ ai_host_agent_binds }}"
+        quiet: true
+
+    # ---- 1. code ----------------------------------------------------------------------------------
+    - name: Install 1
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Plant a stale module, a bytecode cache, the tests and a stray file
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          d="{{ ai_host_agent_install_dir }}"
+          echo old > "$d/ai_host_agent/removed.py"
+          mkdir -p "$d/ai_host_agent/__pycache__" "$d/tests"
+          echo x > "$d/ai_host_agent/__pycache__/server.cpython-314.pyc"
+          echo x > "$d/tests/test_server.py"
+          echo x > "$d/README.md"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Install 2
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: List what was installed
+      ansible.builtin.find:
+        paths: "{{ ai_host_agent_install_dir }}"
+        recurse: true
+        hidden: true
+        file_type: any
+      register: agent_test_find
+
+    - name: Exactly the launcher and the package modules, with the right modes, strays removed
+      vars:
+        tree: >-
+          {{ agent_test_find.files | map(attribute='path')
+             | map('regex_replace', '^' ~ (ai_host_agent_install_dir | regex_escape) ~ '/', '') | sort }}
+        modes: "{{ dict(agent_test_find.files | map(attribute='path') | zip(agent_test_find.files | map(attribute='mode'))) }}"
+        src_modules: "{{ query('ansible.builtin.fileglob', ai_host_agent_src_dir ~ '/ai_host_agent/*.py') | map('basename') | sort }}"
+      ansible.builtin.assert:
+        that:
+          - tree == (['ai-host-agent', 'ai_host_agent'] + (src_modules | map('regex_replace', '^', 'ai_host_agent/') | list)) | sort
+          - "'ai_host_agent/__main__.py' in tree"
+          - tree | select('search', 'test|pycache|README|removed|example') | list == []
+          - modes[ai_host_agent_install_dir ~ '/ai-host-agent'] == '0755'
+          - modes[ai_host_agent_install_dir ~ '/ai_host_agent'] == '0755'
+          - modes[ai_host_agent_install_dir ~ '/ai_host_agent/auth.py'] == '0644'
+        fail_msg: "{{ tree }}"
+        quiet: true
+
+    - name: Install 3
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Install 3 changed nothing
+      ansible.builtin.assert:
+        that:
+          - ai_host_agent_install_dirs is not changed
+          - ai_host_agent_install_launcher is not changed
+          - ai_host_agent_install_modules is not changed
+          - ai_host_agent_install_pruned is skipped
+        quiet: true
+
+    - name: Point the install at a directory that isn't named ai-host-agent
+      block:
+        - name: Install into a shared-looking directory
+          ansible.builtin.include_tasks: ../tasks/install.yml
+          vars:
+            ai_host_agent_install_dir: "{{ test_tmp }}/opt"
+
+        - name: Not reached
+          ansible.builtin.set_fact:
+            agent_test_wrong_dir_failed: false
+      rescue:
+        - name: Note the refusal
+          ansible.builtin.set_fact:
+            agent_test_wrong_dir_failed: "{{ ansible_failed_task.name == 'Install | the install dir is a dedicated ai-host-agent directory' }}"
+
+    - name: The install refused it before touching anything
+      ansible.builtin.stat:
+        path: "{{ test_tmp }}/opt/ai_host_agent"
+      register: agent_test_wrong_dir
+      failed_when: not agent_test_wrong_dir_failed or agent_test_wrong_dir.stat.exists
+
+    - name: Symlinked install dirs are refused before anything is written or pruned
+      ansible.builtin.include_tasks: expect_guard_refusal.yml
+      loop:
+        - name: install-dir
+          dir: "{{ test_tmp }}/guard1/ai-host-agent"
+          link: "{{ test_tmp }}/guard1/ai-host-agent"
+        - name: package-dir
+          dir: "{{ test_tmp }}/guard2/ai-host-agent"
+          link: "{{ test_tmp }}/guard2/ai-host-agent/ai_host_agent"
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+
+    # ---- 2. config --------------------------------------------------------------------------------
+    - name: Config
+      ansible.builtin.include_tasks: ../tasks/config.yml
+
+    - name: Read the config
+      ansible.builtin.slurp:
+        src: "{{ ai_host_agent_config_file }}"
+      register: agent_test_config
+
+    - name: Config binds loopback and the tailnet IPv4 on 11510 with Fedora's sudo
+      ansible.builtin.assert:
+        that:
+          - >-
+            (agent_test_config.content | b64decode | from_json) == {
+              'binds': ['127.0.0.1', '100.64.0.20'],
+              'port': 11510,
+              'token_file': ai_host_agent_token_file,
+              'ollama_url': 'http://100.64.0.20:11434',
+              'sudo_exes': ['/usr/bin/sudo']}
+        fail_msg: "{{ agent_test_config.content | b64decode }}"
+        quiet: true
+
+    - name: Render the config template with role ollama_rocm's port set
+      ansible.builtin.template:
+        src: config.json.j2
+        dest: "{{ test_tmp }}/config-ollama-port.json"
+        mode: "0644"
+      vars:
+        ollama_rocm_port: 11435
+
+    - name: Read the config rendered with ollama_rocm_port
+      ansible.builtin.slurp:
+        src: "{{ test_tmp }}/config-ollama-port.json"
+      register: agent_test_config_port
+
+    - name: Ollama is reached on the PC's tailnet address, at ollama_rocm_port when set (11434 otherwise)
+      ansible.builtin.assert:
+        that:
+          - (agent_test_config.content | b64decode | from_json).ollama_url == 'http://100.64.0.20:11434'
+          - (agent_test_config_port.content | b64decode | from_json).ollama_url == 'http://100.64.0.20:11435'
+        quiet: true
+
+    - name: Stat the config dir
+      ansible.builtin.stat:
+        path: "{{ ai_host_agent_config_dir }}"
+      register: agent_test_config_dir
+      failed_when: agent_test_config_dir.stat.mode != '0750'
+
+    - name: Preflight passes with the synthetic inputs
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+
+    - name: Preflight refuses a config extra that overrides a role-owned key
+      block:
+        - name: Preflight with ai_host_agent_config_extra.port
+          ansible.builtin.include_tasks: ../tasks/preflight.yml
+          vars:
+            ai_host_agent_config_extra: {port: 1}
+
+        - name: Not reached
+          ansible.builtin.set_fact:
+            agent_test_extra_refused: false
+      rescue:
+        - name: Note the refusal
+          ansible.builtin.set_fact:
+            agent_test_extra_refused: "{{ ansible_failed_task.name == 'Preflight | role inputs' }}"
+
+    - name: The extra was refused
+      ansible.builtin.assert:
+        that: agent_test_extra_refused
+        quiet: true
+
+    - name: Preflight refuses a config extra that overrides ollama_url
+      block:
+        - name: Preflight with ai_host_agent_config_extra.ollama_url
+          ansible.builtin.include_tasks: ../tasks/preflight.yml
+          vars:
+            ai_host_agent_config_extra: {ollama_url: "http://127.0.0.1:11434"}
+
+        - name: Not reached
+          ansible.builtin.set_fact:
+            agent_test_ollama_extra_refused: false
+      rescue:
+        - name: Note the refusal
+          ansible.builtin.set_fact:
+            agent_test_ollama_extra_refused: "{{ ansible_failed_task.name == 'Preflight | role inputs' }}"
+
+    - name: The ollama_url extra was refused
+      ansible.builtin.assert:
+        that: agent_test_ollama_extra_refused
+        quiet: true
+
+    - name: Preflight refuses a port that isn't in module G's policy list
+      block:
+        - name: Preflight with port 11511
+          ansible.builtin.include_tasks: ../tasks/preflight.yml
+          vars:
+            ai_host_agent_port: 11511
+
+        - name: Not reached
+          ansible.builtin.set_fact:
+            agent_test_port_refused: false
+      rescue:
+        - name: Note the refusal
+          ansible.builtin.set_fact:
+            agent_test_port_refused: "{{ ansible_failed_task.name is search('the agent port is in module G.s firewalld policy list') }}"
+
+    - name: The port was refused
+      ansible.builtin.assert:
+        that: agent_test_port_refused
+        quiet: true
+
+    # ---- 3. token ---------------------------------------------------------------------------------
+    - name: Token 1 (absent, so generated)
+      ansible.builtin.include_tasks: ../tasks/token.yml
+
+    - name: Stat the generated token
+      ansible.builtin.stat:
+        path: "{{ ai_host_agent_token_file }}"
+        follow: false
+        checksum_algorithm: sha256
+      register: agent_test_token1
+
+    - name: The generated token is a regular 0640 file of 65 bytes (64 hex + LF), created that way
+      ansible.builtin.assert:
+        that:
+          # The owner/mode task found nothing to fix: the generator itself made it 0640 and owned.
+          - ai_host_agent_token_perms is not changed
+          - agent_test_token1.stat.isreg
+          - agent_test_token1.stat.mode == '0640'
+          - agent_test_token1.stat.size == 65
+        quiet: true
+
+    - name: Read the generated token (no_log)
+      ansible.builtin.slurp:
+        src: "{{ ai_host_agent_token_file }}"
+      register: agent_test_token_content
+      no_log: true
+
+    - name: The generated token is 64 lowercase hex chars (no_log)
+      ansible.builtin.assert:
+        that:
+          - (agent_test_token_content.content | b64decode) is match('^[0-9a-f]{64}\n$')
+        quiet: true
+      no_log: true
+
+    - name: Token 2 (present, so left alone)
+      ansible.builtin.include_tasks: ../tasks/token.yml
+
+    - name: Stat the token again
+      ansible.builtin.stat:
+        path: "{{ ai_host_agent_token_file }}"
+        follow: false
+        checksum_algorithm: sha256
+      register: agent_test_token2
+
+    - name: A converge never rotates the token
+      ansible.builtin.assert:
+        that:
+          - agent_test_token2.stat.checksum == agent_test_token1.stat.checksum
+          - agent_test_token2.stat.inode == agent_test_token1.stat.inode
+        quiet: true
+
+    - name: The real agent accepts the config and the token (--check)
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - "{{ ai_host_agent_install_dir }}/ai-host-agent"
+          - --config
+          - "{{ ai_host_agent_config_file }}"
+          - --check
+      changed_when: false
+
+    - name: Keep a copy of the generated token for run.sh's leak check (no_log)
+      ansible.builtin.copy:
+        src: "{{ ai_host_agent_token_file }}"
+        dest: "{{ test_tmp }}/generated-token"
+        remote_src: true
+        mode: "0600"
+      no_log: true
+
+    - name: Plant the canary token as an existing token (as run.sh wrote it, 0640)
+      ansible.builtin.copy:
+        src: "{{ test_tmp }}/canary-token"
+        dest: "{{ ai_host_agent_token_file }}"
+        mode: "0640"
+      no_log: true
+
+    - name: Token 3 (an existing token is kept)
+      ansible.builtin.include_tasks: ../tasks/token.yml
+
+    - name: Read the kept token (no_log)
+      ansible.builtin.slurp:
+        src: "{{ ai_host_agent_token_file }}"
+      register: agent_test_kept
+      no_log: true
+
+    - name: The existing token was kept byte for byte (no_log)
+      ansible.builtin.assert:
+        that:
+          - (agent_test_kept.content | b64decode | trim) == test_canary
+        quiet: true
+      no_log: true
+
+    # ---- 4. export ---------------------------------------------------------------------------------
+    - name: Export the token
+      ansible.builtin.include_tasks: ../tasks/export_token.yml
+
+    - name: The exported port is the agent's port
+      ansible.builtin.assert:
+        that: ai_host_agent_exported_port | int == 11510
+        quiet: true
+
+    - name: The exported fact is the file's token (no_log)
+      ansible.builtin.assert:
+        that:
+          - ai_host_agent_token == test_canary
+        quiet: true
+      no_log: true
+
+    - name: A symlinked token is refused
+      block:
+        - name: Replace the token with a symlink to the canary
+          ansible.builtin.file:
+            src: "{{ test_tmp }}/canary-token"
+            dest: "{{ ai_host_agent_token_file }}"
+            state: link
+            force: true
+
+        - name: Token 4 (symlink)
+          ansible.builtin.include_tasks: ../tasks/token.yml
+
+        - name: Not reached
+          ansible.builtin.set_fact:
+            agent_test_symlink_refused: false
+      rescue:
+        - name: Note the refusal
+          ansible.builtin.set_fact:
+            agent_test_symlink_refused: "{{ ansible_failed_task.name == 'Token | an existing token is a regular file (never a symlink)' }}"
+
+    - name: The symlink was refused, and still points where it did
+      ansible.builtin.stat:
+        path: "{{ ai_host_agent_token_file }}"
+        follow: false
+      register: agent_test_symlink
+      failed_when: not agent_test_symlink_refused or not agent_test_symlink.stat.islnk
+
+    - name: Export refuses the symlink too
+      block:
+        - name: Export (symlink)
+          ansible.builtin.include_tasks: ../tasks/export_token.yml
+
+        - name: Not reached
+          ansible.builtin.set_fact:
+            agent_test_export_refused: false
+      rescue:
+        - name: Note the refusal
+          ansible.builtin.set_fact:
+            agent_test_export_refused: "{{ ansible_failed_task.name == 'Export token | the token file exists (role ai_host_agent creates it)' }}"
+
+    - name: Export refused it
+      ansible.builtin.assert:
+        that: agent_test_export_refused
+        quiet: true
+
+    # ---- verify_avc.yml with stub ausearch programs ------------------------------------------------
+    - name: The AVC check passes only on rc 1 with "<no matches>"
+      ansible.builtin.include_tasks: avc_case.yml
+      loop:
+        - {name: clean, rc: 1, stderr: "<no matches>", want: pass}
+        - {name: denials found, rc: 0, stdout: "type=AVC msg=audit(1): avc:  denied  { read } comm=python3", want: fail}
+        - {name: other error, rc: 1, stderr: "Error opening /var/log/audit/audit.log (Permission denied)", want: fail}
+        - {name: crash, rc: 2, stderr: "", want: fail}
+        - {name: ausearch missing, missing: true, want: fail}
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+
+    # ---- 5. unit ----------------------------------------------------------------------------------
+    - name: Render and verify the unit in every knob combination
+      ansible.builtin.include_tasks: unit_case.yml
+      # Include params outrank the set_fact scratch paths: the units get the role's real paths.
+      vars:
+        ai_host_agent_install_dir: /opt/ai-host-agent
+        ai_host_agent_config_file: /etc/ai-host-agent/config.json
+      loop:
+        - { protect_proc: invisible, allowlist: true }
+        - { protect_proc: invisible, allowlist: false }
+        - { protect_proc: default, allowlist: true }
+        - { protect_proc: default, allowlist: false }
+      loop_control:
+        loop_var: case
+        label: "ProtectProc={{ case.protect_proc }} allowlist={{ case.allowlist }}"
+
+    - name: The rendered unit (role defaults, allowlist off) is Y's reviewed unit line for line
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - -c
+          - |
+            import re, sys
+            readme = open(sys.argv[1], encoding="utf-8").read()
+            ref = re.search(r"```ini\n(.*?)```", readme, re.S).group(1)
+            def lines(text):
+                return [l for l in text.splitlines() if l.strip() and not l.lstrip().startswith("#")]
+            got = lines(open(sys.argv[2], encoding="utf-8").read())
+            want = lines(ref)
+            if got != want:
+                import difflib
+                sys.exit("\n".join(difflib.unified_diff(want, got, "README", "rendered", lineterm="")))
+          - "{{ ai_host_agent_src_dir }}/README.md"
+          - "{{ test_tmp }}/unit-invisible-False/ai-host-agent.service"
+      changed_when: false
+
+    - name: With the allowlist on, only these two lines are added
+      ansible.builtin.command:
+        argv: [grep, -E, '^IPAddress', "{{ test_tmp }}/unit-invisible-True/ai-host-agent.service"]
+      register: agent_test_ipaddr
+      changed_when: false
+      failed_when: >-
+        agent_test_ipaddr.stdout_lines != ['IPAddressDeny=any',
+          'IPAddressAllow=localhost 100.64.0.20 100.64.0.10 2001:db8::20']

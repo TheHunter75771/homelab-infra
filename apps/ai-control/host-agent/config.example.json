@@ -1,0 +1,21 @@
+{
+  "binds": ["127.0.0.1"],
+  "port": 11510,
+  "token_file": "/etc/ai-host-agent/token",
+  "ollama_url": "http://127.0.0.1:11434",
+  "ollama_timeout": 5,
+  "ollama_max_bytes": 1048576,
+  "exec_path": "/usr/bin:/bin",
+  "exec_timeout": 10,
+  "exec_max_bytes": 8388608,
+  "cgroup_root": "/sys/fs/cgroup",
+  "mountinfo": "/proc/self/mountinfo",
+  "sudo_exes": ["/usr/bin/sudo"],
+  "disk_paths": ["/", "/mnt/share"],
+  "disk_timeout": 2,
+  "max_concurrent": 16,
+  "conn_timeout": 5,
+  "head_timeout": 2,
+  "request_deadline": 30,
+  "log_level": "INFO"
+}
