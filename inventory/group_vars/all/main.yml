@@ -21,7 +21,15 @@ docker_dns_ip: 172.17.0.1
 docker_dns_bip: 172.17.0.1/16
 # AI models (Noah, 2026-10-26; see the LocalAI MODELS.md benchmark): the GPU model runs on the gaming PC (role
 # ollama_rocm), the CPU fallback on ai-box (role ai_stack). The broker serves both under the alias "assistant".
-ai_gpu_model: "qwen3.5:9b"
+# 2026-10-28 (Noah): switched to qwen3.5:35b after a local model test (best on the private document eval; results kept
+# outside this repo). It fills the 16 GB card and keeps about 12 GB of weights in PC RAM.
+ai_gpu_model: "qwen3.5:35b"
 ai_cpu_model: "qwen3.5:4b"
+# 2026-10-29 (§12.30, Reviewer Q7-1): ONE context size for the GPU model. qwen3.5:35b fits once, and Ollama reloads it
+# (about 25 s) on any num_ctx change. Read by the PC's Ollama default (OLLAMA_CONTEXT_LENGTH) and the broker's gpu_num_ctx.
+ai_gpu_num_ctx: 32768
+# Document-search embedding model (Noah 2026-10-27, CONTRACTS §12.22): alias "embed" on both backends; the gaming PC
+# pulls it via ollama_rocm_extra_models (asserted to match).
+ai_embed_model: "nomic-embed-text:v1.5"
 # AI operator accounts (docs/CONTRACTS.md §12.13): claude = Claude (full logged sudo); localai = Noah's local AI.
 operator_user: claude

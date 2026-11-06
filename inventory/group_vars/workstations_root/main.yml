@@ -1,0 +1,21 @@
+---
+# Gaming PC, root-level AI services (playbooks/gaming-pc-ai.yml, playbooks/ai-control.yml). Public-safe.
+# §12.15.7: the AI Control host agent's port joins the ai-box-only firewalld policy (module G owns the policy).
+ollama_rocm_policy_extra_ports: [11510]
+# §12.17: the AI Library's Samba port (privileged, allowlisted in module G) also reaches ai-box only.
+ollama_rocm_policy_privileged_ports: [445]
+# §12.22: the embedding model for document search, also pulled into ai-box's ollama-cpu (ai_embed_model).
+ollama_rocm_extra_models: ["nomic-embed-text:v1.5"]
+# §12.22: the chat model and the embedding model stay loaded together (16 GB VRAM), so a reindex or a search
+# doesn't evict the chat model. gpu-gate still unloads everything on a flip.
+ollama_rocm_max_loaded_models: 2
+# Noah 2026-10-27 ("lets do the fixes we can do"): store the conversation cache at 8 bits (flash attention is
+# already on under Vulkan), about half the VRAM per token, so longer contexts fit. Verified with the private document eval.
+ollama_rocm_extra_env:
+  OLLAMA_KV_CACHE_TYPE: "q8_0"
+  # 2026-10-29 (§12.30 reload thrash): one default context for callers that can't send num_ctx (OpenAI /v1/*, direct
+  # calls), matching the broker's gpu_num_ctx, so qwen3.5:35b isn't reloaded at 4096. Ollama reloads on any change.
+  OLLAMA_CONTEXT_LENGTH: "{{ ai_gpu_num_ctx | string }}"
+# 2026-10-28 (Reviewer Q round 5): qwen3.5:35b cold-loads in about 25 s, longer than the Auto router's 8 s classifier
+# timeout, so keep it warm for 30 min after use. gpu-gate still unloads it at once (keep_alive 0) when a game starts.
+ollama_rocm_keep_alive: 30m

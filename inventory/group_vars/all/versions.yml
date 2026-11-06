@@ -12,12 +12,18 @@ images:
   python_base: "python:3.14-slim@sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8"
   ollama: "ollama/ollama:0.40.11@sha256:dea72d1e22270fe095b68fdf756d2b489d615643c5a2eaebbc5f569181e322d8"
   open_webui: "ghcr.io/open-webui/open-webui:v0.12.4@sha256:a5b9e403d19154796850679c8c5d1295301cee954be8b84ddd62af92426558f7"
+  # §12.16; index digest verified from ai-box 2026-10-27
+  searxng: "docker.io/searxng/searxng:2026.10.25-54ca1d9cf@sha256:23482d8ecf7ddf66029479468ea04c1bb11d2b65785a17a7e629e2ffd13296ca"
+  # §12.18b; index digest verified from ai-box 2026-10-27
+  tika: "docker.io/apache/tika:3.2.3.0-full@sha256:21d8052de04e491ccf66e8680ade4da6f3d453a56d59f740b4167e54167219b7"
   node_base: "node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914"
 local_images:
   wol_relay: "homelab/wol-relay:2026.07"
-  gpu_broker: "homelab/gpu-broker:0.1.0"
+  gpu_broker: "homelab/gpu-broker:0.1.1"
 python_packages:
   pywebpush: "2.5.0"
+  # §12.29 Mission Control venv; the same aiohttp as gpu-broker, not ai-box's system 3.13.3.
+  aiohttp: "3.14.5"
 # Docker apt packages (role docker, docker_install: true). Exact Debian versions from download.docker.com
 # (resolute/stable). They matched the mediaserver's installed set on 2026-10-26; the mediaserver's own Docker is
 # not pinned or held, so a manual upgrade there breaks the match. ai-box installs name=version and holds them.
