@@ -86,8 +86,8 @@ roles/ai_host_agent/tests/run.sh     # from anywhere; runs from the repo root wi
 - **export:** the fact equals the file, and the exported port is 11510;
 - **AVC check** (`verify_avc.yml`) with stub `ausearch` programs: it passes only on exit 1 with `<no matches>`. Denials (rc 0),
   another error message, a crash and a missing program all fail;
-- **unit:** rendered in all four knob combinations, `systemd-analyze verify` with any warning failing, and line-for-line equal to
-  Y's README unit.
+- **unit:** rendered in all four knob combinations, `systemd-analyze verify` with any warning failing (except one about the
+  machine's own unit files), and line-for-line equal to Y's README unit.
 
 `run.sh` runs `check_no_log.py` first, then the playbook. It fails if the canary or the generated token appears anywhere in
 the `-vvv --diff` output, as text or base64.

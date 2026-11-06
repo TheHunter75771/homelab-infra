@@ -1,6 +1,6 @@
 ---
 # Render the three units for one allowlist setting and verify them together (the socket finds its
-# Accept=yes template next to it). Any warning fails. units_tag names the scratch dir (default: the
+# Accept=yes template next to it). Any warning fails, except one about the machine's own unit files. units_tag names the scratch dir (default: the
 # allowlist setting); units_allow is the exact IPAddressAllow value expected when the allowlist is on.
 - name: Unit dir for allowlist={{ allowlist }}
   ansible.builtin.file:
@@ -33,6 +33,7 @@
   changed_when: false
   # Any stderr line fails, except systemd's warnings about the machine's own unit files (ubuntu-latest's newer systemd:
   # "<host unit dir>/x.service:26: Support for option CPUAccounting= has been removed") that name no unit verified here.
+  # Not caught: a host drop-in for a template or prefix of ours (foo@.service.d, foo-.service.d); a CI runner has none.
   failed_when: >-
     ctl_test_verify.rc != 0
     or ctl_test_verify.stderr_lines | reject('match', '(/usr/lib|/lib|/etc|/run)/systemd/[^:]+:[0-9]+: ') | list | length > 0

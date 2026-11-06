@@ -1,7 +1,7 @@
 ---
 # Render the server and client units through the role's own task files, with the production paths
 # (include params outrank the test's scratch paths), then systemd-analyze verify them (any warning
-# fails) and check the contract's lines.
+# fails, except one about the machine's own unit files) and check the contract's lines.
 - name: Units | scratch unit dirs
   ansible.builtin.file:
     path: "{{ test_tmp }}/{{ item }}"
@@ -58,6 +58,7 @@
   changed_when: false
   # Any stderr line fails, except systemd's warnings about the machine's own unit files (ubuntu-latest's newer systemd:
   # "<host unit dir>/x.service:26: Support for option CPUAccounting= has been removed") that name no unit verified here.
+  # Not caught: a host drop-in for a template or prefix of ours (foo@.service.d, foo-.service.d); a CI runner has none.
   failed_when: >-
     test_verify_server.rc != 0
     or test_verify_server.stderr_lines | reject('match', '(/usr/lib|/lib|/etc|/run)/systemd/[^:]+:[0-9]+: ') | list | length > 0
@@ -76,6 +77,7 @@
   changed_when: false
   # Any stderr line fails, except systemd's warnings about the machine's own unit files (ubuntu-latest's newer systemd:
   # "<host unit dir>/x.service:26: Support for option CPUAccounting= has been removed") that name no unit verified here.
+  # Not caught: a host drop-in for a template or prefix of ours (foo@.service.d, foo-.service.d); a CI runner has none.
   failed_when: >-
     test_verify_client.rc != 0
     or test_verify_client.stderr_lines | reject('match', '(/usr/lib|/lib|/etc|/run)/systemd/[^:]+:[0-9]+: ') | list | length > 0

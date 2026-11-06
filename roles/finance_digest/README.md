@@ -139,8 +139,9 @@ roles/finance_digest/tests/run.sh   # from anywhere; uses the repo's .venv; no r
    - config.json exactly D's keys, 0640 in 0750; D's loader refuses 8 bad configs and accepts the rendered one;
      notion.json written with Notion on (0640, D's reader accepts it, a re-run changes nothing), removed with
      Notion off; a symlinked config dir refused;
-   - the units for Notion off / on / a narrowed range: `systemd-analyze verify` with any warning failing,
-     `[Service]` exactly the sandbox list plus four fixed keys, the IP lines exact, the timer's schedule;
+   - the units for Notion off / on / a narrowed range: `systemd-analyze verify` with any warning failing (except
+     one about the machine's own unit files), `[Service]` exactly the sandbox list plus four fixed keys, the IP
+     lines exact, the timer's schedule;
    - verify.yml: the fake systemd-run gets `--wait --pipe --collect`, every sandbox property and the dry-run
      command; a good dry run passes, a failing one and one without the freshness line are refused.
 3. The output is grepped for the canary token and the fake dry run's balance line, as text and as base64 at all

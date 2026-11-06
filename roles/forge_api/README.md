@@ -209,8 +209,9 @@ fail the test):
   loopback/bind/CIDR, string port, relative root, token missing/world-readable/group-writable/short/symlink/empty)
   without printing a token (compared with the real token files, S-7), and switched on (`--require-library`) refuses an uninitialized library;
 - **both units spelled out literally, every line in order** (`tests/units_case.yml`, Reviewer M's M-1), for the
-  default network and another one, `systemd-analyze verify` with any warning failing; the service's `[Service]`
-  lines are exactly the role's sandbox list (which the verify's `systemd-run` uses);
+  default network and another one, `systemd-analyze verify` with any warning failing (except one about the machine's
+  own unit files); the service's `[Service]` lines are exactly the role's sandbox list (which the verify's
+  `systemd-run` uses);
 - **the switch**: `service.yml` itself runs through the fake systemctl, which emulates systemd on the unit files it
   installed (not-found units, `enable` refused without `[Install]`, `Requires=` pulled up on start and stopping
   dependants on stop). On, first run: exactly `enable forge-api.socket`, `start forge-api.socket`,

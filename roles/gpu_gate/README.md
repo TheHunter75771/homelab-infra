@@ -21,4 +21,4 @@ The test installs into a scratch dir twice, with a stale module, a `__pycache__`
 planted in between, and checks they're pruned. It asserts the third install changed nothing and that a
 dir not named `gpu-gate` is refused before anything is written. It checks the exact file set and modes, renders and
 validates the config (both families, and IPv4 only), and checks that validation leaves no bytecode.
-It also runs `systemd-analyze verify` on the unit (any warning fails).
+It also runs `systemd-analyze verify` on the unit (any warning fails, except one about the machine's own unit files).

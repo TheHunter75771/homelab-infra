@@ -127,8 +127,8 @@ roles/skill_drafter/tests/run.sh   # from anywhere; uses the repo's .venv; no ro
   untouched;
 - config.json exactly K2's keys with integer values, 0640 in 0750, a restart on the first write and none on the
   second; K2's loader refuses 9 bad configs and accepts the rendered one; a symlinked config dir refused;
-- the unit (default and a narrowed range): `systemd-analyze verify` with any warning failing, `[Service]` exactly
-  the sandbox list plus five fixed keys, the IP lines exact;
+- the unit (default and a narrowed range): `systemd-analyze verify` with any warning failing (except one about
+  the machine's own unit files), `[Service]` exactly the sandbox list plus five fixed keys, the IP lines exact;
 - verify.yml: the real installed drafter runs `status` against the scratch library through the fake
   systemd-run, which gets `--wait --pipe --collect`, every sandbox property and the status command; a steady
   unit passes; a never-active unit, a restarting unit and a status that exits 2 (not an initialized library)

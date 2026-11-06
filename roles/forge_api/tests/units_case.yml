@@ -1,5 +1,5 @@
 ---
-# Render forge-api.socket and forge-api.service and verify them. Any systemd-analyze warning fails. Params:
+# Render forge-api.socket and forge-api.service and verify them. Any systemd-analyze warning fails, except one about the machine's own unit files. Params:
 # fa_case (name), fa_expect_listen (the exact ListenStream value) and fa_expect_ip_allow (the exact IPAddressAllow
 # value), both literals in the caller.
 - name: Unit dir ({{ fa_case }})
@@ -22,6 +22,7 @@
   changed_when: false
   # Any stderr line fails, except systemd's warnings about the machine's own unit files (ubuntu-latest's newer systemd:
   # "<host unit dir>/x.service:26: Support for option CPUAccounting= has been removed") that name no unit verified here.
+  # Not caught: a host drop-in for a template or prefix of ours (foo@.service.d, foo-.service.d); a CI runner has none.
   failed_when: >-
     fa_test_verify.rc != 0
     or fa_test_verify.stderr_lines | reject('match', '(/usr/lib|/lib|/etc|/run)/systemd/[^:]+:[0-9]+: ') | list | length > 0

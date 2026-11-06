@@ -147,7 +147,9 @@ jobs:
           # and this job runs 3.13.
           BROKER_AIOHTTP=$(sed -nE 's/^aiohttp==([^ ]+).*/\1/p' apps/gpu-broker/requirements.lock)
           [ "$BROKER_AIOHTTP" = "$AIOHTTP" ] || { echo "gpu-broker's lock pins aiohttp $BROKER_AIOHTTP, versions.yml $AIOHTTP"; exit 1; }
-          pip install $(grep -oE '^[A-Za-z0-9_.-]+==[^ ]+' apps/gpu-broker/requirements.lock)
+          mapfile -t pins < <(grep -oE '^[A-Za-z0-9_.-]+==[^ ]+' apps/gpu-broker/requirements.lock)
+          [ "${#pins[@]}" -gt 0 ] || { echo "no name==version pins in apps/gpu-broker/requirements.lock"; exit 1; }
+          pip install "${pins[@]}"
       - name: shellcheck
         run: shellcheck roles/*/files/*.sh roles/*/tests/*.sh terraform/cloudflare/*.sh terraform/cloudflare/tests/*.sh
       - name: backups
@@ -245,7 +247,7 @@ jobs:
           mkdir -p .venv/bin
           ln -sfn "$(command -v python3)" .venv/bin/python
           ln -sfn "$(command -v ansible-playbook)" .venv/bin/ansible-playbook
-          .venv/bin/python -I -c 'import yaml, cryptography'   # as the tests run it (-I), with what they need
+          .venv/bin/python -I -c 'import yaml, cryptography'   # isolated mode, so a user-site install can't mask a missing module
           .venv/bin/ansible-playbook --version
       - name: Unprivileged user namespaces for the offline role tests
         # mission_control's and ai_control's guard checks (unshare --map-auto --map-root-user --net) and ai_backup's

@@ -490,6 +490,7 @@
       changed_when: false
       # Any stderr line fails, except systemd's warnings about the machine's own unit files (ubuntu-latest's newer systemd:
       # "<host unit dir>/x.service:26: Support for option CPUAccounting= has been removed") that name no unit verified here.
+      # Not caught: a host drop-in for a template or prefix of ours (foo@.service.d, foo-.service.d); a CI runner has none.
       failed_when: >-
         test_analyze.rc != 0
         or test_analyze.stderr_lines | reject('match', '(/usr/lib|/lib|/etc|/run)/systemd/[^:]+:[0-9]+: ') | list | length > 0

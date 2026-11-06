@@ -240,7 +240,8 @@ video`. `MemoryDenyWriteExecute=` is left out until it's proven with the ROCm ru
   - removal of an interrupted staging tree;
   - a bad checksum that leaves the previous install intact.
 - **`test_render`** renders the unit for `vulkan` (with its exact `Environment=` list) and `rocm`, and
-  runs `systemd-analyze verify` on both (any warning fails). It also checks:
+  runs `systemd-analyze verify` on both (any warning fails, except one about the machine's own unit
+  files). It also checks:
   - that `ollama_rocm_extra_env` overrides a backend variable;
   - `OLLAMA_NO_CLOUD=1` in the default vulkan and rocm units, and no such line with
     `ollama_rocm_no_cloud: false` (that unit is verified too);

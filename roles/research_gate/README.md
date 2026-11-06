@@ -136,8 +136,9 @@ restart requests, and covers:
 - **config:** exactly R's keys and values as integers, 0640 in a 0750 dir, no restart on a re-run; R's loader (the
   deploy-time validator) refuses an extra key, a string number, a `file://` SearXNG URL, a relative root, 4
   redirects, a User-Agent with a line break, and `ipv4_only` false, a string or missing, and accepts the rendered file;
-- **the unit:** rendered with the real paths, `systemd-analyze verify` with any warning failing, every setting above
-  grepped, the deny list equal to the role's and a superset of the contract's minimum, exactly
+- **the unit:** rendered with the real paths, `systemd-analyze verify` with any warning failing (except one about the
+  machine's own unit files), every setting above grepped, the deny list equal to the role's and a superset of the
+  contract's minimum, exactly
   `IPAddressAllow=172.29.16.2/32 127.0.0.53/32` (no `localhost`, `any` or `127.0.0.1`), and the allow line following a
   different `searxng_ipv4`.
 

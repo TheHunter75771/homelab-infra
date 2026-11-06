@@ -169,8 +169,9 @@ fails on anything else):
   untouched;
 - config.json exactly V's keys, 0640 in 0750, unchanged by a second run; V's loader refuses 10 bad configs and
   accepts the rendered one; a symlinked config dir refused;
-- the unit (default and a narrowed range): `systemd-analyze verify` with any warning failing, only `[Unit]` and
-  `[Service]` (no `[Install]`), and **every `[Unit]` and `[Service]` line spelled out literally in
+- the unit (default and a narrowed range): `systemd-analyze verify` with any warning failing (except one about
+  the machine's own unit files), only `[Unit]` and `[Service]` (no `[Install]`), and **every `[Unit]` and
+  `[Service]` line spelled out literally in
   `tests/units_case.yml`, in order** (M-1: not derived from the role's vars, so deleting or changing any sandbox
   entry fails), the IP lines exact;
   service.yml twice: one daemon-reload, then none;

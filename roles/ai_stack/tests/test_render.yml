@@ -680,6 +680,7 @@
           - escaped.rc != 0 or escaped.stdout == share.mount_unit
           # Any stderr line fails, except systemd's warnings about the machine's own unit files (ubuntu-latest's newer systemd:
           # "<host unit dir>/x.service:26: Support for option CPUAccounting= has been removed") that name no unit verified here.
+          # Not caught: a host drop-in for a template or prefix of ours (foo@.service.d, foo-.service.d); a CI runner has none.
           - >-
             ai_stack_test_analyze.rc == 127 or ai_stack_test_analyze.rc is undefined
             or (ai_stack_test_analyze.rc == 0

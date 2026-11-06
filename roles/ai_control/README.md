@@ -293,8 +293,9 @@ role's own task files into a scratch dir, with stub handlers and no root, and co
     guard active, and `nftables` in the packages;
 - **units:** all four rendered (S's `Requires=`/`After=` the guard and `PartOf=` the socket; both S and the helper with
   `TemporaryFileSystem=/run:ro` and exactly their `BindReadOnlyPaths=`, no `ReadOnlyPaths`; the guard's oneshot, ExecStart and
-  ExecReload, `Before=ai-control.service tailscaled.service`, `After=nftables.service`) with the real paths and the allowlist on and off, `systemd-analyze verify` with any warning failing,
-  and the contract settings grepped, including exactly one `IPAddressAllow=localhost <tailnet> <pc> 172.16.0.0/12` line (and
+  ExecReload, `Before=ai-control.service tailscaled.service`, `After=nftables.service`) with the real paths and the allowlist on
+  and off, `systemd-analyze verify` with any warning failing (except one about the machine's own unit files), and the contract
+  settings grepped, including exactly one `IPAddressAllow=localhost <tailnet> <pc> 172.16.0.0/12` line (and
   `IPAddressDeny=any`) with the allowlist on, none with it off; then again with a container allow list (a templated /32 and a bare
   address), whose line is exactly `IPAddressAllow=localhost <tailnet> <pc> 172.20.0.3/32 172.20.0.4`;
 - **`tailscale_serve`:** validate, desired and compare, parameterised: by default the handler set is exactly AI Control's 443

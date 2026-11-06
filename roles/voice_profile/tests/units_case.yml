@@ -1,5 +1,5 @@
 ---
-# Render voice-profile.service and verify it. Any systemd-analyze warning fails. Params: vp_case (name),
+# Render voice-profile.service and verify it. Any systemd-analyze warning fails, except one about the machine's own unit files. Params: vp_case (name),
 # vp_expect_allow (the exact IPAddressAllow value).
 - name: Unit dir ({{ vp_case }})
   ansible.builtin.file:
@@ -20,6 +20,7 @@
   changed_when: false
   # Any stderr line fails, except systemd's warnings about the machine's own unit files (ubuntu-latest's newer systemd:
   # "<host unit dir>/x.service:26: Support for option CPUAccounting= has been removed") that name no unit verified here.
+  # Not caught: a host drop-in for a template or prefix of ours (foo@.service.d, foo-.service.d); a CI runner has none.
   failed_when: >-
     vp_test_verify.rc != 0
     or vp_test_verify.stderr_lines | reject('match', '(/usr/lib|/lib|/etc|/run)/systemd/[^:]+:[0-9]+: ') | list | length > 0
