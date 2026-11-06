@@ -1,0 +1,27 @@
+---
+# /etc/voice-profile: root:vprof 0750; config.json root:vprof 0640 (no secrets). Absent or a real directory
+# before anything is written (Reviewer F: never write through a symlink).
+- name: Config | the config directory is a real directory (before any write)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    voice_profile_guard_dirs: ["{{ voice_profile_config_dir }}"]
+
+- name: Config | directory
+  ansible.builtin.file:
+    path: "{{ voice_profile_config_dir }}"
+    state: directory
+    owner: "{{ voice_profile_root_owner }}"
+    group: "{{ voice_profile_group }}"
+    mode: "0750"
+
+# Validated with V's own loader from the installed code (vars/main.yml voice_profile_config_validate). A build
+# reads its config at start, so a change applies to the next `systemctl start voice-profile`.
+- name: Config | config.json
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ voice_profile_config_file }}"
+    owner: "{{ voice_profile_root_owner }}"
+    group: "{{ voice_profile_group }}"
+    mode: "0640"
+    follow: false
+    validate: "{{ voice_profile_config_validate }}"

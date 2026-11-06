@@ -1,0 +1,80 @@
+---
+# Install one Python package into a dedicated directory and prune everything else there.
+# Params: voice_profile_tree_src (controller dir), voice_profile_tree_dest (absolute, basename must be
+# voice_profile_tree_name, since it is pruned). Only *.py files are installed. Never deployed: symlinks,
+# __pycache__, test/tests and node_modules anywhere in the tree. Nothing is restarted: the unit is on-demand
+# (preflight refuses while a build runs, so a build never sees a mix of old and new code).
+- name: Tree | the destination is a dedicated directory for {{ voice_profile_tree_name }}
+  ansible.builtin.assert:
+    that:
+      - voice_profile_tree_dest is abs
+      - voice_profile_tree_dest | basename == voice_profile_tree_name
+    fail_msg: "{{ voice_profile_tree_dest }} must be an absolute path ending in /{{ voice_profile_tree_name }} (it is pruned)."
+    quiet: true
+
+- name: Tree | source files of {{ voice_profile_tree_name }}
+  vars:
+    voice_profile_tree_entries: "{{ query('community.general.filetree', voice_profile_tree_src) }}"
+    voice_profile_tree_skip: '(^|/)(__pycache__|tests?|node_modules)(/|$)'
+  ansible.builtin.set_fact:
+    voice_profile_tree_files: >-
+      {{ voice_profile_tree_entries | selectattr('state', 'equalto', 'file') | map(attribute='path')
+         | select('search', '[.]py$') | reject('search', voice_profile_tree_skip) | sort }}
+    voice_profile_tree_dirs: >-
+      {{ voice_profile_tree_entries | selectattr('state', 'equalto', 'directory') | map(attribute='path')
+         | reject('search', voice_profile_tree_skip) | sort }}
+
+- name: Tree | there are files to install for {{ voice_profile_tree_name }}
+  ansible.builtin.assert:
+    that: voice_profile_tree_files | length > 0
+    fail_msg: No *.py files under {{ voice_profile_tree_src }}.
+    quiet: true
+
+- name: Tree | the destination and its subdirectories are real directories (before any write)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    voice_profile_guard_dirs: >-
+      {{ [voice_profile_tree_dest] + (voice_profile_tree_dirs | map('regex_replace', '^', voice_profile_tree_dest ~ '/') | list) }}
+
+- name: Tree | directories of {{ voice_profile_tree_name }}
+  ansible.builtin.file:
+    path: "{{ (voice_profile_tree_dest ~ '/' ~ item) | regex_replace('/$', '') }}"
+    state: directory
+    owner: "{{ voice_profile_owner }}"
+    group: "{{ voice_profile_owner }}"
+    mode: "0755"
+  loop: "{{ [''] + voice_profile_tree_dirs }}"
+
+- name: Tree | files of {{ voice_profile_tree_name }}
+  ansible.builtin.copy:
+    src: "{{ voice_profile_tree_src }}/{{ item }}"
+    dest: "{{ voice_profile_tree_dest }}/{{ item }}"
+    owner: "{{ voice_profile_owner }}"
+    group: "{{ voice_profile_owner }}"
+    mode: "0644"
+    follow: false
+  loop: "{{ voice_profile_tree_files }}"
+
+- name: Tree | the destination is still a real directory (before the find and prune)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    voice_profile_guard_dirs: >-
+      {{ [voice_profile_tree_dest] + (voice_profile_tree_dirs | map('regex_replace', '^', voice_profile_tree_dest ~ '/') | list) }}
+
+- name: Tree | installed files of {{ voice_profile_tree_name }}
+  ansible.builtin.find:
+    paths: "{{ voice_profile_tree_dest }}"
+    recurse: true
+    follow: false
+    file_type: any
+    hidden: true
+  register: voice_profile_tree_found
+
+- name: Tree | anything else is removed from {{ voice_profile_tree_name }}
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ voice_profile_tree_found.files | map(attribute='path') | reject('in', voice_profile_tree_wanted) | sort }}"
+  vars:
+    voice_profile_tree_wanted: >-
+      {{ (voice_profile_tree_dirs + voice_profile_tree_files) | map('regex_replace', '^', voice_profile_tree_dest ~ '/') | list }}

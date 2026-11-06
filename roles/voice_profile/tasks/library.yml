@@ -1,0 +1,19 @@
+---
+# The archive folder V moves stale cleaned texts into (the Lead's H7 decision, §12.21): 90-archive/40-writing,
+# the unit's second ReadWritePaths entry. It must exist before a build starts (systemd can't bind a missing
+# path; the unit asserts it), and a fresh library has only 90-archive/. Never through a symlink: systemd
+# follows one in ReadWritePaths, so a link here would make its target writable for the build.
+- name: Library | the archive folders are absent or real directories (before any write)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    voice_profile_guard_dirs: ["{{ voice_profile_archive_root }}", "{{ voice_profile_archive_dir }}"]
+
+# Owned like everything on the share (rgate:rgate 0770, the CIFS client's uid/gid/dir_mode), so a converge on
+# the mounted library is changed=0 after the first.
+- name: Library | 90-archive/40-writing
+  ansible.builtin.file:
+    path: "{{ voice_profile_archive_dir }}"
+    state: directory
+    owner: "{{ voice_profile_library_owner }}"
+    group: "{{ voice_profile_library_group }}"
+    mode: "{{ voice_profile_library_dir_mode }}"

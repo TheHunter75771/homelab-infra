@@ -1,0 +1,52 @@
+---
+# Not in check mode (tasks/main.yml). Read-only: it never starts a build.
+# 1. The unit is loaded, static (no [Install]: nothing can enable it) and nothing triggers it (no timer or path
+#    unit): it runs only when Noah or Claude starts it (§12.21.1).
+# 2. `voice-profile status` as vprof in a transient service with exactly the unit's sandbox and IP filter
+#    (voice_profile_sandbox) exits 0: V loads its config and opens the mounted library and 40-writing/ through
+#    the real ProtectSystem/ReadWritePaths/ReadOnlyPaths/PrivateTmp. status writes nothing and sends nothing: it
+#    only opens a TCP connection to the broker through the real IP filter and reports "broker: reachable" or
+#    "unreachable" (printed below, not asserted: a broker that is down must not fail the converge; the
+#    Integrator checks it, README "Host checks").
+- name: Verify | the unit's load and enablement state
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=LoadState, --property=UnitFileState, --property=TriggeredBy, "{{ voice_profile_service }}"]
+  register: voice_profile_unit_state
+  changed_when: false
+
+- name: Verify | loaded, static (never enabled) and triggered by nothing (no timer)
+  vars:
+    s: "{{ dict(voice_profile_unit_state.stdout_lines | map('split', '=', 1)) }}"
+  ansible.builtin.assert:
+    that:
+      - s.LoadState | default('') == 'loaded'
+      - s.UnitFileState | default('') == 'static'
+      - s.TriggeredBy is defined and s.TriggeredBy == ''
+    fail_msg: >-
+      voice-profile must be loaded, static and untriggered (on demand only); systemctl show says
+      {{ voice_profile_unit_state.stdout_lines }}. Remove any timer/path unit or [Install] link for it.
+    quiet: true
+
+- name: Verify | voice-profile status as vprof in the unit's sandbox
+  ansible.builtin.command:
+    argv: >-
+      {{ ['systemd-run', '--wait', '--pipe', '--collect', '--quiet', '--service-type=oneshot',
+          '--description=voice-profile status (Ansible verify)',
+          '--property=TimeoutStartSec=' ~ voice_profile_verify_timeout]
+         + (voice_profile_sandbox | map('regex_replace', '^', '--property=') | list)
+         + ['--'] + voice_profile_argv + ['status'] }}
+  register: voice_profile_status_run
+  changed_when: false
+  failed_when: false
+
+- name: Verify | the status check exited 0
+  ansible.builtin.assert:
+    that: voice_profile_status_run.rc == 0
+    fail_msg: >-
+      voice-profile status (as {{ voice_profile_user }}, in the unit's sandbox) exited {{ voice_profile_status_run.rc }};
+      stderr tail: {{ voice_profile_status_run.stderr_lines[-5:] | default([]) }}
+    # The status lines (library, samples, built files, the profile's status, and whether the broker's port opens
+    # from inside the IP filter: "broker: reachable") go to the play's output for the operator.
+    success_msg: >-
+      voice-profile status exited 0: {{ voice_profile_status_run.stdout_lines | join('; ') }}
+    quiet: true
