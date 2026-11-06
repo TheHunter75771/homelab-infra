@@ -1,0 +1,92 @@
+---
+- name: Service | recovery push script (run by homelab-calendar-recovered.service)
+  ansible.builtin.copy:
+    src: homelab-calendar-recovered.sh
+    dest: "{{ calendar_recovered_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Service | homelab-calendar unit
+  ansible.builtin.template:
+    src: homelab-calendar.service.j2
+    dest: /etc/systemd/system/{{ calendar_service }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Calendar daemon-reload
+    - Calendar restart
+
+# Neither is ever enabled: the alert runs from OnFailure=, the recovered unit from ExecStartPost=.
+- name: Service | alert and recovery units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: /etc/systemd/system/{{ item }}
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - "{{ calendar_alert_service }}"
+    - "{{ calendar_recovered_service }}"
+  notify: Calendar daemon-reload
+
+# After 5 failed starts systemd refuses even a fixed start until the 10 min window passes. A re-run
+# after fixing the cause (the usual answer to "Calendar is down") clears that first.
+- name: Service | is the calendar locked out after failing
+  ansible.builtin.command:
+    argv: [systemctl, is-failed, --quiet, "{{ calendar_service }}"]
+  register: calendar_is_failed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Service | clear the failed state
+  ansible.builtin.command:
+    argv: [systemctl, reset-failed, "{{ calendar_service }}"]
+  changed_when: true
+  notify: Calendar restart
+  when: calendar_is_failed.rc == 0
+
+# Reload units, then restart the calendar if anything it reads changed.
+- name: Service | apply pending reloads and restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Service | the calendar runs on every boot
+  ansible.builtin.systemd_service:
+    name: "{{ calendar_service }}"
+    enabled: true
+    state: started
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Service | refuses a request without a login (401)
+  ansible.builtin.uri:
+    url: "{{ calendar_base_url }}/"
+    method: PROPFIND
+    headers:
+      Depth: "0"
+    status_code: 401
+  register: calendar_health_anon
+  until: calendar_health_anon.status == 401
+  retries: 10
+  delay: 3
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Service | answers a logged-in request (207)
+  ansible.builtin.uri:
+    url: "{{ calendar_base_url }}/"
+    method: PROPFIND
+    headers:
+      Depth: "0"
+    url_username: "{{ calendar_accounts[0].user }}"
+    url_password: "{{ calendar_passwords[calendar_accounts[0].user] }}"
+    force_basic_auth: true
+    status_code: 207
+  register: calendar_health_auth
+  until: calendar_health_auth.status == 207
+  retries: 5
+  delay: 2
+  changed_when: false
+  no_log: true
+  when: not ansible_check_mode

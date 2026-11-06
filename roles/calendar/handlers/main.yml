@@ -1,0 +1,12 @@
+---
+# Order matters: handlers run in this order, so units are reloaded before the restart.
+- name: Calendar daemon-reload
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+# In check mode on a fresh host the unit isn't installed yet, which systemd_service reports as an error.
+- name: Calendar restart
+  ansible.builtin.systemd_service:
+    name: "{{ calendar_service }}"
+    state: restarted
+  ignore_errors: "{{ ansible_check_mode }}"

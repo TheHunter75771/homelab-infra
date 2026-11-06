@@ -20,5 +20,7 @@
     - role: stacks
     # after stacks (which retires push-core and frees 8085), before tailscale_serve (CONTRACTS §11)
     - role: dashboard
+    # host service outside Docker like the dashboard; before tailscale_serve, which proxies to it (CONTRACTS §13)
+    - role: calendar
     - role: tailscale_serve
     - role: backups

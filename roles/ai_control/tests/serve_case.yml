@@ -80,5 +80,5 @@
   ansible.builtin.assert:
     that:
       - ctl_test_ts_defaults.tailscale_serve_dashboard_backend == 'http://127.0.0.1:8085'
-      - ctl_test_ts_defaults.tailscale_serve_handlers | length == 7
+      - ctl_test_ts_defaults.tailscale_serve_handlers | length == 8  # 8445: Household Calendar (§13.2)
     quiet: true

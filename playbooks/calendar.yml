@@ -1,0 +1,19 @@
+---
+# Household Calendar (docs/CONTRACTS.md §13, ADR 0017): the targeted deploy for this item, and the
+# only way it deploys (§13.4: never site.yml from another base against the live media server).
+# It touches nothing else on the box:
+#   calendar         the calendar account, the python3-radicale/python3-bcrypt/python3-passlib/git
+#                    packages, /etc/homelab-calendar/, {{ homelab_data_dir }}/calendar/,
+#                    /usr/local/sbin/homelab-calendar-recovered, homelab-calendar.service,
+#                    homelab-calendar-alert.service and homelab-calendar-recovered.service
+#   tailscale_serve  re-applies the declared serve config (443, 8443, 8444, plus 8445 for the
+#                    calendar); it resets and re-adds handlers only when the live config drifted
+# Run with the vault (calendar_passwords) and host_vars (calendar_accounts) in place:
+#   .venv/bin/ansible-playbook playbooks/calendar.yml --check --diff
+#   .venv/bin/ansible-playbook playbooks/calendar.yml
+- name: Household Calendar on the media server
+  hosts: media_servers
+  become: true
+  roles:
+    - role: calendar
+    - role: tailscale_serve

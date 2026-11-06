@@ -1,6 +1,7 @@
 ---
-# One invalid case for test_serve_config.yml: case = {name, handlers}. The role's validation must fail
-# on its preconditions assert (not anywhere else).
+# One invalid case for test_serve_config.yml: case = {name, handlers, fails_on?}. The role's validation must
+# fail on its preconditions assert (not anywhere else). With fails_on, the first failing condition must be
+# exactly that one, so the case can't pass for some other reason.
 - name: Validation fails for {{ case.name }}
   block:
     - name: Run the role's validation
@@ -18,5 +19,8 @@
       ansible.builtin.assert:
         that:
           - ansible_failed_task.name is search('preconditions')
-        fail_msg: "unexpected failure in {{ ansible_failed_task.name }}: {{ ansible_failed_result.msg | default('') }}"
+          - case.fails_on is not defined or ansible_failed_result.assertion | default('') == case.fails_on
+        fail_msg: >-
+          unexpected failure in {{ ansible_failed_task.name }} on {{ ansible_failed_result.assertion | default('?') }}
+          (expected {{ case.fails_on | default('any precondition') }}): {{ ansible_failed_result.msg | default('') }}
         quiet: true

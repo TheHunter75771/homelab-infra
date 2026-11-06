@@ -105,6 +105,7 @@ This is the single spec for the MVP build. Builders own exactly the paths listed
   - HTTPS 443: `/` → `http://127.0.0.1:8085` (the dashboard) **only**.
   - HTTPS 8443: `/` → `http://127.0.0.1:5055` (jellyseerr).
   - HTTPS 8444: `/watch` → `http://127.0.0.1:8096/watch`, `/sonarr` → `…:8989/sonarr`, `/radarr` → `…:7878/radarr`, `/prowlarr` → `…:9696/prowlarr`, `/sabnzbd` → `…:8080/sabnzbd`.
+  - HTTPS 8445: `/` → `http://127.0.0.1:5232` (Household Calendar, host service, §13). Its own origin; household devices reach only 8443 and 8445.
   - **Never funnel.**
 - Public Jellyfin (**amended 2026-10-24, ADR 0016**): the Cloudflare tunnel's public hostname `{{ public_watch_host }}` (now the `watch.` subdomain), **whole hostname** → `http://jellyfin:8096`. Jellyfin keeps its `/watch` base URL and redirects `/` to it. The apex is a static homepage on Cloudflare Pages, not on the tunnel. That's configured in Cloudflare, not by Ansible (**amended 2026-10-25:** the route, the zone's DNS records and its HTTPS settings are OpenTofu code in `terraform/cloudflare/`, module T, applied only through a plan that passes `plan-guard.sh`; `docs/runbooks/cloudflare.md`, module C, keeps the first-setup steps).
 
@@ -138,7 +139,7 @@ This is the single spec for the MVP build. Builders own exactly the paths listed
 ## 9. Lead-owned files
 `ansible.cfg`, `requirements.yml`, `inventory/**`, `playbooks/bootstrap.yml`, `playbooks/site.yml`, `docs/CONTRACTS.md`, `README.md`, `CLAUDE.md`, `.github/workflows/ci.yml`, `.gitignore`, lint configs.
 
-`playbooks/site.yml` order (hosts `media_servers`, become): base → users → ssh_hardening → tailscale → dns → watchdog → storage → firewall → docker → bootgate → notifier → stacks → dashboard → tailscale_serve → backups (firewall moved before docker, review L1; dashboard added 2026-10-24, §11.5).
+`playbooks/site.yml` order (hosts `media_servers`, become): base → users → ssh_hardening → tailscale → dns → watchdog → storage → firewall → docker → bootgate → notifier → stacks → dashboard → calendar → tailscale_serve → backups (firewall moved before docker, review L1; dashboard added 2026-10-24, §11.5; calendar added 2026-11-06, §13; deploy it with `playbooks/calendar.yml` only, §13.4).
 
 ## 9b. Ownership of shared paths (amended)
 - `{{ homelab_push_dir }}`: owner and mode set **only** by `dashboard` (user `dashboard` 10101, §11.1; was `stacks`/`pushcore` before 2026-10-24). The notifier, backups and heartbeat read it and never chown or chmod it.
@@ -185,6 +186,7 @@ This is the single spec for the MVP build. Builders own exactly the paths listed
 | H dashboard host | `roles/dashboard/` |
 | T cloudflare-as-code | `terraform/cloudflare/` (OpenTofu; P8 #2, encrypted local state, never applied without a reviewed plan) |
 | E ops | `roles/backups/`, `playbooks/gaming-pc.yml`, `playbooks/edge.yml`, `roles/heartbeat/`, `roles/backup_pull/` |
+| Q calendar | `roles/calendar/`, `playbooks/calendar.yml`, `docs/runbooks/calendar.md` (§13) |
 
 ## 11. Dashboard v2 (build started 2026-10-24)
 Design: `docs/design/handoff/README.md` (high fidelity), corrected by `docs/design/handoff/CORRECTIONS.md`. Decisions: **host service outside Docker** (ADR 0013), **tailnet-only in v2.0** (ADR 0014). The dashboard **absorbs push-core**: the same port, the push store and every push-core endpoint the notifier and phones use.
@@ -2603,3 +2605,117 @@ and account names, real tailnet names and addresses. Nothing has been pushed (or
   - **Lead decision:** zero saved runs exist (the payday-runs folder is empty), so the legacy reader is dropped entirely. The README and tests describe the deposit pattern generically; originals go to private notes. Lows W8-3/4/5 fixed now.
   - **Rule (Lead):** never put Noah's real financial data (dates, amounts, transactions) in this repo, even as 'observed' test data.
 - **Reviewer W round 9 (2026-10-29): payday-tool APPROVED.** Brand-free in every encoding; no real financial data; 137 tests; 34/34 rebuilt mutants. 'Privacy follow-up done' sent to the QoL session.
+
+## 13. Household Calendar on the media server (build started 2026-11-06)
+Noah 2026-11-06: one self-hosted calendar for him and a second household member (whose iPhone joins the tailnet), on the **media server**, built by Claude under the team rules. This is rebuild item P8 #10, pulled forward. v1 is a CalDAV server and nothing else: event alarms (VALARM) are stored on the events and fired by each phone's own calendar app, so v1 needs no push code. The FastAPI debrief service and the PWA come later, each as its own item. Decision record: ADR 0017.
+
+### 13.1 Runtime (module Q, role `calendar`)
+- **Packages** (Ubuntu archive, `apt`, `install_recommends: false`): `python3-radicale`, `python3-bcrypt`, `python3-passlib`, `git`. **Not** the `radicale` package: it ships its own unit, user and config, which this role replaces. Unpinned like every apt package (unattended-upgrades patches them); the role asserts the installed series instead: `importlib.metadata.version("radicale")` must start with `calendar_radicale_series`, default the major.minor of `python_packages.radicale` in `versions.yml` (Lead pins `3.6.0`; CI's smoke test installs that exact version).
+- **User:** system group + user `calendar` (no fixed uid), `shell: /usr/sbin/nologin`, `home: /nonexistent`, no supplementary groups, `password_lock: true`.
+- **Paths:**
+  - `/etc/homelab-calendar/` root:calendar 0750, holding `config` (0640, templated) and `users` (htpasswd, bcrypt, root:calendar 0640).
+  - `{{ homelab_data_dir }}/calendar/` calendar:calendar 0750 (system disk; the nightly backup picks it up with no change to role `backups`, §8). Collections live in `…/calendar/collections/`.
+- **Users file:** `community.general.htpasswd` with `crypt_scheme: bcrypt` from `calendar_passwords` (vault, `{user: password}`), `no_log: true`. A user who is no longer in `calendar_accounts` is removed from the file. The role never deletes collection data.
+- **Config** (INI, every option below set explicitly):
+  - `[server]` `hosts = 127.0.0.1:{{ calendar_port }}` (default 5232), `max_connections = 8`, `max_content_length = 10000000`, `timeout = 30`.
+  - `[auth]` `type = htpasswd`, `htpasswd_filename = /etc/homelab-calendar/users`, `htpasswd_encryption = bcrypt`, `delay = 1`, `realm = Calendar`.
+  - `[rights]` `type = owner_only`. Each login sees only `/<user>/`.
+  - Whole-calendar deletes and collection overwrites are refused (`permit_delete_collection = False`, `permit_overwrite_collection = False`, in whichever section Radicale 3.6 reads them; the smoke test proves it). Deleting a calendar is a runbook step, not a phone action.
+  - `[storage]` `type = multifilesystem`, `filesystem_folder = {{ homelab_data_dir }}/calendar/collections`, `hook = git add -A && (git diff --cached --quiet || git commit -q -m "Changes by "%(user)s)`. `%(user)s` stays outside the double quotes because Radicale shell-quotes it (amended round 1).
+  - `[web]` `type = none`. `[logging]` `level = info`, `mask_passwords = True`.
+- **Undo history:** `collections/` is a git repo owned by `calendar`. Init once (`git init -b main`) with repo-local `user.name`/`user.email` (placeholder identity, no real address) and a `.gitignore` of `.Radicale.cache`, `.Radicale.lock` and `.Radicale.tmp-*`. Every change commits through the hook. Idempotent: no commit or `changed` on re-runs.
+- **Unit `homelab-calendar.service`:**
+  - `ExecStart=/usr/bin/python3 -m radicale --config /etc/homelab-calendar/config`, `User=`/`Group=calendar`, `Type=exec`, `Restart=always`, `RestartSec=5s`.
+  - `[Unit]` `StartLimitIntervalSec=600`, `StartLimitBurst=5`, and in `[Service]` **`RestartMode=direct`**. Both are load-bearing:
+    - With the default `RestartMode=normal`, every crash passes through `failed`, so `OnFailure=` fires on each one. The VM showed 5 "down" calls per incident, and a crash that heals on its first restart still sent a false "down".
+    - With `direct`, auto-restarts skip `failed`, and `OnFailure=` fires once, when the start limit gives up.
+  - `After=network.target`. **No ordering on `docker.service` or `bootgate.service`**: the calendar must run while the boot gate holds Docker (ADR 0004, same reason as ADR 0013).
+  - Hardening: the dashboard's full directive set (§11.1, `roles/dashboard/templates/homelab-dashboard.service.j2`) with `ReadWritePaths={{ homelab_data_dir }}/calendar`. Also `IPAddressDeny=any`, `IPAddressAllow=localhost`, `MemoryDenyWriteExecute=yes`, `UMask=0027`, `MemoryMax=192M`, `TasksMax=64`. Target: `systemd-analyze security homelab-calendar` exposure ≤ 2.0. Put the measured score in the unit's header comment.
+  - `OnFailure=homelab-calendar-alert.service`. That's a oneshot running `{{ notifier_bin | default('/usr/local/bin/homelab-notify') }} --tag calendar --title "Calendar is down" --body "homelab-calendar.service failed. See: journalctl -u homelab-calendar"` with `SuccessExitStatus=2`, following the `homelab-backup-alert.service` pattern (§8). It also writes a marker under `StateDirectory=homelab-calendar-alert`.
+  - `ExecStartPost=+/usr/local/sbin/homelab-calendar-recovered`: if the marker exists, push `--tag calendar --title "Calendar back up"` and remove the marker. That closes the alert on the dashboard (recovery-word rule, §11). With no marker it does nothing and exits 0. A failed push never fails the unit.
+- **Amended (Lead, 2026-11-06, Builder Q's finding):**
+  - **The recovery push runs in its own unit.** `ExecStartPost=+` stays in the calendar's cgroup, so `IPAddressDeny=any` would drop the push to the internet. The calendar unit now only runs `ExecStartPost=+/usr/bin/systemctl start --no-block homelab-calendar-recovered.service`. That oneshot runs `/usr/local/sbin/homelab-calendar-recovered` (wait for the server, push "Calendar back up" if the marker exists, remove the marker). It has `After=network-online.target`, the marker state dir and no IP filter, and it never fails its caller. The IP filter on the calendar unit stays.
+  - **Reserved names:** preflight also refuses any login or calendar id that equals a name in role backups' `backups_exclude_dirs`. Those folders are skipped by the nightly backup wherever they appear, and a test keeps the two lists equal.
+- **Amended (Lead, 2026-11-06, Reviewer round 1):**
+  - "Back up" requires an unauthenticated `PROPFIND /` → 401, then a short settle with `homelab-calendar.service` still active on the same InvocationID. One TCP accept isn't enough.
+  - The recovered unit gets the dashboard group (`SupplementaryGroups=`) and an empty capability bounding set, not `CAP_DAC_READ_SEARCH`.
+  - MKCALENDAR sends a VEVENT-only `supported-calendar-component-set`, so the calendars don't also show up as iOS Reminders lists.
+  - `calendar_listen_host` must be IPv4 loopback.
+  - The hook's `%(user)s` stays outside double quotes, because Radicale shell-quotes it itself.
+  - Check mode skips the htpasswd tasks when passlib isn't installed yet.
+- **Health check after start:** an unauthenticated `PROPFIND /` returns 401 and an authenticated one returns 207, with retries (`until`, like the dashboard's `/healthz` check). Skipped in check mode.
+- **Accounts and calendars** (`calendar_accounts`, host_vars, never committed):
+  - `[{user, calendars: [{id, name}]}]`, e.g. Noah (`personal`, `routines`), the household member (`personal`), and the shared login `household` (`shared`, `school`).
+  - Each calendar is ensured over the server's own API, authenticated as that user: `PROPFIND` Depth 0, and on 404 `MKCALENDAR` with the display name. `changed` only on create; `no_log` on every task that carries a password.
+- **Preflight asserts** (quiet, plain-English `fail_msg`):
+  - `calendar_accounts` is non-empty;
+  - users match `^[a-z][a-z0-9_-]{1,31}$` and are unique, and calendar ids match `^[a-z0-9-]{1,40}$` and are unique per user;
+  - every user has a non-empty `calendar_passwords` entry of at least 16 characters;
+  - `calendar_port` is an integer;
+  - `homelab_data_dir` is defined.
+- **Playbook `playbooks/calendar.yml`** (module Q): `hosts: media_servers`, `become: true`, roles `calendar` then `tailscale_serve`. It's the targeted deploy for this item, and its header says it touches nothing else.
+- **Tests** (`roles/calendar/tests/`, stdlib `unittest`, run by CI):
+  - **(a)** Render every template with the role defaults plus placeholder vars (RFC 5737 addresses, `example` names) and check the config parses and holds every option above.
+  - **(b)** If `radicale` is importable, run a real server from the rendered config on a free loopback port with temp paths and prove:
+    - 401 without auth and 207 with it;
+    - `MKCALENDAR` 201;
+    - user A reading or writing user B's calendar is refused;
+    - deleting a whole calendar is refused;
+    - `PUT` then `GET` round-trips these fixtures with every property intact: a weekly recurring event with an `EXDATE` exception, an all-day event, an event crossing the 2026-11-01 America/New_York DST change, and an event with a `VALARM`;
+    - each change adds exactly one git commit, and a re-run of an unchanged PUT adds none.
+  - **(c)** `homelab-calendar-recovered` (marker present → one push and the marker is gone; no marker → no push, exit 0) with a stub notifier on `PATH`. Use `shellcheck` clean if it's bash.
+- **Runbook `docs/runbooks/calendar.md`** (module Q):
+  - add an iPhone (Settings → Calendar → Accounts → Add Account → Other → CalDAV account; server `https://<node>:8445/`; and the second, `household` account);
+  - add Thunderbird;
+  - add or remove a user (host_vars + vault + `playbooks/calendar.yml`);
+  - reset a password;
+  - restore one event from the git history;
+  - restore everything from the nightly backup;
+  - what the "Calendar is down" push means and the first three checks.
+  Placeholders only.
+
+### 13.2 Exposure (module C, role `tailscale_serve`)
+- Add a handler `{ port: 8445, mount: /, backend: "http://127.0.0.1:5232" }` (Household Calendar) and its line in the header comment: its own origin (ADR 0015), and no UFW rule (ADR 0015: serve listeners belong to tailscaled).
+- Update `tests/test_serve_config.yml` and its fixtures, which hard-code the TCP port set, to expect 8445. The existing invalid case that uses 8445 stays invalid.
+- Bump the handler count in `roles/ai_control/tests/serve_case.yml` (it reads these defaults to prove ai_control leaves them alone) from 7 to 8.
+
+### 13.3 Tailnet policy example (module A, `tailscale/policy.example.hujson`)
+- Port comment for 8445.
+- Household rule: `tcp:8443` → `["tcp:8443", "tcp:8445"]`.
+- Edge test deny list: add `tag:server:8445`.
+- Private-copy test note: accept `tag:server:8445` for household.
+- Noah pastes the live policy change himself. The Lead gives him the exact diff.
+
+### 13.4 Lead
+- `playbooks/site.yml` and §9: `calendar` goes after `dashboard` and before `tailscale_serve`.
+- `versions.yml` `python_packages.radicale: "3.6.0"`.
+- `group_vars/media_servers/main.yml` `calendar_passwords: "{{ vault_calendar_passwords }}"`.
+- The vault entry, plus its row in `docs/runbooks/rotate-a-secret.md`.
+- Real `calendar_accounts` in `host_vars`.
+- A CI `role-tests` step (`pip install "radicale==$PIN"`, then `python3 -m unittest discover -s roles/calendar/tests -v`).
+- ADR 0017 and the ADR index.
+- **This item deploys only through `playbooks/calendar.yml`.** The live media server has `voice`-branch changes (operator account, classic sudo), so `site.yml` from another base must never run against it.
+
+### 13.5 Integrator
+- **VM first:** a throwaway Ubuntu 26.04 KVM guest on the gaming PC, with a stub `homelab-notify` that logs its arguments.
+  - The role runs twice, the second with `changed=0`.
+  - 401/207 on loopback.
+  - `systemctl stop docker` (or Docker absent) doesn't affect the calendar.
+  - A broken config gives 5 starts → `failed` → the alert unit ran. Fixed config gives a "back up" push and no marker left.
+  - `systemd-analyze security` ≤ 2.0.
+  - `tailscale_serve` is not exercised in the VM.
+- **Amended (2026-11-06, Reviewer round 1):** the failure check must show the stub logging **exactly one** "Calendar is down" per crash-looping incident and **none** for a crash that heals. A run where the unit merely reaches `failed` isn't enough. Then exactly one "Calendar back up" after the fix.
+- **Then the media server:**
+  - `playbooks/calendar.yml --check --diff`, then a real run, then a re-run with `changed=0`.
+  - Over the tailnet from the gaming PC: `https://<node>:8445/` gives 401 and 207.
+  - Dashboard 443, Jellyseerr 8443 and the 8444 apps still answer.
+  - `systemd-analyze security homelab-calendar` ≤ 2.0.
+- **Never `site.yml` from this branch.**
+
+### 13.6 Ownership
+| Module | Owns |
+|---|---|
+| Q calendar | `roles/calendar/`, `playbooks/calendar.yml`, `docs/runbooks/calendar.md` |
+| C stacks | the 8445 handler and its test/fixtures in `roles/tailscale_serve/`, and the handler count in `roles/ai_control/tests/serve_case.yml` |
+| A host | the 8445 lines in `tailscale/policy.example.hujson` |
+| Lead | §13, §9, §10, `site.yml`, `versions.yml`, `inventory/**`, vault, `ci.yml`, ADR 0017, `rotate-a-secret.md` |

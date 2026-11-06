@@ -14,6 +14,7 @@ cloudflared_tunnel_token: "{{ vault_cloudflared_tunnel_token }}"
 wol_relay_token: "{{ vault_wol_relay_token }}"
 vapid_public_key: "{{ vault_vapid_public_key }}"
 vapid_private_key: "{{ vault_vapid_private_key }}"
+calendar_passwords: "{{ vault_calendar_passwords }}" # §13: {calendar user: password}
 # Apple rejects some VAPID subjects (e.g. mailto:…@localhost). An https URL is known to work on iPhone.
 vapid_subject: "https://{{ public_watch_host }}"
 # Declared inbound UFW rules (docs/CONTRACTS.md §7, §12.2). The role prefixes comments with "homelab: ".

@@ -26,20 +26,24 @@
         name: "{{ tailscale_serve_role }}"
         tasks_from: desired
 
-    - name: The render has three HTTPS ports and the ADR 0015 layout
+    - name: The render has four HTTPS ports and the ADR 0015 layout
       vars:
         web: "{{ tailscale_serve_desired.Web }}"
       ansible.builtin.assert:
         that:
           - tailscale_serve_desired.keys() | sort == ['TCP', 'Web']
           - >-
-            tailscale_serve_desired.TCP == {'443': {'HTTPS': true}, '8443': {'HTTPS': true}, '8444': {'HTTPS': true}}
-          - web.keys() | sort == [node ~ ':443', node ~ ':8443', node ~ ':8444']
+            tailscale_serve_desired.TCP
+            == {'443': {'HTTPS': true}, '8443': {'HTTPS': true}, '8444': {'HTTPS': true}, '8445': {'HTTPS': true}}
+          - web.keys() | sort == [node ~ ':443', node ~ ':8443', node ~ ':8444', node ~ ':8445']
           - >-
             web[node ~ ':443'] == {'Handlers': {'/': {'Proxy': 'http://127.0.0.1:8085'}}}
           - >-
             web[node ~ ':8443'] == {'Handlers': {'/': {'Proxy': 'http://127.0.0.1:5055'}}}
           - web[node ~ ':8444'].Handlers.keys() | sort == ['/prowlarr', '/radarr', '/sabnzbd', '/sonarr', '/watch']
+          # Household Calendar (CONTRACTS §13.2): its own origin, `/` only, to Radicale on loopback.
+          - >-
+            web[node ~ ':8445'] == {'Handlers': {'/': {'Proxy': 'http://127.0.0.1:5232'}}}
           # Serve strips the mount, so no path-based backend may be a bare host:port.
           - >-
             web[node ~ ':8444'].Handlers | dict2items
@@ -64,12 +68,20 @@
             {"Web": {"{{ node }}:8444": {"Handlers": {"/watch": {"Proxy": "http://127.0.0.1:8096/watch"},
             "/sabnzbd": {"Proxy": "http://127.0.0.1:8080/sabnzbd"}, "/sonarr": {"Proxy": "http://127.0.0.1:8989/sonarr"},
             "/radarr": {"Proxy": "http://127.0.0.1:7878/radarr"}, "/prowlarr": {"Proxy": "http://127.0.0.1:9696/prowlarr"}}},
+            "{{ node }}:8445": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:5232"}}},
             "{{ node }}:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8085"}}},
             "{{ node }}:8443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:5055"}}}},
-            "TCP": {"8444": {"HTTPS": true}, "443": {"HTTPS": true}, "8443": {"HTTPS": true}}}
+            "TCP": {"8444": {"HTTPS": true}, "8445": {"HTTPS": true}, "443": {"HTTPS": true}, "8443": {"HTTPS": true}}}
           want: false
         - { name: "empty serve config", json: "{}", want: true }
         - { name: "pre-ADR-0015 layout (apps on 443)", json: "{{ fixture_before }}", want: true }
+        # The live state before CONTRACTS §13: the ADR 0015 layout with no calendar. The first deploy must re-apply.
+        - name: "pre-calendar layout (no 8445)"
+          json: >-
+            {{ {'TCP': (fixture_adr0015 | from_json).TCP | dict2items | rejectattr('key', 'equalto', '8445') | items2dict,
+                'Web': (fixture_adr0015 | from_json).Web | dict2items | rejectattr('key', 'equalto', node ~ ':8445') | items2dict}
+               | to_json }}
+          want: true
         - name: "funnel switched on"
           json: "{{ fixture_adr0015 | from_json | combine({'AllowFunnel': {node ~ ':443': true}}) | to_json }}"
           want: true
@@ -88,7 +100,9 @@
                          recursive=true) | to_json }}
           want: true
         - name: "port 8444 not marked HTTPS"
-          json: "{{ fixture_adr0015 | from_json | combine({'TCP': {'443': {'HTTPS': true}, '8443': {'HTTPS': true}}}) | to_json }}"
+          json: >-
+            {{ fixture_adr0015 | from_json
+               | combine({'TCP': {'443': {'HTTPS': true}, '8443': {'HTTPS': true}, '8445': {'HTTPS': true}}}) | to_json }}
           want: true
       loop_control:
         loop_var: case
@@ -105,10 +119,12 @@
           handlers:
             - { port: 443, mount: /, backend: "http://127.0.0.1:8085" }
             - { port: 8444, mount: /dash, backend: "http://127.0.0.1:8085" }
+        # 8445 is the calendar's port now; this list has no calendar handler, so the dashboard-elsewhere check is what fails.
         - name: "dashboard backend with a path on another port"
           handlers:
             - { port: 443, mount: /, backend: "http://127.0.0.1:8085" }
             - { port: 8445, mount: /, backend: "http://127.0.0.1:8085/api" }
+          fails_on: tailscale_serve_dashboard_backend_handlers | length == 1
         - name: "dashboard port points elsewhere"
           handlers:
             - { port: 443, mount: /, backend: "http://127.0.0.1:8096" }

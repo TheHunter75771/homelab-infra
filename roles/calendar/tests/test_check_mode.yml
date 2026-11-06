@@ -1,0 +1,134 @@
+---
+# Offline test of tasks/config.yml in check mode on a fresh host (no root, no host; none of the
+# role's paths exist yet). community.general.htpasswd needs passlib on the target and checks for it
+# before it looks at check mode, and a check run on a fresh host has installed nothing. So:
+#   - the module interpreter can't import passlib: the users-file steps skip with a note, the run passes;
+#   - it can: they run as a check (would create the file), the run passes.
+# Run it in check mode:
+#   ansible-playbook --check -i localhost, -c local roles/calendar/tests/test_check_mode.yml
+# The second case needs a Python with passlib (-e calendar_test_passlib_python=...; by default the
+# controller's, which has it once radicale is installed). Without one it says so and skips that case.
+# The role's restart handler then reports the missing unit and is ignored: check mode on a fresh host.
+# Also in check mode: tasks/preflight.yml passes when the push store's group exists (root stands in
+# for dashboard), and stops the run, in plain English, when it doesn't, or when calendar_listen_host
+# isn't exactly 127.0.0.1 (tailscale_serve always proxies 8445 there).
+- name: Calendar preflight and users file in check mode on a fresh host
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  # The committed, public group_vars (layout and versions), as the media server gets them.
+  vars_files:
+    - ../../../inventory/group_vars/all/main.yml
+    - ../../../inventory/group_vars/all/versions.yml
+  vars:
+    calendar_role: "{{ playbook_dir | dirname }}"
+    calendar_test_passlib_python: "{{ ansible_playbook_python }}"
+    # Placeholder logins; test-only passwords.
+    calendar_accounts:
+      - { user: alice, calendars: [{ id: personal, name: Personal }] }
+      - { user: household, calendars: [{ id: shared, name: Shared }] }
+    calendar_passwords:
+      alice: check-mode-test-only-0001
+      household: check-mode-test-only-0002
+  tasks:
+    - name: This test runs in check mode
+      ansible.builtin.assert:
+        that: ansible_check_mode
+        fail_msg: Run it with --check; it tests the check-mode path.
+        quiet: true
+
+    - name: A fresh directory for the role's paths
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: calendar-check-mode-
+      register: calendar_test_fresh
+      check_mode: false
+
+    - name: Both cases, then clean up
+      block:
+        - name: A Python without site-packages, so without passlib
+          ansible.builtin.copy:
+            dest: "{{ calendar_test_fresh.path }}/python-no-site"
+            content: |
+              #!/bin/sh
+              exec {{ ansible_playbook_python }} -S "$@"
+            mode: "0755"
+          check_mode: false
+
+        - name: Case 1, passlib missing
+          ansible.builtin.include_tasks: check_mode_case.yml
+          vars:
+            case_python: "{{ calendar_test_fresh.path }}/python-no-site"
+            case_passlib: false
+
+        - name: Can the other interpreter import passlib
+          ansible.builtin.command:
+            argv: ["{{ calendar_test_passlib_python }}", -c, import passlib.apache]
+          register: calendar_test_other
+          changed_when: false
+          failed_when: false
+          check_mode: false
+
+        - name: Case 2, passlib present
+          ansible.builtin.include_tasks: check_mode_case.yml
+          vars:
+            case_python: "{{ calendar_test_passlib_python }}"
+            case_passlib: true
+          when: calendar_test_other.rc == 0
+
+        - name: Case 2 skipped
+          ansible.builtin.debug:
+            msg: "{{ calendar_test_passlib_python }} can't import passlib; pass -e calendar_test_passlib_python=<python with passlib>."
+          when: calendar_test_other.rc != 0
+
+        - name: Preflight, the push group exists
+          ansible.builtin.include_role:
+            name: "{{ calendar_role }}"
+            tasks_from: preflight
+          vars:
+            calendar_push_group: root
+
+        - name: Preflight, the push group is missing
+          block:
+            - name: Preflight with a group that doesn't exist
+              ansible.builtin.include_role:
+                name: "{{ calendar_role }}"
+                tasks_from: preflight
+              vars:
+                calendar_push_group: calendar-test-no-such-group
+            - name: The preflight should have stopped here
+              ansible.builtin.fail:
+                msg: The preflight passed without the push store's group.
+          rescue:
+            - name: It stopped for the missing group, and says what to do
+              ansible.builtin.assert:
+                that:
+                  - "'calendar-test-no-such-group' in ansible_failed_result.msg"
+                  - "'deploy role dashboard first' in ansible_failed_result.msg"
+                fail_msg: "Wrong failure: {{ ansible_failed_result.msg | default('none') }}"
+                quiet: true
+
+        - name: Preflight, another loopback address
+          block:
+            - name: Preflight with 127.0.0.2 (loopback, but not where tailscale serve proxies)
+              ansible.builtin.include_role:
+                name: "{{ calendar_role }}"
+                tasks_from: preflight
+              vars:
+                calendar_push_group: root
+                calendar_listen_host: 127.0.0.2
+            - name: The preflight should have stopped here
+              ansible.builtin.fail:
+                msg: The preflight passed with calendar_listen_host 127.0.0.2.
+          rescue:
+            - name: It stopped for the address, and says which one it must be
+              ansible.builtin.assert:
+                that: "'must be exactly 127.0.0.1' in ansible_failed_result.msg"
+                fail_msg: "Wrong failure: {{ ansible_failed_result.msg | default('none') }}"
+                quiet: true
+      always:
+        - name: Remove the fresh directory
+          ansible.builtin.file:
+            path: "{{ calendar_test_fresh.path }}"
+            state: absent
+          check_mode: false

@@ -1,0 +1,41 @@
+---
+- name: App | Radicale, bcrypt, passlib and git from the Ubuntu archive
+  ansible.builtin.apt:
+    name: "{{ calendar_packages }}"
+    state: present
+    install_recommends: false
+    update_cache: true
+    cache_valid_time: 3600
+
+# Radicale refuses to start with htpasswd_encryption = bcrypt when bcrypt >= 5 meets a passlib
+# older than 1.9.3 (its own check, radicale.utils). The same pair hashes the users file.
+- name: App | installed Radicale version and bcrypt support
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import importlib.metadata as m
+        from radicale import utils
+        ok, info = utils.passlib_libpass_supports_bcrypt()
+        print(m.version("radicale"))
+        print("bcrypt-ok" if ok else "bcrypt-unusable: " + info)
+  register: calendar_radicale_probe
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: App | Radicale is the contract's series, with working bcrypt
+  ansible.builtin.assert:
+    that:
+      - calendar_radicale_probe.rc == 0
+      - calendar_radicale_probe.stdout_lines | length == 2
+      - >-
+        calendar_radicale_probe.stdout_lines[0] == calendar_radicale_series
+        or calendar_radicale_probe.stdout_lines[0].startswith(calendar_radicale_series ~ '.')
+      - calendar_radicale_probe.stdout_lines[1] == 'bcrypt-ok'
+    fail_msg: >-
+      Expected Radicale {{ calendar_radicale_series }}.x from the Ubuntu archive with usable bcrypt; got:
+      {{ calendar_radicale_probe.stdout | default('') }} {{ calendar_radicale_probe.stderr | default('') | truncate(300) }}
+    quiet: true
+  when: not ansible_check_mode

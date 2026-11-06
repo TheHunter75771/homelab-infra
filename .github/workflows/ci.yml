@@ -160,12 +160,24 @@ jobs:
         run: python3 -m unittest discover -s roles/dashboard_desktop/tests -v
       - name: dashboard helper
         run: python3 -m unittest discover -s roles/dashboard/files/homelab-dockerctl/tests -v
+      - name: calendar (render + Radicale smoke test)
+        run: |
+          # radicale + the bcrypt/libpass pair its startup check depends on, as pinned in versions.yml
+          for k in radicale bcrypt libpass; do
+            P=$(python3 -c "import yaml;v=yaml.safe_load(open('inventory/group_vars/all/versions.yml'));print(v['python_packages']['$k'])")
+            pip install "$k==$P"
+          done
+          python3 -m unittest discover -s roles/calendar/tests -v
       - name: storage format guard
         run: |
           pip install -r requirements-tools.txt
           ansible-galaxy collection install -r requirements.yml -p ./collections
           printf 'dummy\n' > /tmp/vault-pass
           ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/storage/tests/test_format_guard.yml
+      # Depends on two earlier steps in this job: "calendar" (libpass) and "storage format guard" (ansible-core,
+      # ./collections, /tmp/vault-pass). Keep it after both.
+      - name: calendar check mode (no passlib yet; needs the tools above and libpass from the calendar step)
+        run: ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook --check -i localhost, -c local roles/calendar/tests/test_check_mode.yml
       - name: base sysctl filter
         run: python3 -m unittest discover -s roles/base/tests -v
       - name: base sysctl files

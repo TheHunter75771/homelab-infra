@@ -1,0 +1,68 @@
+# {{ ansible_managed }}
+# "Calendar back up" (docs/CONTRACTS.md §13.1, amended 2026-11-06). Started, never waited for, by
+# ExecStartPost= of {{ calendar_service }}. It runs in its own unit because an ExecStartPost= process
+# stays in the calendar's cgroup, where IPAddressDeny=any would drop the push to the internet.
+# If {{ calendar_alert_service }} left its marker, homelab-calendar-recovered waits until Radicale
+# serves (loopback), pushes and removes the marker. The script always exits 0, so this unit never fails.
+# Modelled on the alert unit, plus a sandbox that keeps what homelab-notify needs: the internet and
+# loopback (Web Push, the dashboard's prune call), reading the push store, and writing only its state
+# dir and the marker dir. Root with no capabilities: the store is readable by group
+# {{ calendar_push_group }} (dir 0750, vapid.json root:{{ calendar_push_group }} 0640, subscriptions.json
+# 0640, role dashboard), and everything it writes is root's own (role notifier: state dir root 0755,
+# history.jsonl root 0644, its dedupe state 0600).
+# systemd-analyze security (systemd 259, offline, on the rendered unit): 1.7 OK. What remains: root, IP
+# sockets on the host network with no IP allow list (Web Push goes to the internet), no
+# PrivateUsers=/ProcSubset=, @resources, the default UMask.
+# Proven with the real homelab-notify (roles/notifier/files) in a transient systemd 259 unit with this
+# sandbox: DNS, TLS to an internet host, payload encryption and VAPID signing, its state dir and syslog
+# all worked. Root without capabilities can't be reproduced in a user manager.
+[Unit]
+Description=Push "Calendar back up" after the household calendar recovered
+After=network-online.target {{ calendar_service }}
+Wants=network-online.target
+# Never rate-limited: a refused start would swallow the recovery push.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+StateDirectory={{ calendar_alert_state_name }}
+ExecStart={{ calendar_recovered_script }}
+Environment=CALENDAR_ALERT_MARKER={{ calendar_alert_marker }}
+Environment=CALENDAR_NOTIFY_BIN={{ calendar_notify_bin }}
+Environment=CALENDAR_HOST={{ calendar_listen_host }}
+Environment=CALENDAR_PORT={{ calendar_port }}
+Environment=CALENDAR_WAIT_SECONDS={{ calendar_recovered_wait_seconds }}
+Environment=CALENDAR_SETTLE_SECONDS={{ calendar_recovered_settle_seconds }}
+Environment=CALENDAR_SERVICE={{ calendar_service }}
+# The wait, the settle period, and one push per device (homelab-notify times out each one).
+TimeoutStartSec=5min
+SyslogIdentifier=homelab-calendar-recovered
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=-{{ calendar_notify_state_dir }}
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+# Reads the push store through its group, never through a DAC override.
+SupplementaryGroups={{ calendar_push_group }}
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes

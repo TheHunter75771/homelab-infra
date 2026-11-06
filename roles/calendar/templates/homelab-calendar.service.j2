@@ -1,0 +1,76 @@
+# {{ ansible_managed }}
+# Household Calendar (docs/CONTRACTS.md §13.1, ADR 0017): Radicale from the Ubuntu archive, on
+# loopback only (tailscale serve publishes it on 8445). A host service, outside Docker, so it stays
+# up while the boot gate holds Docker. No ordering on docker.service or bootgate.service, on purpose.
+# systemd-analyze security (systemd 259, offline, on the rendered unit): 1.2 OK. What remains: AF_INET
+# sockets (it listens on loopback), the host network (tailscale serve must reach it), no PrivateUsers=
+# or ProcSubset=, @resources in the syscall allow list, and UMask 0027 (group-readable, group calendar).
+# No directive dropped: Radicale and its git hook ran under this exact sandbox set (MemoryDenyWriteExecute
+# and the syscall filter included) in a transient systemd 259 unit; every change committed once.
+# ExecStartPost= only queues homelab-calendar-recovered.service (its own unit, outside this IP filter).
+[Unit]
+Description=Household Calendar (CalDAV, tailnet-only)
+Documentation=file://{{ calendar_config_file }}
+After=network.target
+# Without a start limit, Restart=always loops forever and OnFailure= never fires.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+OnFailure={{ calendar_alert_service }}
+
+[Service]
+Type=exec
+User={{ calendar_user }}
+Group={{ calendar_user }}
+ExecStart=/usr/bin/python3 -m radicale --config {{ calendar_config_file }}
+# Closes a "Calendar is down" alert, from its own unit (this unit's IP filter would drop the push).
+# "+": root, because the calendar account may not start units. --no-block: only queues the job, so
+# this start never waits for it (the recovered unit is ordered after this one: waiting would
+# deadlock). "-": even a refused queueing (the unit missing or masked) never fails this start.
+ExecStartPost=-+/usr/bin/systemctl start --no-block {{ calendar_recovered_service }}
+Restart=always
+RestartSec=5s
+# direct: an auto-restart skips the failed state, so OnFailure= fires once, when the start limit gives up.
+RestartMode=direct
+SyslogIdentifier=homelab-calendar
+# Collections and the git history stay private to the service (group-readable for nothing else).
+UMask=0027
+MemoryMax={{ calendar_memory_max }}
+TasksMax={{ calendar_tasks_max }}
+
+# Hardening: the dashboard's set (CONTRACTS §11.1, roles/dashboard/templates/homelab-dashboard.service.j2),
+# plus the §13.1 additions below it.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# As in the dashboard unit: /run read-only explicitly (it was writable despite ProtectSystem=strict).
+ReadOnlyPaths=/run
+ReadWritePaths={{ calendar_data_dir }}
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+# §13.1 additions. Loopback only (tailscale serve connects over loopback).
+IPAddressDeny=any
+IPAddressAllow=localhost
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

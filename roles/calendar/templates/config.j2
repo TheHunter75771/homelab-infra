@@ -1,0 +1,43 @@
+# {{ ansible_managed }}
+# Radicale {{ calendar_radicale_series }} (docs/CONTRACTS.md §13.1). Every option the contract names is set
+# explicitly. Radicale reads this with RawConfigParser (no interpolation), so "%(user)s" in the hook
+# reaches Radicale as written; Radicale then fills it in with the shell-quoted login.
+
+[server]
+hosts = {{ calendar_listen_host }}:{{ calendar_port }}
+max_connections = 8
+max_content_length = 10000000
+# Radicale caps this at 80% of max_content_length anyway, and logs a warning at every start
+# when it is set higher (its default is 10000000).
+max_resource_size = 8000000
+timeout = 30
+
+[auth]
+type = htpasswd
+htpasswd_filename = {{ calendar_users_file }}
+htpasswd_encryption = bcrypt
+delay = 1
+realm = Calendar
+
+[rights]
+# Each login sees only /<user>/.
+type = owner_only
+# Phones can't delete a whole calendar or replace one wholesale (a runbook step instead).
+# Radicale 3.6 reads both from [rights].
+permit_delete_collection = False
+permit_overwrite_collection = False
+
+[storage]
+type = multifilesystem
+filesystem_folder = {{ calendar_collections_dir }}
+# Undo history: one commit per change, none when nothing changed. Runs as {{ calendar_user }} in
+# filesystem_folder; the git identity is repo-local (the service has no home). Radicale shell-quotes
+# the login it puts in %(user)s, so it stays outside the double quotes: any login is one argument.
+hook = git add -A && (git diff --cached --quiet || git commit -q -m "Changes by "%(user)s)
+
+[web]
+type = none
+
+[logging]
+level = info
+mask_passwords = True

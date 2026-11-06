@@ -1,0 +1,89 @@
+---
+- name: Preflight | layout and port
+  ansible.builtin.assert:
+    that:
+      - homelab_data_dir is defined
+      - homelab_data_dir is match('^/[A-Za-z0-9_./-]+$')
+      - calendar_port | string is match('^[0-9]{1,5}$')
+      - calendar_port | int > 0 and calendar_port | int < 65536
+      # Exactly 127.0.0.1: role tailscale_serve always proxies 8445 to http://127.0.0.1:5232, so any
+      # other address (another 127.x, ::1) would deploy green behind a dead 8445.
+      - calendar_listen_host == '127.0.0.1'
+    fail_msg: >-
+      homelab_data_dir must be defined (an absolute path), calendar_port must be an integer port, and
+      calendar_listen_host must be exactly 127.0.0.1 (tailscale serve proxies 8445 to 127.0.0.1).
+    quiet: true
+
+- name: Preflight | accounts (calendar_accounts in host_vars)
+  ansible.builtin.assert:
+    that:
+      - calendar_accounts is sequence and calendar_accounts is not string and calendar_accounts is not mapping
+      - calendar_accounts | length > 0
+      - calendar_accounts | rejectattr('user', 'defined') | list | length == 0
+      - calendar_accounts | map(attribute='user') | map('string') | select('match', '^[a-z][a-z0-9_-]{1,31}$') | list | length
+        == calendar_accounts | length
+      - calendar_accounts | map(attribute='user') | unique | list | length == calendar_accounts | length
+      - calendar_accounts | map(attribute='user') | intersect(calendar_backup_excluded_names) | length == 0
+    fail_msg: >-
+      calendar_accounts (host_vars) must list at least one account, each with a unique `user` of 2 to 32
+      characters: a lowercase letter, then lowercase letters, digits, "_" or "-". Not one of
+      {{ calendar_backup_excluded_names | join(', ') }}: the nightly backup skips folders with those names.
+    quiet: true
+
+- name: Preflight | each account's calendars
+  ansible.builtin.assert:
+    that:
+      - item.calendars is defined
+      - item.calendars is sequence and item.calendars is not string and item.calendars is not mapping
+      - item.calendars | rejectattr('id', 'defined') | list | length == 0
+      - item.calendars | rejectattr('name', 'defined') | list | length == 0
+      - item.calendars | map(attribute='id') | map('string') | select('match', '^[a-z0-9-]{1,40}$') | list | length
+        == item.calendars | length
+      - item.calendars | map(attribute='id') | unique | list | length == item.calendars | length
+      - item.calendars | map(attribute='name') | map('string') | map('trim') | select | list | length == item.calendars | length
+      - item.calendars | map(attribute='id') | intersect(calendar_backup_excluded_names) | length == 0
+    fail_msg: >-
+      Account {{ item.user }}: `calendars` must be a list of {id, name}, with unique ids of 1 to 40 lowercase
+      letters, digits or "-" (not {{ calendar_backup_excluded_names | join(', ') }}: the nightly backup skips
+      those), and a non-empty name.
+    quiet: true
+  loop: "{{ calendar_accounts }}"
+  loop_control:
+    label: "{{ item.user }}"
+
+# Only the account names leave this task; no_log keeps the values out of any error.
+- name: Preflight | accounts with a usable password (values never printed)
+  ansible.builtin.set_fact:
+    calendar_password_ok: >-
+      {{ calendar_passwords | dict2items | selectattr('value', 'string')
+         | selectattr('value', 'match', '^[ -~]{16,72}$') | map(attribute='key') | list }}
+  no_log: true
+
+- name: Preflight | every account has a password in the vault
+  ansible.builtin.assert:
+    that:
+      - calendar_accounts | map(attribute='user') | difference(calendar_password_ok) | length == 0
+    fail_msg: >-
+      calendar_passwords (vault_calendar_passwords) needs a quoted password of 16 to 72 printable ASCII
+      characters for: {{ calendar_accounts | map(attribute='user') | difference(calendar_password_ok) | join(', ') }}.
+    quiet: true
+
+# homelab-calendar-recovered.service reads the push store through this group (SupplementaryGroups=).
+# systemd won't start a unit whose group is missing (216/GROUP): the "back up" push would never be
+# sent and a "Calendar is down" alert would stay open for good. So a missing group fails the play here.
+- name: Preflight | look up the push store's group
+  ansible.builtin.getent:
+    database: group
+    key: "{{ calendar_push_group }}"
+    fail_key: false
+  changed_when: false
+  check_mode: false
+
+- name: Preflight | the push store's group exists (role dashboard)
+  ansible.builtin.assert:
+    that: ansible_facts.getent_group[calendar_push_group] is not none
+    fail_msg: >-
+      The push group {{ calendar_push_group }} doesn't exist; deploy role dashboard first (it creates the
+      group and the push store). Without it homelab-calendar-recovered.service can't start, so a
+      "Calendar is down" alert would never be closed by a "Calendar back up" push.
+    quiet: true

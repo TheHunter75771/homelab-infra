@@ -1,0 +1,46 @@
+---
+# Each calendar is ensured over the server's own API, as its owner (owner_only rights): PROPFIND
+# Depth 0, and MKCALENDAR with the display name only on a 404. Never deleted or renamed here.
+# Events only (supported-calendar-component-set VEVENT), so iOS doesn't also list each calendar under
+# Reminders. Skipped in check mode (the server may not be running yet).
+
+- name: Calendars | look up each calendar
+  ansible.builtin.uri:
+    url: "{{ calendar_base_url }}/{{ item.0.user }}/{{ item.1.id }}/"
+    method: PROPFIND
+    headers:
+      Depth: "0"
+    url_username: "{{ item.0.user }}"
+    url_password: "{{ calendar_passwords[item.0.user] }}"
+    force_basic_auth: true
+    status_code: [207, 404]
+  loop: "{{ calendar_accounts | subelements('calendars') }}"
+  loop_control:
+    label: "{{ item.0.user }}/{{ item.1.id }}"
+  register: calendar_lookup
+  changed_when: false
+  no_log: true
+  when: not ansible_check_mode
+
+- name: Calendars | create the missing ones
+  ansible.builtin.uri:
+    url: "{{ calendar_base_url }}/{{ item.item.0.user }}/{{ item.item.1.id }}/"
+    method: MKCALENDAR
+    headers:
+      Content-Type: application/xml; charset=utf-8
+    body: >-
+      <?xml version="1.0" encoding="utf-8"?>
+      <C:mkcalendar xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:set><D:prop>
+      <D:displayname>{{ item.item.1.name | string | e }}</D:displayname>
+      <C:supported-calendar-component-set><C:comp name="VEVENT"/></C:supported-calendar-component-set>
+      </D:prop></D:set></C:mkcalendar>
+    url_username: "{{ item.item.0.user }}"
+    url_password: "{{ calendar_passwords[item.item.0.user] }}"
+    force_basic_auth: true
+    status_code: 201
+  loop: "{{ calendar_lookup.results | default([]) | selectattr('status', 'defined') | selectattr('status', 'equalto', 404) | list }}"
+  loop_control:
+    label: "{{ item.item.0.user }}/{{ item.item.1.id }}"
+  changed_when: true
+  no_log: true
+  when: not ansible_check_mode

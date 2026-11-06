@@ -1,0 +1,100 @@
+---
+- name: Config | directory (root:calendar 0750)
+  ansible.builtin.file:
+    path: "{{ calendar_config_dir }}"
+    state: directory
+    owner: root
+    group: "{{ calendar_user }}"
+    mode: "0750"
+
+# validate: Radicale's own loader, so an unknown option or a bad value never reaches the service.
+- name: Config | Radicale settings
+  ansible.builtin.template:
+    src: config.j2
+    dest: "{{ calendar_config_file }}"
+    owner: root
+    group: "{{ calendar_user }}"
+    mode: "0640"
+    validate: /usr/bin/python3 -c "import sys; from radicale import config; config.load([(sys.argv[1], False)])" %s
+  notify: Calendar restart
+
+# Radicale re-reads the users file on every login (htpasswd_cache is off), so login changes need no
+# restart. Created empty first, so the hashes are never world-readable, even for a moment.
+- name: Users | file (root:calendar 0640)
+  ansible.builtin.copy:
+    dest: "{{ calendar_users_file }}"
+    content: ""
+    force: false
+    owner: root
+    group: "{{ calendar_user }}"
+    mode: "0640"
+
+# community.general.htpasswd checks for passlib on the target before it looks at check mode. A check
+# run on a fresh host has installed nothing yet, so there it skips the users file (with a note) instead
+# of failing behind no_log. In a real run apt has installed python3-passlib just before; if the module's
+# interpreter still can't import it, say so here, where no_log can't hide it.
+- name: Users | can the module interpreter import passlib
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_python_interpreter | default(ansible_facts.discovered_interpreter_python | default('/usr/bin/python3')) }}"
+      - -c
+      - import passlib.apache
+  register: calendar_passlib_probe
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Users | passlib is importable (python3-passlib)
+  ansible.builtin.assert:
+    that: calendar_passlib_probe.rc == 0
+    fail_msg: >-
+      The module interpreter can't import passlib (python3-passlib), which community.general.htpasswd needs:
+      {{ calendar_passlib_probe.stderr | default('') | truncate(200) }}
+    quiet: true
+  when: not ansible_check_mode
+
+- name: Users | check mode before passlib is installed
+  ansible.builtin.debug:
+    msg: >-
+      Check mode: passlib isn't installed yet (a real run installs python3-passlib first), so the logins in
+      {{ calendar_users_file }} are not checked or listed as changes in this run.
+  when: ansible_check_mode and calendar_passlib_probe.rc != 0
+
+- name: Users | one bcrypt login per account (passwords from the vault)
+  community.general.htpasswd:
+    path: "{{ calendar_users_file }}"
+    name: "{{ item.user }}"
+    password: "{{ calendar_passwords[item.user] }}"
+    crypt_scheme: bcrypt
+    owner: root
+    group: "{{ calendar_user }}"
+    mode: "0640"
+  loop: "{{ calendar_accounts }}"
+  loop_control:
+    label: "{{ item.user }}"
+  register: calendar_users_set # read by tests/check_mode_case.yml only
+  no_log: true
+  when: calendar_passlib_probe.rc == 0 or not ansible_check_mode
+
+# Names only (cut drops the hashes). In check mode on a fresh host the file isn't there yet.
+- name: Users | logins in the file now
+  ansible.builtin.command:
+    argv: [cut, "--delimiter=:", --fields=1, "{{ calendar_users_file }}"]
+  register: calendar_users_listed
+  changed_when: false
+  failed_when: calendar_users_listed.rc != 0 and not ansible_check_mode
+  check_mode: false
+
+# The login goes; its calendars stay on disk (the role never deletes collection data).
+- name: Users | remove logins that are no longer in calendar_accounts
+  community.general.htpasswd:
+    path: "{{ calendar_users_file }}"
+    name: "{{ item }}"
+    state: absent
+    owner: root
+    group: "{{ calendar_user }}"
+    mode: "0640"
+  loop: >-
+    {{ calendar_users_listed.stdout_lines | default([]) | select
+       | reject('in', calendar_accounts | map(attribute='user') | list) | list }}
+  when: calendar_passlib_probe.rc == 0 or not ansible_check_mode

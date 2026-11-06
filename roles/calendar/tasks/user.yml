@@ -1,0 +1,20 @@
+---
+- name: User | calendar group
+  ansible.builtin.group:
+    name: "{{ calendar_user }}"
+    system: true
+
+# groups "" with append: false keeps the supplementary list empty (CONTRACTS §13.1).
+- name: User | calendar system user (no login, no home, no other groups)
+  ansible.builtin.user:
+    name: "{{ calendar_user }}"
+    group: "{{ calendar_user }}"
+    groups: ""
+    append: false
+    system: true
+    comment: Household Calendar
+    shell: /usr/sbin/nologin
+    home: /nonexistent
+    create_home: false
+    password_lock: true
+  notify: Calendar restart

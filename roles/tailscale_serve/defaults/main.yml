@@ -6,6 +6,8 @@
 #   443   /                                          Dashboard v2 (host service), nothing else
 #   8443  /                                          Jellyseerr (no URL base support)
 #   8444  /watch /sonarr /radarr /prowlarr /sabnzbd  the path-based apps (they share this origin)
+#   8445  /                                          Household Calendar (role calendar, CONTRACTS §13), its own origin
+# No UFW rule for any of these ports: serve listeners belong to tailscaled (ADR 0015).
 #
 # `tailscale serve` STRIPS the mount path before proxying (ipn/ipnlocal/serve.go: http.StripPrefix),
 # then appends the request to the backend URL's own path. Apps that run under a URL base (Jellyfin
@@ -20,6 +22,7 @@ tailscale_serve_handlers:
   - { port: 8444, mount: /radarr, backend: "http://127.0.0.1:7878/radarr" }
   - { port: 8444, mount: /prowlarr, backend: "http://127.0.0.1:9696/prowlarr" }
   - { port: 8444, mount: /sabnzbd, backend: "http://127.0.0.1:8080/sabnzbd" }
+  - { port: 8445, mount: /, backend: "http://127.0.0.1:5232" }                   # Household Calendar (Radicale host service, CONTRACTS §13)
 
 # ADR 0015 guard, checked before anything is applied: the dashboard's port carries exactly one
 # handler, `/` to the dashboard. An app added to this port would share the dashboard's origin.

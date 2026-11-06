@@ -1,0 +1,25 @@
+---
+# Role calendar (docs/CONTRACTS.md §13.1, ADR 0017). Deployed through playbooks/calendar.yml only
+# (§13.4). Runs before tailscale_serve, which proxies 8445 to it. Nothing here touches Docker: the
+# calendar must deploy and run while the boot gate holds it.
+
+- name: Preflight checks
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Service account
+  ansible.builtin.import_tasks: user.yml
+
+- name: Radicale from the Ubuntu archive
+  ansible.builtin.import_tasks: app.yml
+
+- name: Settings and logins
+  ansible.builtin.import_tasks: config.yml
+
+- name: Collections and their git history
+  ansible.builtin.import_tasks: history.yml
+
+- name: Calendar service
+  ansible.builtin.import_tasks: service.yml
+
+- name: Calendars
+  ansible.builtin.import_tasks: calendars.yml

@@ -1,0 +1,50 @@
+---
+# One case of test_check_mode.yml: the role's real tasks/config.yml, with case_python as the module
+# interpreter, and a calendar user that doesn't exist (the logins are the playbook's).
+- name: Role tasks/config.yml, passlib present is {{ case_passlib }}
+  ansible.builtin.include_role:
+    name: "{{ calendar_role }}"
+    tasks_from: config
+  vars:
+    ansible_python_interpreter: "{{ case_python }}"
+    calendar_user: calendar-test-nobody
+    calendar_config_dir: "{{ calendar_test_fresh.path }}/etc-homelab-calendar"
+
+- name: The probe saw what this case set up, and check mode wrote nothing
+  ansible.builtin.stat:
+    path: "{{ calendar_test_fresh.path }}/etc-homelab-calendar"
+  register: calendar_test_config_dir
+  check_mode: false
+
+- name: Check the case
+  ansible.builtin.assert:
+    that:
+      - (calendar_passlib_probe.rc == 0) == (case_passlib | bool)
+      - not calendar_test_config_dir.stat.exists
+    fail_msg: >-
+      Expected passlib {{ 'importable' if case_passlib else 'missing' }} (probe rc {{ calendar_passlib_probe.rc }}),
+      and nothing written in check mode.
+    quiet: true
+
+# The htpasswd step itself: skipped without passlib; with it, run as a check that would add every login
+# (so "skip it in every check run" can't pass this test).
+- name: Without passlib, the logins step was skipped
+  ansible.builtin.assert:
+    that:
+      - calendar_users_set is skipped
+      - calendar_users_set.results | rejectattr('skipped', 'defined') | list | length == 0
+    fail_msg: The htpasswd step ran although the interpreter can't import passlib.
+    quiet: true
+  when: not (case_passlib | bool)
+
+- name: With passlib, the logins step ran as a check that would add every login
+  ansible.builtin.assert:
+    that:
+      - calendar_users_set is not skipped
+      - calendar_users_set is changed
+      - calendar_users_set.results | length == calendar_accounts | length
+      - calendar_users_set.results | selectattr('changed') | list | length == calendar_accounts | length
+      - calendar_users_set.results | selectattr('skipped', 'defined') | list | length == 0
+    fail_msg: The htpasswd step didn't run as a check although passlib is importable.
+    quiet: true
+  when: case_passlib | bool

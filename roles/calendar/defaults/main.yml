@@ -1,0 +1,80 @@
+---
+# Role calendar (module Q): the household CalDAV server, Radicale from the Ubuntu archive, as a
+# hardened host service. docs/CONTRACTS.md §13.1, ADR 0017.
+# Layout comes from group_vars (homelab_data_dir), passwords from the vault (calendar_passwords,
+# via group_vars), accounts from host_vars (calendar_accounts, never committed).
+
+# Ubuntu archive, unpinned (unattended-upgrades patches them). Not the `radicale` package: it ships
+# its own unit, user and config, which this role replaces.
+calendar_packages:
+  - python3-radicale
+  - python3-bcrypt
+  - python3-passlib
+  - git
+# The installed Radicale must be this major.minor series. Default: the series of the version CI's
+# smoke test installs (versions.yml python_packages.radicale).
+calendar_radicale_series: "{{ (python_packages.radicale | string).split('.')[:2] | join('.') }}"
+
+# Identity: a system account with no fixed uid (nothing outside this role shares its files).
+calendar_user: calendar
+
+# Accounts and calendars (host_vars), e.g.
+#   - { user: alice, calendars: [{ id: personal, name: Personal }, { id: routines, name: Routines }] }
+#   - { user: household, calendars: [{ id: shared, name: Shared }] }
+# The role creates missing calendars and never deletes or renames one.
+calendar_accounts: []
+# Directory names the nightly backup prunes anywhere under homelab_data_dir (role backups,
+# backups_exclude_dirs). A login or calendar id with one of these names would silently miss the
+# backup, so the preflight refuses them. tests/test_render.py keeps this equal to role backups' list.
+calendar_backup_excluded_names:
+  - cache
+  - Cache
+  - .cache
+  - metadata
+  - MediaCover
+  - trickplay
+  - keyframes
+  - transcodes
+  - log
+  - logs
+# {user: password} (group_vars -> vault_calendar_passwords). 16 to 72 printable ASCII characters
+# (bcrypt only uses the first 72 bytes; bcrypt 5 refuses longer).
+calendar_passwords: {}
+
+# Runtime. Loopback only: tailscale_serve publishes it on 8445 (CONTRACTS §13.2).
+calendar_service: homelab-calendar.service
+calendar_listen_host: 127.0.0.1 # exactly this (preflight): tailscale_serve proxies 8445 to 127.0.0.1
+calendar_port: 5232
+calendar_base_url: "http://{{ calendar_listen_host }}:{{ calendar_port }}"
+calendar_config_dir: /etc/homelab-calendar
+calendar_config_file: "{{ calendar_config_dir }}/config"
+calendar_users_file: "{{ calendar_config_dir }}/users"
+# System disk; the nightly backup (role backups) already covers homelab_data_dir.
+calendar_data_dir: "{{ homelab_data_dir }}/calendar"
+calendar_collections_dir: "{{ calendar_data_dir }}/collections"
+calendar_memory_max: 192M
+calendar_tasks_max: 64
+# The undo history (a git repo in the collections folder). A placeholder identity, never a real address.
+calendar_git_name: Household Calendar
+calendar_git_email: calendar@homelab.invalid
+
+# Alerts. Same CLI path as role backups (CONTRACTS §4).
+calendar_notify_bin: /usr/local/bin/homelab-notify
+calendar_alert_service: homelab-calendar-alert.service
+calendar_alert_state_name: homelab-calendar-alert # StateDirectory= -> /var/lib/homelab-calendar-alert
+calendar_alert_marker: /var/lib/{{ calendar_alert_state_name }}/down
+calendar_recovered_script: /usr/local/sbin/homelab-calendar-recovered
+# Runs the script in its own unit, outside the calendar's IP filter (CONTRACTS §13.1, amended).
+calendar_recovered_service: homelab-calendar-recovered.service
+# homelab-calendar-recovered says "back up" only once an unauthenticated PROPFIND / answers 401
+# (waiting up to this long), and the same service invocation is still active after the settle period.
+# A server that binds and then dies never gets a false "back up".
+calendar_recovered_wait_seconds: 30
+calendar_recovered_settle_seconds: 5
+# The push store's group (role dashboard: its account and group share dashboard_user). The recovered
+# unit reads the store through it, with no capabilities. role dashboard's own variable when this play
+# also runs it (site.yml), else its value; tests/test_render.py keeps the fallback equal to it.
+calendar_push_group: "{{ dashboard_user | default('dashboard') }}"
+# homelab-notify's own state (dedupe, history.jsonl; role notifier, CONTRACTS §4/§11.5): the only
+# path it writes, so the only writable one in the recovered unit's sandbox. Same as role backups.
+calendar_notify_state_dir: /var/lib/homelab-notify

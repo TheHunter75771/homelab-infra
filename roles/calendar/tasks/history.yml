@@ -1,0 +1,66 @@
+---
+# {{ homelab_data_dir }}/calendar/collections/ holds the calendars and is a git repo owned by the
+# service account: the storage hook commits every change (CONTRACTS §13.1). git runs as that account
+# (git refuses a repository owned by another user), through runuser from root: the automation user's
+# sudo rule has no Runas list, so become_user to another account would be refused. In check mode on
+# a fresh host the account and the repo don't exist yet, so the git steps are skipped there.
+
+- name: History | data and collections directories (calendar 0750)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ calendar_user }}"
+    group: "{{ calendar_user }}"
+    mode: "0750"
+  loop:
+    - "{{ calendar_data_dir }}"
+    - "{{ calendar_collections_dir }}"
+
+- name: History | is the repository there
+  ansible.builtin.stat:
+    path: "{{ calendar_collections_dir }}/.git/HEAD"
+  register: calendar_repo_head
+
+- name: History | create the repository (once)
+  ansible.builtin.command:
+    argv: [runuser, -u, "{{ calendar_user }}", --, git, init, --quiet, --initial-branch=main, .]
+    chdir: "{{ calendar_collections_dir }}"
+    creates: "{{ calendar_collections_dir }}/.git/HEAD"
+  when: not ansible_check_mode # the command module changes into chdir before it looks at creates
+
+# Repo-local, because the service has no home (/nonexistent, ProtectHome=yes). gc.autoDetach off:
+# an automatic gc then runs inside the hook, under Radicale's storage lock, instead of in the
+# background next to the following change's commit.
+- name: History | repo-local git settings now
+  ansible.builtin.command:
+    argv: [runuser, -u, "{{ calendar_user }}", --, git, config, --local, --get, "{{ item.name }}"]
+    chdir: "{{ calendar_collections_dir }}"
+  loop:
+    - { name: user.name, value: "{{ calendar_git_name }}" }
+    - { name: user.email, value: "{{ calendar_git_email }}" }
+    - { name: gc.autoDetach, value: "false" }
+  loop_control:
+    label: "{{ item.name }}"
+  register: calendar_git_settings
+  changed_when: false
+  failed_when: calendar_git_settings.rc not in [0, 1] # 1: not set yet
+  check_mode: false
+  when: calendar_repo_head.stat.exists or not ansible_check_mode
+
+- name: History | repo-local git identity and settings
+  ansible.builtin.command:
+    argv: [runuser, -u, "{{ calendar_user }}", --, git, config, --local, "{{ item.item.name }}", "{{ item.item.value }}"]
+    chdir: "{{ calendar_collections_dir }}"
+  loop: "{{ calendar_git_settings.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  changed_when: true
+  when: item is not skipped and item.stdout != item.item.value
+
+- name: History | ignore Radicale's caches, locks and temp files
+  ansible.builtin.template:
+    src: collections.gitignore.j2
+    dest: "{{ calendar_collections_dir }}/.gitignore"
+    owner: "{{ calendar_user }}"
+    group: "{{ calendar_user }}"
+    mode: "0640"
