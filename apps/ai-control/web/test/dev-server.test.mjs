@@ -31,7 +31,7 @@ async function start(t) {
     const r = await fetch(`http://127.0.0.1:${port}${p}`);
     return { status: r.status, body: await r.json() };
   };
-  return { child, get, log: () => log };
+  return { child, get, log: () => log, base: `http://127.0.0.1:${port}` };
 }
 
 // The server moves epoch-second timestamps to now, so those may differ; every other value must be equal.
@@ -66,5 +66,16 @@ test('preview server: each scenario serves its summary; unknown and Object.proto
     assert.equal(r.status, 200, `${name}: ${log()}`);
     assert.ok(same(r.body, json(fx.normal)), `${name}: got ${JSON.stringify(r.body).slice(0, 200)}`);
   }
+  assert.equal(child.exitCode, null, `the server is still running: ${log()}`);
+});
+
+test('preview server: the offline scenario answers every API path with a 502, until another one is picked', { timeout: 30_000 }, async (t) => {
+  const { child, get, log, base } = await start(t);
+  assert.deepEqual((await get('/__scenario?name=offline')).body, { scenario: 'offline' });
+  for (const p of ['/api/summary', '/api/logs', '/api/no-such-path']) assert.equal((await fetch(base + p)).status, 502, p);
+  assert.deepEqual((await get('/__scenario?name=normal')).body, { scenario: 'normal' });
+  const r = await get('/api/summary');
+  assert.equal(r.status, 200);
+  assert.ok(same(r.body, json(fx.normal)), `got ${JSON.stringify(r.body).slice(0, 200)}`);
   assert.equal(child.exitCode, null, `the server is still running: ${log()}`);
 });

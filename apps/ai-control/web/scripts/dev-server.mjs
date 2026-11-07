@@ -18,9 +18,23 @@ const CSP = "default-src 'self'; img-src 'self' data:; style-src 'self'; script-
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json', '.json': 'application/json' };
 
 const TS_KEYS = new Set(['ts', 'time', 'since', 'modified', 'expires_at', 'next', 'last']);
-// The scenario name comes from the query string, so it's looked up in a Map: a name like "constructor" or
-// "__proto__" is just unknown (the normal summary), never an Object.prototype member that then gets called.
-const SUMMARIES = new Map([['normal', fx.normal], ['gaming', fx.gamingCpu], ['pcoff', fx.pcOff], ['down', fx.everythingDown], ['hostile', fx.hostileSummary]]);
+// The scenario name comes from the query string, so it never selects what gets called: literal cases only
+// (CodeQL js/unvalidated-dynamic-method-call). Any other name, "constructor" or "__proto__" too, is normal.
+function summaryFor(name) {
+  switch (name) {
+    case 'gaming':
+      return fx.gamingCpu();
+    case 'pcoff':
+      return fx.pcOff();
+    case 'down':
+      return fx.everythingDown();
+    case 'hostile':
+      return fx.hostileSummary();
+    case 'normal':
+    default:
+      return fx.normal();
+  }
+}
 
 function scen() {
   const shift = (s) => {
@@ -36,10 +50,9 @@ function scen() {
   };
   const H = scenario === 'hostile';
   const wrap = (v) => shift(H ? fx.hostile(v) : v);
-  const summary = SUMMARIES.get(scenario) || fx.normal;
   const hist = scenario === 'gaming' ? fx.history({ busy: 70, share: 0, available: false }) : fx.history();
   return {
-    summary: shift(summary()),
+    summary: shift(summaryFor(scenario)),
     history: wrap(hist),
     requests: wrap(fx.requests()),
     logs: wrap(Array.from({ length: 60 }, (_, i) => `2026-10-26T19:${String(i).padStart(2, '0')}:00Z ollama[100]: ${i % 7 === 0 ? 'error: slow response' : 'request done in 2.1 s'}`)),

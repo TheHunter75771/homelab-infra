@@ -26,9 +26,21 @@ function shift(v, k) {
   return v;
 }
 
-// The scenario name comes from the query string, so it's looked up in a Map: a name like "constructor" or
-// "__proto__" is just unknown (the plain cards), never an Object.prototype member that then gets called.
-const CARDS = new Map([['normal', fx.cardsWithApps], ['broken', fx.cardsBroken], ['hostile', () => fx.hostile(fx.cardsWithApps())], ['slow', fx.cards]]);
+// The scenario name comes from the query string, so it never selects what gets called: literal cases only
+// (CodeQL js/unvalidated-dynamic-method-call). Any other name, "constructor" or "__proto__" too, is the plain cards.
+function cardsFor(name) {
+  switch (name) {
+    case 'normal':
+      return fx.cardsWithApps();
+    case 'broken':
+      return fx.cardsBroken();
+    case 'hostile':
+      return fx.hostile(fx.cardsWithApps());
+    case 'slow':
+    default:
+      return fx.cards();
+  }
+}
 
 function json(res, code, body) {
   res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Content-Security-Policy': CSP });
@@ -51,8 +63,7 @@ const server = http
         return json(res, 200, { ok: true });
       }
       if (p === '/api/cards') {
-        const c = CARDS.get(scenario) || fx.cards;
-        return json(res, 200, shift(c()));
+        return json(res, 200, shift(cardsFor(scenario)));
       }
       if (p === '/api/briefing') {
         if (scenario === 'broken') return json(res, 500, { error: 'briefing failed' });
