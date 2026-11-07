@@ -43,7 +43,9 @@ def dial(sock_path, sni, host, port):
         if " 101 " not in status + " ":
             return "refused %s" % (status.split(" ", 2)[1] if status.count(" ") else "none")
         ctx = ssl.create_default_context()
-        ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # Python's own default since 3.10, made explicit
+        # Pins the floor explicitly; the effective floor on the targets (Ubuntu 26.04) is already TLS 1.2, and the
+        # peer (tailscale serve) speaks 1.2/1.3.
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         tls = ctx.wrap_socket(s, server_hostname=sni)

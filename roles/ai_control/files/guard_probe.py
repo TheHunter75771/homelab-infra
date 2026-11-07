@@ -76,7 +76,9 @@ def dial(path, host, port, sni):
             result["upstream"] = "unexpected bytes before TLS"
             return result
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # Python's own default since 3.10, made explicit
+        # Pins the floor explicitly; the effective floor on the targets (Ubuntu 26.04) is already TLS 1.2, and the
+        # peer (tailscale serve) speaks 1.2/1.3.
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         try:
