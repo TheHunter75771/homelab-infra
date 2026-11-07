@@ -4,7 +4,7 @@
 # Creates the automation user that every other playbook uses: key-only, reachable only
 # from the admin workstation's tailnet/LAN addresses, passwordless sudo, no password login.
 - name: Bootstrap the automation user
-  hosts: media_servers
+  hosts: media_servers:ai_servers
   become: true
   vars:
     ansible_user: "{{ admin_user }}"

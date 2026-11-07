@@ -1,0 +1,7 @@
+# {{ ansible_managed }}
+# Operator account {{ operator_acct.name }} (docs/CONTRACTS.md §12.13): full sudo, every session I/O-logged.
+# Classic sudo only: sudo-rs ignores this file's logging (it has no I/O logging), and the role denies
+# {{ operator_acct.name }} the sudo-rs binary on hosts that carry it. Replay: sudoreplay -d {{ operator_acct.iolog_dir }} -l
+Defaults:{{ operator_acct.name }} log_input, log_output, iolog_dir={{ operator_acct.iolog_dir }}, iolog_file=%{seq}
+Defaults:{{ operator_acct.name }} !requiretty
+{{ operator_acct.name }} ALL=(ALL) NOPASSWD: ALL

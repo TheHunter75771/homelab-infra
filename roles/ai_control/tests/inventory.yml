@@ -1,0 +1,14 @@
+---
+# Synthetic inventory for tests/test_ai_control.yml: localhost plays ai-box; "pc" only carries the
+# workstations_root group var the preflight reads through hostvars (never connected to).
+all:
+  children:
+    ai_servers:
+      hosts:
+        localhost:
+          ansible_connection: local
+    workstations_root:
+      hosts:
+        pc:
+          ansible_connection: local
+          ollama_rocm_policy_extra_ports: [11510]

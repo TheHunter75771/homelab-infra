@@ -1,0 +1,182 @@
+---
+# firewalld policy ollama_rocm_policy (docs/CONTRACTS.md §12.9, Module G review M1): ANY -> HOST,
+# negative priority, rich rules that reject the Ollama and gpu-gate ports from everyone but ai-box.
+# ansible.posix 2.2.2's firewalld module has no policy support, so this drives firewall-cmd:
+#   1. permanent: create the policy, converge it (add before remove), remove legacy zone rules on
+#      our ports from every zone;
+#   2. one `firewall-cmd --reload` when step 1 changed anything or the runtime differs from the
+#      declared state. Reload rebuilds the runtime from the permanent config, so runtime-only stale
+#      rules (policy or zone) go too. It keeps established connections.
+#   3. read-only asserts that the policy is active and matches.
+- name: Ollama firewall inputs are single host addresses
+  ansible.builtin.assert:
+    that:
+      - ollama_rocm_ai_box_addrs_ok | bool
+    fail_msg: ai_box_tailnet_ip / ai_box_tailnet_ip6 must be single addresses (no prefix length, no range).
+    quiet: true
+
+# --- 1. Permanent
+- name: List the permanent policies
+  ansible.builtin.command: firewall-cmd --permanent --get-policies
+  register: ollama_rocm_fw_policies
+  changed_when: false
+  check_mode: false
+
+- name: Create the policy
+  ansible.builtin.command:
+    argv: [firewall-cmd, --permanent, "--new-policy={{ ollama_rocm_policy }}"]
+  changed_when: true
+  when: ollama_rocm_policy not in ollama_rocm_fw_policies.stdout.split()
+
+# In check mode a policy that doesn't exist yet can't be read; it's treated as a new, empty one.
+- name: Read the policy's permanent settings
+  ansible.builtin.command:
+    argv: [firewall-cmd, --permanent, "--policy={{ ollama_rocm_policy }}", "{{ item }}"]
+  loop: [--get-priority, --get-target, --list-ingress-zones, --list-egress-zones, --list-rich-rules]
+  register: ollama_rocm_fw_perm
+  changed_when: false
+  check_mode: false
+  when: not (ansible_check_mode and ollama_rocm_policy not in ollama_rocm_fw_policies.stdout.split())
+
+- name: Keep the permanent state
+  ansible.builtin.set_fact:
+    ollama_rocm_fw_perm_state: >-
+      {{ {'priority': ollama_rocm_fw_perm.results[0].stdout | trim,
+          'target': ollama_rocm_fw_perm.results[1].stdout | trim,
+          'ingress': ollama_rocm_fw_perm.results[2].stdout.split(),
+          'egress': ollama_rocm_fw_perm.results[3].stdout.split(),
+          'rules': ollama_rocm_fw_perm.results[4].stdout_lines}
+         if ollama_rocm_fw_perm is not skipped else
+         {'priority': '-1', 'target': 'CONTINUE', 'ingress': [], 'egress': [], 'rules': []} }}
+
+- name: Work out the permanent changes
+  ansible.builtin.set_fact:
+    ollama_rocm_fw_perm_todo: "{{ ollama_rocm_policy_ops }}"
+  vars:
+    ollama_rocm_policy_current: "{{ ollama_rocm_fw_perm_state }}"
+
+- name: Converge the policy (permanent; rules are added before stale ones are removed)
+  ansible.builtin.command:
+    argv: [firewall-cmd, --permanent, "--policy={{ ollama_rocm_policy }}", "{{ item }}"]
+  loop: "{{ ollama_rocm_fw_perm_todo }}"
+  changed_when: true
+
+- name: List the permanent zones
+  ansible.builtin.command: firewall-cmd --permanent --get-zones
+  register: ollama_rocm_fw_zones
+  changed_when: false
+  check_mode: false
+
+- name: Read each zone's permanent rich rules
+  ansible.builtin.command:
+    argv: [firewall-cmd, --permanent, "--zone={{ item }}", --list-rich-rules]
+  loop: "{{ ollama_rocm_fw_zones.stdout.split() }}"
+  register: ollama_rocm_fw_zone_perm
+  changed_when: false
+  check_mode: false
+
+# The policy now covers these ports for every zone; a zone rule on them is legacy (the first build
+# put "everyone but ai-box" rules in zone trusted) or a hand edit.
+- name: Find legacy zone rules on the Ollama and gpu-gate ports (permanent)
+  ansible.builtin.set_fact:
+    ollama_rocm_fw_zone_todo: "{{ ollama_rocm_zone_stale }}"
+  vars:
+    ollama_rocm_zone_rules: "{{ ollama_rocm_fw_zone_perm }}"
+
+- name: Remove legacy zone rules on the Ollama and gpu-gate ports (permanent)
+  ansible.builtin.command:
+    argv: [firewall-cmd, --permanent, "--zone={{ item.0.item }}", "--remove-rich-rule={{ item.1 }}"]
+  loop: "{{ ollama_rocm_fw_zone_todo }}"
+  loop_control:
+    label: "{{ item.0.item }}: {{ item.1 }}"
+  changed_when: true
+
+# --- 2. Runtime
+- name: Read the policy's runtime zones and rules
+  ansible.builtin.command:
+    argv: [firewall-cmd, "--policy={{ ollama_rocm_policy }}", "{{ item }}"]
+  loop: [--list-ingress-zones, --list-egress-zones, --list-rich-rules]
+  register: ollama_rocm_fw_rt
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Read each zone's runtime rich rules
+  ansible.builtin.command:
+    argv: [firewall-cmd, "--zone={{ item }}", --list-rich-rules]
+  loop: "{{ ollama_rocm_fw_zones.stdout.split() }}"
+  register: ollama_rocm_fw_zone_rt
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# Runtime priority and target can't be read (firewall-cmd: permanent only); a permanent change to
+# them already triggers the reload.
+- name: Compare the runtime with the declared state
+  ansible.builtin.set_fact:
+    ollama_rocm_fw_rt_missing: "{{ ollama_rocm_fw_rt.results | map(attribute='rc') | select('ne', 0) | list | length > 0 }}"
+    ollama_rocm_fw_rt_ops: "{{ ollama_rocm_policy_ops }}"
+    ollama_rocm_fw_rt_stale: "{{ ollama_rocm_zone_stale }}"
+  vars:
+    ollama_rocm_zone_rules: "{{ ollama_rocm_fw_zone_rt }}"
+    ollama_rocm_policy_current:
+      priority:
+      target:
+      ingress: "{{ ollama_rocm_fw_rt.results[0].stdout.split() }}"
+      egress: "{{ ollama_rocm_fw_rt.results[1].stdout.split() }}"
+      rules: "{{ ollama_rocm_fw_rt.results[2].stdout_lines }}"
+
+- name: Decide whether the runtime must be rebuilt
+  ansible.builtin.set_fact:
+    ollama_rocm_fw_reload: >-
+      {{ ollama_rocm_policy not in ollama_rocm_fw_policies.stdout.split()
+         or ollama_rocm_fw_perm_todo | length > 0
+         or ollama_rocm_fw_zone_todo | length > 0
+         or ollama_rocm_fw_rt_missing | bool
+         or ollama_rocm_fw_rt_ops | length > 0
+         or ollama_rocm_fw_rt_stale | length > 0 }}
+
+- name: Rebuild the runtime from the permanent config
+  ansible.builtin.command: firewall-cmd --reload
+  changed_when: true
+  when: ollama_rocm_fw_reload | bool
+
+# Commands don't run in check mode, so report what a real run would do.
+- name: Firewall changes a real run would make (check mode)
+  ansible.builtin.debug:
+    msg:
+      policy_created: "{{ ollama_rocm_policy not in ollama_rocm_fw_policies.stdout.split() }}"
+      policy_ops: "{{ ollama_rocm_fw_perm_todo }}"
+      zone_rules_removed: "{{ ollama_rocm_fw_zone_todo | map(attribute='1') | list }}"
+  changed_when: true
+  when:
+    - ansible_check_mode
+    - ollama_rocm_fw_reload | bool
+
+# --- 3. Read-only checks (skipped in check mode, where nothing above was applied)
+- name: Read the active policies
+  ansible.builtin.command: firewall-cmd --get-active-policies
+  register: ollama_rocm_fw_active
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Read the policy's runtime zones and rules again
+  ansible.builtin.command:
+    argv: [firewall-cmd, "--policy={{ ollama_rocm_policy }}", "{{ item }}"]
+  loop: [--list-ingress-zones, --list-egress-zones, --list-rich-rules]
+  register: ollama_rocm_fw_rt_after
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: The policy is active and holds exactly the declared rules
+  ansible.builtin.assert:
+    that:
+      - ollama_rocm_policy in ollama_rocm_fw_active.stdout_lines
+      - ollama_rocm_fw_rt_after.results[0].stdout.split() == ['ANY']
+      - ollama_rocm_fw_rt_after.results[1].stdout.split() == ['HOST']
+      - ollama_rocm_fw_rt_after.results[2].stdout_lines | sort == ollama_rocm_rich_rules | sort
+    fail_msg: >-
+      firewalld policy {{ ollama_rocm_policy }} isn't active as declared:
+      {{ ollama_rocm_fw_active.stdout_lines }} / {{ ollama_rocm_fw_rt_after.results | map(attribute='stdout') | list }}
+    quiet: true
+  when: not ansible_check_mode

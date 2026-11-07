@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Fake journalctl for tests/test_mission_control.yml (verify_journal.yml): records its arguments in
+# $MC_TEST_JOURNAL_ARGS, prints the file $MC_TEST_JOURNAL and exits with the code in $MC_TEST_JOURNAL.rc (default 0).
+set -euo pipefail
+printf '%s\n' "$@" >"${MC_TEST_JOURNAL_ARGS:?}"
+cat -- "${MC_TEST_JOURNAL:?}"
+rc=0; [ -f "$MC_TEST_JOURNAL.rc" ] && rc="$(cat "$MC_TEST_JOURNAL.rc")"
+exit "$rc"

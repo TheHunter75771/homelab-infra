@@ -1,0 +1,27 @@
+---
+# One validation case (validate_case: {name, accounts, vars?, expect: pass | <substring of the error>}).
+- name: "Case {{ validate_case.name }}"
+  vars:
+    # Loop items are templated when the loop starts; 'defaults' defers the role defaults to this scope.
+    operator_accounts: "{{ role_defaults.operator_accounts if validate_case.accounts == 'defaults' else validate_case.accounts }}"
+    operator_pubkey: "{{ validate_case.pubkey | default(test_pubkey) }}"
+    operator_key_from: "{{ validate_case.key_from | default(['192.0.2.20', '198.51.100.20']) }}"
+    operator_manage_sshd_match: "{{ validate_case.sshd_match | default(false) }}"
+    operator_key_from_extra: "{{ validate_case.key_from_extra | default([]) }}"
+    operator_ssh_login: "{{ validate_case.ssh_login | default(true) }}"
+    operator_sudo: "{{ validate_case.sudo | default('full_logged') }}"
+  block:
+    - name: "Validate ({{ validate_case.name }})"
+      ansible.builtin.include_tasks: ../tasks/validate.yml
+
+    - name: "Record a pass ({{ validate_case.name }})"
+      ansible.builtin.set_fact:
+        validate_verdicts: "{{ validate_verdicts | combine({validate_case.name: validate_case.expect == 'pass'}) }}"
+        validate_messages: "{{ validate_messages | combine({validate_case.name: 'passed'}) }}"
+  rescue:
+    - name: "Record a failure and its message ({{ validate_case.name }})"
+      ansible.builtin.set_fact:
+        validate_verdicts: >-
+          {{ validate_verdicts | combine({validate_case.name:
+             validate_case.expect != 'pass' and validate_case.expect in (ansible_failed_result.msg | default(''))}) }}
+        validate_messages: "{{ validate_messages | combine({validate_case.name: ansible_failed_result.msg | default('')}) }}"

@@ -1,0 +1,82 @@
+---
+# Install one Python package into a dedicated directory and prune everything else there.
+# Params: skill_drafter_tree_src (controller dir), skill_drafter_tree_dest (absolute, basename must be
+# skill_drafter_tree_name, since it is pruned). Only *.py files are installed. Never deployed: symlinks,
+# __pycache__, test/tests and node_modules anywhere in the tree. A changed or removed file restarts the drafter
+# (when enabled), so it never runs a mix of old and new code.
+- name: Tree | the destination is a dedicated directory for {{ skill_drafter_tree_name }}
+  ansible.builtin.assert:
+    that:
+      - skill_drafter_tree_dest is abs
+      - skill_drafter_tree_dest | basename == skill_drafter_tree_name
+    fail_msg: "{{ skill_drafter_tree_dest }} must be an absolute path ending in /{{ skill_drafter_tree_name }} (it is pruned)."
+    quiet: true
+
+- name: Tree | source files of {{ skill_drafter_tree_name }}
+  vars:
+    skill_drafter_tree_entries: "{{ query('community.general.filetree', skill_drafter_tree_src) }}"
+    skill_drafter_tree_skip: '(^|/)(__pycache__|tests?|node_modules)(/|$)'
+  ansible.builtin.set_fact:
+    skill_drafter_tree_files: >-
+      {{ skill_drafter_tree_entries | selectattr('state', 'equalto', 'file') | map(attribute='path')
+         | select('search', '[.]py$') | reject('search', skill_drafter_tree_skip) | sort }}
+    skill_drafter_tree_dirs: >-
+      {{ skill_drafter_tree_entries | selectattr('state', 'equalto', 'directory') | map(attribute='path')
+         | reject('search', skill_drafter_tree_skip) | sort }}
+
+- name: Tree | there are files to install for {{ skill_drafter_tree_name }}
+  ansible.builtin.assert:
+    that: skill_drafter_tree_files | length > 0
+    fail_msg: No *.py files under {{ skill_drafter_tree_src }}.
+    quiet: true
+
+- name: Tree | the destination and its subdirectories are real directories (before any write)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    skill_drafter_guard_dirs: >-
+      {{ [skill_drafter_tree_dest] + (skill_drafter_tree_dirs | map('regex_replace', '^', skill_drafter_tree_dest ~ '/') | list) }}
+
+- name: Tree | directories of {{ skill_drafter_tree_name }}
+  ansible.builtin.file:
+    path: "{{ (skill_drafter_tree_dest ~ '/' ~ item) | regex_replace('/$', '') }}"
+    state: directory
+    owner: "{{ skill_drafter_owner }}"
+    group: "{{ skill_drafter_owner }}"
+    mode: "0755"
+  loop: "{{ [''] + skill_drafter_tree_dirs }}"
+
+- name: Tree | files of {{ skill_drafter_tree_name }}
+  ansible.builtin.copy:
+    src: "{{ skill_drafter_tree_src }}/{{ item }}"
+    dest: "{{ skill_drafter_tree_dest }}/{{ item }}"
+    owner: "{{ skill_drafter_owner }}"
+    group: "{{ skill_drafter_owner }}"
+    mode: "0644"
+    follow: false
+  loop: "{{ skill_drafter_tree_files }}"
+  notify: Restart skill-drafter
+
+- name: Tree | the destination is still a real directory (before the find and prune)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    skill_drafter_guard_dirs: >-
+      {{ [skill_drafter_tree_dest] + (skill_drafter_tree_dirs | map('regex_replace', '^', skill_drafter_tree_dest ~ '/') | list) }}
+
+- name: Tree | installed files of {{ skill_drafter_tree_name }}
+  ansible.builtin.find:
+    paths: "{{ skill_drafter_tree_dest }}"
+    recurse: true
+    follow: false
+    file_type: any
+    hidden: true
+  register: skill_drafter_tree_found
+
+- name: Tree | anything else is removed from {{ skill_drafter_tree_name }}
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ skill_drafter_tree_found.files | map(attribute='path') | reject('in', skill_drafter_tree_wanted) | sort }}"
+  notify: Restart skill-drafter
+  vars:
+    skill_drafter_tree_wanted: >-
+      {{ (skill_drafter_tree_dirs + skill_drafter_tree_files) | map('regex_replace', '^', skill_drafter_tree_dest ~ '/') | list }}

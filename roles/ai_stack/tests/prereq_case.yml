@@ -1,0 +1,27 @@
+---
+# One credentials-preflight case for test_render.yml: runs the role's tasks/skills_prereqs.yml against
+# scratch files and checks it passes or fails as expected.
+- name: Prereq case | the role's tasks/skills_prereqs.yml
+  block:
+    - name: Prereq case | run it
+      ansible.builtin.include_tasks: "{{ ai_stack_test_role }}/tasks/skills_prereqs.yml"
+      vars:
+        ai_stack_skills_credentials_file: "{{ ai_stack_test_tmp.path }}/{{ prereq_case.cred }}"
+        ai_stack_skills_wait_unit_file: "{{ ai_stack_test_tmp.path }}/{{ prereq_case.wait }}"
+        ai_stack_skills_credentials_owner: "{{ prereq_case.owner }}"
+
+    - name: Prereq case | it passed
+      ansible.builtin.set_fact:
+        prereq_case_failed: false
+  rescue:
+    - name: Prereq case | it failed
+      ansible.builtin.set_fact:
+        prereq_case_failed: true
+  always:
+    - name: Prereq case | outcome is as expected
+      ansible.builtin.assert:
+        that:
+          - prereq_case_failed is defined
+          - (not prereq_case_failed) == (prereq_case.ok | bool)
+        fail_msg: "{{ prereq_case.name }}: expected {{ 'pass' if prereq_case.ok | bool else 'fail' }}."
+        quiet: true

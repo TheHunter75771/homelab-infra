@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Fake `ip -o link show dev <iface>` for preflight's interface check (tests/test_mission_control.yml): only
+# "tailscale0" exists.
+[ "${1:-}" = tailscale0 ] && { echo "3: tailscale0: <POINTOPOINT,UP,LOWER_UP> mtu 1280"; exit 0; }
+echo "Device \"${1:-}\" does not exist." >&2
+exit 1

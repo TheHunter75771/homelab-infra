@@ -4,17 +4,19 @@ firewall_tailnet_iface: tailscale0
 # Docker's address pools (container sources allowed to query the Docker-facing stub).
 firewall_docker_cidr: 172.16.0.0/12
 
-# The declared UFW rule set (docs/CONTRACTS.md §7), written exactly the way `ufw show added`
+# The declared UFW rule set (docs/CONTRACTS.md §7, §12.2), written exactly the way `ufw show added`
 # prints a rule (without the leading "ufw "). That makes "declared" and "present" directly
 # comparable: the role adds these, then deletes every rule UFW has that isn't in this list.
-# The first rule is the lockout guard and is always added first. Nothing goes on wifi_iface.
-firewall_rules:
-  - "allow in on {{ firewall_tailnet_iface }} to any port 22 proto tcp comment 'homelab: ssh over tailnet'"
-  - "allow in on {{ lan_iface }} from {{ gaming_pc_lan_ip }} to any port 22 proto tcp comment 'homelab: ssh from workstation'"
-  - "allow in on {{ lan_iface }} from {{ lan_cidr }} to any port 8096 proto tcp comment 'homelab: jellyfin lan'"
-  - "allow in on {{ firewall_tailnet_iface }} to any port 9999 proto tcp comment 'homelab: wol-relay over tailnet'"
-  # Encrypted-only DNS (§9d): containers reach resolved's stub on the Docker bridge address; no
-  # plaintext DNS leaves the host (loopback is accepted earlier, by UFW's before.rules).
+# The allow rules come from firewall_allow_rules (group_vars), the SSH-over-tailnet lockout guard
+# always first; the container-DNS rules below follow them. Nothing goes on wifi_iface.
+firewall_allow_rule_lines: "{{ firewall_allow_rules | homelab_ufw_allow_rules }}"
+firewall_rules: >-
+  {{ (firewall_allow_rule_lines | select('match', firewall_lockout_guard_regex) | list)
+     + (firewall_allow_rule_lines | reject('match', firewall_lockout_guard_regex) | list)
+     + firewall_dns_rules }}
+# Encrypted-only DNS (§9d): containers reach resolved's stub on the Docker bridge address; no
+# plaintext DNS leaves the host (loopback is accepted earlier, by UFW's before.rules).
+firewall_dns_rules:
   - "allow from {{ firewall_docker_cidr }} to {{ docker_dns_ip }} port 53 proto udp comment 'homelab: container dns to resolved'"
   - "allow from {{ firewall_docker_cidr }} to {{ docker_dns_ip }} port 53 proto tcp comment 'homelab: container dns to resolved'"
   - "deny out 53/udp comment 'homelab: no plaintext dns out'"
@@ -29,6 +31,13 @@ firewall_comment_regex: " comment '.*'$"
 firewall_docker_user_script: /usr/local/sbin/homelab-docker-user
 firewall_tailnet_v4: 100.64.0.0/10
 firewall_tailnet_v6: fd7a:115c:a1e0::/48
+
+# UFW's sysctl file (IPT_SYSCTL in /etc/default/ufw), applied on every UFW start (CONTRACTS §12.9).
+firewall_ufw_sysctl_file: /etc/ufw/sysctl.conf
+# net.ipv4.conf.<name>.log_martians entries that must stay 1 (role base sets and asserts them).
+firewall_martians_conf:
+  - all
+  - default
 
 # ufw's messages are translated; the role parses them, so run it in the C locale.
 firewall_ufw_env:

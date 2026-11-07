@@ -1,0 +1,71 @@
+---
+# §12.17.2: the library folder is created by Library.init (module L), run with the system python3
+# from the installed package, so the layout and README exist. init runs only on an absent or empty
+# folder (preflight already refused an unmounted share drive); an existing folder must open as a
+# library (Library.open) or the role refuses, so a converge never re-inits or re-indexes it and a
+# second run changes nothing. It runs AS Samba's force user and group (runuser), so everything it
+# creates, the sentinel included, is theirs: this ntfs3 mount stores real owners (Integrator). The sentinel (§12.11 mount safety) is created next to it, once.
+- name: Library | guard the library folder
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    ai_library_share_guard_dirs:
+      - "{{ ai_library_share_dir }}"
+
+- name: Library | open it (or create it when it isn't a library yet), then the sentinel
+  ansible.builtin.command:
+    argv: "{{ ai_library_share_server_runas + [ai_library_share_python, '-I', '-B', '-c', ai_library_share_init_code,
+            ai_library_share_lib_dir, ai_library_share_dir, ai_library_share_sentinel, ai_library_share_sentinel_text] }}"
+  vars:
+    ai_library_share_init_code: |
+        import json, os, sys
+        sys.path.insert(0, sys.argv[1])
+        from library import Library, LibraryError
+        root, sentinel, text = sys.argv[2], sys.argv[3], sys.argv[4]
+        # Library.init only on an absent or empty folder (Reviewer G): an existing folder must already
+        # open as a library; a converge never re-inits (or re-indexes) it.
+        if not os.path.lexists(root) or (os.path.isdir(root) and not os.path.islink(root) and not os.listdir(root)):
+            try:
+                _, created = Library.init(root)
+            except LibraryError as exc:
+                sys.exit(f"REFUSED: {exc}")
+        else:
+            try:
+                Library.open(root)
+            except LibraryError as exc:
+                sys.exit(f"REFUSED: {exc}. A converge never re-runs init on an existing folder: check it, then "
+                         f"run `python3 -m library --root {root} init` by hand if it is the library.")
+            created = []
+        # Mount safety (§12.11): created once, never rewritten (a hand edit isn't a converge change),
+        # never through a symlink. Made by this process, so owned by the force user and group.
+        path = os.path.join(root, sentinel)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+        except FileExistsError:
+            pass
+        else:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            created.append(sentinel)
+        print(json.dumps(created))
+  register: ai_library_share_init
+  changed_when: (ai_library_share_init.stdout | from_json | length) > 0
+  when: not ansible_check_mode
+
+- name: Library | stat the sentinel
+  ansible.builtin.stat:
+    path: "{{ ai_library_share_dir }}/{{ ai_library_share_sentinel }}"
+    follow: false
+    get_checksum: false
+  register: ai_library_share_sentinel_stat
+  when: not ansible_check_mode
+
+- name: Library | the sentinel is a regular, non-empty file
+  ansible.builtin.assert:
+    that:
+      - ai_library_share_sentinel_stat.stat.isreg | default(false)
+      - ai_library_share_sentinel_stat.stat.size | default(0) > 0
+    fail_msg: "{{ ai_library_share_dir }}/{{ ai_library_share_sentinel }} isn't a regular, non-empty file; fix it by hand."
+    quiet: true
+  when: not ansible_check_mode

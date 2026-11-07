@@ -1,0 +1,30 @@
+---
+# Pure classification of setuid candidates (no host access; the offline test feeds it fakes).
+# In:  operator_account_rs_files   [path]
+#      operator_account_rs_always   [path]  named sudo paths whose real file isn't classic sudo: always guarded
+#      operator_account_rs_owner_map {path: [package]}   (dpkg -S; absent = unknown)
+#      operator_account_rs_version {path: "--version stdout"}
+# Out: operator_account_sudo_rs       guarded set: always-guarded, owned by a sudo-rs package, or identifies as sudo-rs
+#      operator_account_sudo_rs_sudo  the subset that is sudo-rs's sudo itself (answers sudo's -l -U);
+#                                     su/visudo from sudo-rs are guarded but never queried with sudo options
+- name: Classify sudo-rs files
+  ansible.builtin.set_fact:
+    operator_account_sudo_rs: >-
+      {%- set g = [] -%}
+      {%- for f in operator_account_rs_files -%}
+      {%-   set owned = operator_account_rs_owner_map[f] | default([]) | intersect(operator_account_sudo_rs_packages) | length > 0 -%}
+      {%-   set says = operator_account_rs_version[f] | default('') is search(operator_account_sudo_rs_version_re) -%}
+      {%-   if owned or says or f in operator_account_rs_always -%}{%- set _ = g.append(f) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ g | unique | sort | to_json }}
+    operator_account_sudo_rs_sudo: >-
+      {%- set g = [] -%}
+      {%- for f in operator_account_rs_files if operator_account_rs_version[f] | default('') is match(operator_account_sudo_rs_sudo_re) -%}
+      {%-   set _ = g.append(f) -%}
+      {%- endfor -%}
+      {{ g | unique | sort | to_json }}
+
+- name: Classified sudo-rs files are lists
+  ansible.builtin.set_fact:
+    operator_account_sudo_rs: "{{ operator_account_sudo_rs | from_json }}"
+    operator_account_sudo_rs_sudo: "{{ operator_account_sudo_rs_sudo | from_json }}"

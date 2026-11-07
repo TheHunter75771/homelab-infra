@@ -1,0 +1,6 @@
+---
+# A changed unit or timer is reloaded; the timer picks up a new schedule on reload. The oneshot service is
+# never restarted by a converge (it reads its config at every run).
+- name: Reload systemd for finance-digest
+  ansible.builtin.systemd_service:
+    daemon_reload: true

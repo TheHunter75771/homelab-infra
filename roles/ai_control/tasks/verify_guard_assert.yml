@@ -1,0 +1,50 @@
+---
+# Params (tests/test_ai_control.yml runs this file with canned outputs):
+#   ai_control_guard_round       a label for the message;
+#   ai_control_guard_list_rc     `nft list table inet ai_control_guard`'s exit code;
+#   ai_control_guard_root_out / _nobody_out   guard_probe.py tcp's JSON line for serve4, serve6, server;
+#   ai_control_guard_users_out   {user: guard_probe.py tcp's JSON line for server} for each other allowed user;
+#   ai_control_guard_dial_out    guard_probe.py dial's JSON lines (nobody, IPv6 then IPv4);
+#   ai_control_guard_main_pid    the server's MainPID; ai_control_guard_ns_tailscaled / _ns_helper: whether
+#                                tailscaled's socket and the helper socket exist in its /run.
+- name: Verify guard | the guard holds ({{ ai_control_guard_round }})
+  vars:
+    refused: [ECONNREFUSED, ECONNRESET]
+    root: "{{ (ai_control_guard_root_out | from_json) if (ai_control_guard_root_out | trim) is match('^[{].*[}]\\Z') else {} }}"
+    nobody: "{{ (ai_control_guard_nobody_out | from_json) if (ai_control_guard_nobody_out | trim) is match('^[{].*[}]\\Z') else {} }}"
+    users: >-
+      {{ ai_control_guard_users_out.values() | map('trim')
+         | map('regex_replace', '^(?![{].*[}]$).*$', '{}') | map('from_json') | list }}
+    dials: >-
+      {{ ai_control_guard_dial_out | map('trim') | map('regex_replace', '^(?![{].*[}]$).*$', '{}') | map('from_json') | list }}
+  ansible.builtin.assert:
+    that:
+      - ai_control_guard_list_rc | int == 0
+      # Serve's 443 from ai-box itself: refused for root too (only traffic on the tailscale interface passes).
+      - root.serve4 | default('') in refused
+      - root.serve6 | default('') in refused
+      - nobody.serve4 | default('') in refused
+      - nobody.serve6 | default('') in refused
+      # S on 127.0.0.1: root (tailscaled, these checks) and every other allowed user through; nobody refused.
+      - root.server | default('') == 'ok'
+      - nobody.server | default('') in refused
+      - users | length == ai_control_guard_users_out | length
+      - users | map(attribute='server', default='') | reject('equalto', 'ok') | list == []
+      # The local-API dial: answered (a status or an errno, not a crashed probe), and never AI Control as Noah.
+      - dials | length == 2
+      - dials | rejectattr('dial', 'defined') | list == []
+      - dials | rejectattr('exposed', 'defined') | list == []
+      - dials | selectattr('exposed') | list == []
+      - dials | selectattr('dial', 'equalto', 101) | map(attribute='upstream') | select('match', '^http ') | list == []
+      # Q-2: S's /run has the helper socket and not tailscaled's.
+      - ai_control_guard_main_pid | string is match('^[1-9][0-9]*\Z')
+      - not ai_control_guard_ns_tailscaled | bool
+      - ai_control_guard_ns_helper | bool
+    fail_msg: >-
+      The local-access guard ({{ ai_control_guard_round }}): `nft list table inet {{ ai_control_guard_table }}` exited
+      {{ ai_control_guard_list_rc }}; as root {{ root | to_json }} (want serve4/serve6 refused, server ok); as
+      {{ ai_control_verify_guard_user }} {{ nobody | to_json }} (want all refused); other allowed users {{ users | to_json }}
+      (want server ok); local-API dials as {{ ai_control_verify_guard_user }} {{ dials | to_json }} (want no 200 and no JSON:
+      exposed=true means any local user reaches AI Control as Noah); S (pid {{ ai_control_guard_main_pid }}) sees
+      tailscaled.sock: {{ ai_control_guard_ns_tailscaled }}, the helper socket: {{ ai_control_guard_ns_helper }} (want false, true).
+    quiet: true

@@ -1,0 +1,84 @@
+---
+# Which sudo implementations are on this host. Classic sudo writes the I/O log; sudo-rs reads the same
+# /etc/sudoers(.d) (unless /etc/sudoers-rs exists) but has no I/O logging at all, so a full_logged
+# account that could run sudo-rs would get unlogged root.
+- name: Look for sudo, visudo and sudo-rs binaries
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: false
+  loop: "{{ (operator_account_sudo_candidates + operator_account_visudo_candidates + operator_account_sudo_rs_candidates) | unique }}"
+  register: operator_account_sudo_stat
+
+# path -> real file (the /usr/bin/sudo alternative is a symlink chain; stat's lnk_source is its realpath).
+- name: Resolve the sudo binaries to real files
+  ansible.builtin.set_fact:
+    operator_account_sudo_real: >-
+      {%- set m = {} -%}
+      {%- for r in operator_account_sudo_stat.results if r.stat.exists -%}
+      {%-   set _ = m.update({r.item: (r.stat.lnk_source if r.stat.islnk else r.item)}) -%}
+      {%- endfor -%}
+      {{ m | to_json }}
+
+- name: Ask each sudo binary for its version
+  ansible.builtin.command:
+    argv: ["{{ item }}", --version]
+  loop: "{{ (operator_account_sudo_real | from_json).values() | unique | sort }}"
+  register: operator_account_sudo_versions
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# Version banners (checked against the sources and a real Ubuntu 26.04 / Fedora 44):
+#   classic sudo    "Sudo version 1.9.17p2"        (fixed text, whatever the binary is called)
+#   classic visudo  "<progname> version 1.9.17p2"  -> "visudo.ws version ..." when run as visudo.ws (Ubuntu),
+#                                                     "visudo version ..." on Fedora
+#   sudo-rs         "sudo-rs 0.2.x" / "visudo-rs 0.2.x" (stdout), "su-rs 0.2.x" (stderr)
+# stdout and stderr are both kept. Classic paths keep their *.ws name so logs and docs match the host.
+# Any sudo-rs candidate path whose real file isn't provably classic sudo counts as sudo-rs and gets the
+# guard (in addition to the package-derived set, sudo_rs_set.yml).
+- name: Classify the sudo binaries
+  vars:
+    real: "{{ operator_account_sudo_real | from_json }}"
+    version: >-
+      {{ dict(operator_account_sudo_versions.results | map(attribute='item')
+              | zip(operator_account_sudo_versions.results | map(attribute='stdout', default='')
+                    | zip(operator_account_sudo_versions.results | map(attribute='stderr', default=''))
+                    | map('join', '\n'))) }}
+  ansible.builtin.set_fact:
+    operator_account_sudo_classic: >-
+      {%- set c = [] -%}
+      {%- for p in operator_account_sudo_candidates if p in real and version[real[p]] | default('') is match(operator_account_sudo_classic_re) -%}
+      {%-   set _ = c.append(p) -%}
+      {%- endfor -%}
+      {{ c | first | default('') }}
+    operator_account_visudo: >-
+      {%- set c = [] -%}
+      {%- for p in operator_account_visudo_candidates if p in real and version[real[p]] | default('') is match(operator_account_visudo_classic_re) -%}
+      {%-   set _ = c.append(p) -%}
+      {%- endfor -%}
+      {{ c | first | default('') }}
+    operator_account_sudo_rs: >-
+      {%- set c = [] -%}
+      {%- for p in operator_account_sudo_rs_candidates if p in real and not version[real[p]] | default('') is match(operator_account_sudo_classic_re) -%}
+      {%-   set _ = c.append(real[p]) -%}
+      {%- endfor -%}
+      {{ c | unique | sort | to_json }}
+
+- name: Classic sudo and its visudo are installed
+  ansible.builtin.assert:
+    that:
+      - operator_account_sudo_classic | length > 0
+      - operator_account_visudo | length > 0
+    fail_msg: >-
+      Classic sudo (and its visudo) not found in {{ operator_account_sudo_candidates }} / {{ operator_account_visudo_candidates }}.
+      Only classic sudo writes I/O logs; install it (Ubuntu: package sudo, binary sudo.ws) before granting full_logged sudo.
+    quiet: true
+
+- name: Candidate paths that aren't classic sudo
+  ansible.builtin.set_fact:
+    operator_account_sudo_rs_by_path: "{{ operator_account_sudo_rs | from_json }}"
+
+# The guarded set comes from the package itself (sudo_rs_set.yml), classified by sudo_rs_classify.yml.
+- name: Derive the guarded sudo-rs set from the package
+  ansible.builtin.include_tasks: sudo_rs_set.yml

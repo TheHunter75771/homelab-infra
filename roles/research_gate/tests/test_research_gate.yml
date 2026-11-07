@@ -1,0 +1,558 @@
+---
+# Offline test for role research_gate (no root, no systemd changes, nothing applied to this machine). Run it
+# through tests/run.sh (it loads the role's filter plugins):
+#   roles/research_gate/tests/run.sh
+# It runs the role's own task files against a scratch dir, with stub handlers that count restarts:
+#   1. preflight.yml: passes switched off with no library at all; refuses bad paths, settings and IP filters;
+#      switched on, refuses a missing/symlinked root, a root that isn't on the declared mount (an empty mount
+#      point), a missing/symlinked/non-file sentinel and a missing/symlinked 35-forge, and passes on a scratch
+#      "library" whose mount is the scratch dir's real mount;
+#   2. install.yml: R's launcher and package (plus a planted subpackage), forge and library from scratch copies with junk
+#      planted, run twice with strays in between (pruned), a third time changing nothing (no restart request);
+#      4 symlink cases refused by the guard with the victim untouched;
+#   3. config.yml: exactly R's keys and types, 0640, validated; the validator refuses an extra key, a string
+#      number, a non-http URL; a re-run requests no restart;
+#   4. the unit: rendered with the real paths, systemd-analyze verify clean, every contract setting and the
+#      exact IP filter checked; the allow line follows a different SearXNG address.
+- name: Role research_gate installs the gate off by default, refuses an unmounted library, and filters IPs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  vars:
+    ansible_managed: Ansible managed
+    test_tmp: ""
+    test_repo: "{{ playbook_dir }}/../../.."
+    rg_test_restarts: 0
+  handlers:
+    - name: Reload systemd for research-gate
+      ansible.builtin.debug:
+        msg: reload requested
+    - name: Restart research-gate
+      ansible.builtin.set_fact:
+        rg_test_restarts: "{{ rg_test_restarts | int + 1 }}"
+  tasks:
+    - name: Run.sh passed a scratch dir
+      ansible.builtin.assert:
+        that: test_tmp is abs
+        fail_msg: Run this through roles/research_gate/tests/run.sh.
+        quiet: true
+
+    - name: The role's defaults (before any test override)
+      ansible.builtin.assert:
+        that:
+          - research_gate_enabled is sameas false
+          - research_gate_user == 'rgate'
+          - research_gate_app_dir == '/opt/research-gate'
+          - research_gate_config_file == '/etc/research-gate/config.json'
+          - research_gate_sentinel == research_gate_library_root ~ '/.ai-library-sentinel'
+          - research_gate_forge_dir == research_gate_library_root ~ '/35-forge'
+          - research_gate_poll_interval == 60 and research_gate_results_per_query == 8
+          - research_gate_max_bytes == 5242880 and research_gate_fetch_timeout == 30 and research_gate_max_redirects == 3
+          - research_gate_library_cap == '500GB'
+          - research_gate_launcher == '/opt/research-gate/research-gate'
+        quiet: true
+
+    - name: Scratch sources with never-deployed junk, and a scratch library on the scratch dir's mount
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          s="{{ test_tmp }}/src"
+          mkdir -p "$s/research-gate" "$s/skill-library"
+          cp -r "{{ test_repo }}/apps/research-gate/research_gate" "{{ test_repo }}/apps/research-gate/research-gate" \
+            "{{ test_repo }}/apps/research-gate/README.md" "{{ test_repo }}/apps/research-gate/config.example.json" \
+            "{{ test_repo }}/apps/research-gate/tests" "$s/research-gate/"
+          # A nested package, so the install covers a subdirectory (guards, pruning). R has none today.
+          mkdir -p "$s/research-gate/research_gate/sub"
+          echo '"""nested"""' > "$s/research-gate/research_gate/sub/__init__.py"
+          cp -r "{{ test_repo }}/apps/skill-library/forge" "{{ test_repo }}/apps/skill-library/library" "$s/skill-library/"
+          for p in "$s/research-gate/research_gate" "$s/skill-library/forge" "$s/skill-library/library"; do
+            mkdir -p "$p/__pycache__" "$p/tests" "$p/test" "$p/node_modules/x"
+            echo junk > "$p/__pycache__/m.cpython-314.pyc"
+            echo junk > "$p/tests/test_m.py"
+            echo junk > "$p/test/test_n.py"
+            echo junk > "$p/node_modules/x/y.py"
+            echo junk > "$p/README.md"
+            echo junk > "$p/notes.txt"
+          done
+          mkdir -p "$s/research-gate/research_gate/sub/tests"
+          echo junk > "$s/research-gate/research_gate/sub/tests/test_s.py"
+          lib="{{ test_tmp }}/lib/ai-library"
+          mkdir -p "$lib/35-forge"
+          echo sentinel > "$lib/.ai-library-sentinel"
+          # Broken libraries for the switched-on refusals.
+          l="{{ test_tmp }}/lib"
+          ln -s "$lib" "$l/link"
+          mkdir -p "$l/nosentinel/35-forge"
+          mkdir -p "$l/linksentinel/35-forge" && ln -s "$lib/.ai-library-sentinel" "$l/linksentinel/.ai-library-sentinel"
+          mkdir -p "$l/dirsentinel/35-forge" "$l/dirsentinel/.ai-library-sentinel"
+          mkdir -p "$l/noforge" && echo sentinel > "$l/noforge/.ai-library-sentinel"
+          mkdir -p "$l/linkforge" && echo sentinel > "$l/linkforge/.ai-library-sentinel" && ln -s "$lib/35-forge" "$l/linkforge/35-forge"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Where the scratch library lives (its real mount; tests/run.sh checks it isn't /)
+      ansible.builtin.command:
+        argv: [findmnt, --noheadings, --first-only, --output, TARGET, --target, "{{ test_tmp }}"]
+      register: rg_test_mount
+      changed_when: false
+
+    - name: Point the role at the scratch dir, and the good values every refusal case starts from
+      ansible.builtin.set_fact:
+        research_gate_pkg_src: "{{ test_tmp }}/src/research-gate/research_gate"
+        research_gate_launcher_src: "{{ test_tmp }}/src/research-gate/research-gate"
+        research_gate_library_src_dir: "{{ test_tmp }}/src/skill-library"
+        research_gate_searxng_defaults_file: "{{ test_repo }}/roles/searxng/defaults/main.yml"
+        research_gate_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        research_gate_root_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        research_gate_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
+        research_gate_app_dir: "{{ test_tmp }}/opt/research-gate"
+        research_gate_config_dir: "{{ test_tmp }}/etc/research-gate"
+        research_gate_config_file: "{{ test_tmp }}/etc/research-gate/config.json"
+        test_good:
+          library_root: /srv/ai-library
+          library_mount: /srv/ai-library
+          forbidden_re: "{{ research_gate_library_forbidden_re }}"
+          user_agent: "{{ research_gate_user_agent }}"
+          searxng_ipv4: 172.29.16.2
+          ip_deny: "{{ research_gate_ip_deny }}"
+          pkg_src: "{{ test_tmp }}/src/research-gate/research_gate"
+        test_lib: "{{ test_tmp }}/lib/ai-library"
+        test_mount: "{{ rg_test_mount.stdout | trim }}"
+        # The scratch dir is under /tmp: allow /tmp for the enabled cases only (the default forbids it).
+        test_tmp_ok_re: '^/(home|root|run|proc|sys|dev|etc|usr|boot|bin|sbin|lib|lib64|opt|var)(/|$)'
+
+    # ---- 0. the rgate account matches role ai_library_share's (§12.17.3) ---------------------------------
+    - name: Read both roles' account tasks
+      ansible.builtin.set_fact:
+        rg_test_mine: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../tasks/base.yml') | from_yaml }}"
+        rg_test_l2: "{{ lookup('ansible.builtin.file', test_repo ~ '/roles/ai_library_share/tasks/client.yml') | from_yaml }}"
+
+    - name: The rgate user and group tasks set exactly the agreed attributes, the same as role ai_library_share's
+      vars:
+        my_user: "{{ (rg_test_mine | select('contains', 'ansible.builtin.user') | first)['ansible.builtin.user'] }}"
+        my_group: "{{ (rg_test_mine | select('contains', 'ansible.builtin.group') | first)['ansible.builtin.group'] }}"
+        l2_user: "{{ (rg_test_l2 | select('contains', 'ansible.builtin.user') | first)['ansible.builtin.user'] }}"
+        l2_group: "{{ (rg_test_l2 | select('contains', 'ansible.builtin.group') | first)['ansible.builtin.group'] }}"
+      ansible.builtin.assert:
+        that:
+          - rg_test_mine | select('contains', 'ansible.builtin.user') | list | length == 1
+          - my_user.keys() | sort == ['create_home', 'group', 'home', 'name', 'shell', 'system']
+          # The raw task text names the role's variable (built here so the test itself holds no template).
+          - my_user.name == ('{' ~ '{ research_gate_user }' ~ '}') and my_user.group == my_user.name
+          - my_user.system is sameas true and my_user.create_home is sameas false
+          - my_user.shell == '/usr/sbin/nologin' and my_user.home == '/nonexistent'
+          - my_group.keys() | sort == ['name', 'system'] and my_group.system is sameas true
+          # Role ai_library_share's client: the same keys and the same fixed values (its name is its own variable).
+          - l2_user.keys() | sort == my_user.keys() | sort
+          - (l2_user | dict2items | rejectattr('key', 'in', ['name', 'group']) | list)
+            == (my_user | dict2items | rejectattr('key', 'in', ['name', 'group']) | list)
+          - l2_user.group == l2_user.name
+          - l2_group.keys() | sort == my_group.keys() | sort and l2_group.system == my_group.system
+          - research_gate_user == 'rgate'
+          # The sentinel the enabled preflight requires: L2's name, at the library root.
+          - research_gate_sentinel_name == '.ai-library-sentinel'
+          - research_gate_sentinel == research_gate_library_root ~ '/.ai-library-sentinel'
+        fail_msg: "mine {{ my_user }} / {{ my_group }}; ai_library_share {{ l2_user }} / {{ l2_group }}"
+        quiet: true
+
+    # ---- 1. preflight -----------------------------------------------------------------------------------
+    - name: Preflight passes switched off, with no library mounted anywhere
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+
+    - name: SearXNG's address comes from role searxng (no copy here)
+      ansible.builtin.assert:
+        that:
+          - research_gate_searxng_url == 'http://172.29.16.2:8080'
+          - research_gate_ip_allow == ['172.29.16.2/32', '127.0.0.53/32']
+          - research_gate_config.searxng_url == 'http://172.29.16.2:8080'
+        fail_msg: "{{ research_gate_searxng_url }} {{ research_gate_ip_allow }}"
+        quiet: true
+
+    - name: Preflight passes switched on, against the scratch library on its real mount
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+      vars:
+        research_gate_enabled: true
+        research_gate_library_root: "{{ test_lib }}"
+        research_gate_library_mount: "{{ test_mount }}"
+        research_gate_library_forbidden_re: "{{ test_tmp_ok_re }}"
+
+    - name: Preflight refuses bad inputs
+      ansible.builtin.include_tasks: expect_preflight_refusal.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - name: a switch that isn't a boolean
+          vars: {research_gate_enabled: "yes"}
+          task: Preflight | the switch is a boolean
+        - name: a library under /home (ProtectHome hides it)
+          vars: {research_gate_library_root: /home/someone/library, research_gate_library_mount: /home/someone/library}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a library under /tmp (PrivateTmp hides it)
+          vars: {research_gate_library_root: /tmp/library, research_gate_library_mount: /tmp/library}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a relative library path
+          vars: {research_gate_library_root: mnt/ai-library, research_gate_library_mount: mnt/ai-library}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a trailing slash
+          vars: {research_gate_library_root: /srv/ai-library/, research_gate_library_mount: /srv/ai-library/}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a dot-dot component
+          vars: {research_gate_library_root: /mnt/x/../etc, research_gate_library_mount: /mnt/x/../etc}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a space (it would break the unit's path lists)
+          vars: {research_gate_library_root: /mnt/ai library, research_gate_library_mount: /mnt/ai library}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: the root filesystem as the library
+          vars: {research_gate_library_root: /, research_gate_library_mount: /}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a library outside its declared mount
+          vars: {research_gate_library_root: /mnt/other, research_gate_library_mount: /srv/ai-library}
+          task: Preflight | the library root is the mount or below it
+        - name: a mount that is only a name prefix of the root
+          vars: {research_gate_library_root: /srv/ai-library2, research_gate_library_mount: /srv/ai-library}
+          task: Preflight | the library root is the mount or below it
+        - name: a User-Agent with a line break
+          vars: {research_gate_user_agent: "ua\nX-Injected: 1"}
+          task: Preflight | R's settings
+        - name: zero results per query
+          vars: {research_gate_results_per_query: 0}
+          task: Preflight | R's settings
+        - name: four redirects (R's maximum is 3)
+          vars: {research_gate_max_redirects: 4}
+          task: Preflight | R's settings
+        - name: a library cap with a space (it would split the unit's Environment line)
+          vars: {research_gate_library_cap: 500 GB}
+          task: Preflight | R's settings
+        - name: a library cap the library can't parse
+          vars: {research_gate_library_cap: 500XB}
+          task: Preflight | require a valid library cap
+        - name: a SearXNG address outside every denied range
+          vars: {searxng_ipv4: 203.0.113.5}
+          task: Preflight | SearXNG's pinned address, the resolver stub and the IP filter
+        - name: a SearXNG address that isn't IPv4
+          vars: {searxng_ipv4: searxng}
+          task: Preflight | SearXNG's pinned address, the resolver stub and the IP filter
+        - name: a deny list that blocks the public internet
+          vars: {research_gate_ip_deny: "{{ test_good.ip_deny + ['0.0.0.0/0'] }}"}
+          task: Preflight | SearXNG's pinned address, the resolver stub and the IP filter
+        - name: a deny list without the Docker/RFC 1918 range
+          vars: {research_gate_ip_deny: "{{ test_good.ip_deny | reject('equalto', '172.16.0.0/12') | list }}"}
+          task: Preflight | SearXNG's pinned address, the resolver stub and the IP filter
+        - name: a deny list without the tailnet range
+          vars: {research_gate_ip_deny: "{{ test_good.ip_deny | reject('equalto', '100.64.0.0/10') | list }}"}
+          task: Preflight | SearXNG's pinned address, the resolver stub and the IP filter
+        - name: a deny list without IPv6 loopback
+          vars: {research_gate_ip_deny: "{{ test_good.ip_deny | reject('equalto', '::1/128') | list }}"}
+          task: Preflight | SearXNG's pinned address, the resolver stub and the IP filter
+        - name: a non-strict deny entry
+          vars: {research_gate_ip_deny: "{{ test_good.ip_deny + ['10.1.2.3/8'] }}"}
+          task: Preflight | SearXNG's pinned address, the resolver stub and the IP filter
+        - name: the launcher missing on the controller
+          vars: {research_gate_launcher_src: "{{ test_tmp }}/src/nope"}
+          task: Preflight | require the app sources
+        - name: a resolver stub off loopback
+          vars: {research_gate_dns_stub: 192.0.2.53}
+          task: Preflight | SearXNG's pinned address, the resolver stub and the IP filter
+        - name: R's package missing on the controller
+          vars: {research_gate_pkg_src: "{{ test_tmp }}/src/nothing-here"}
+          task: Preflight | require the app sources
+        # Switched on: the library mount checks.
+        - name: switched on, the library root missing
+          vars:
+            research_gate_enabled: true
+            research_gate_library_root: "{{ test_tmp }}/lib/missing"
+            research_gate_library_mount: "{{ test_mount }}"
+            research_gate_library_forbidden_re: "{{ test_tmp_ok_re }}"
+          task: Preflight | the library root is a real directory
+        - name: switched on, the library root a symlink
+          vars:
+            research_gate_enabled: true
+            research_gate_library_root: "{{ test_tmp }}/lib/link"
+            research_gate_library_mount: "{{ test_mount }}"
+            research_gate_library_forbidden_re: "{{ test_tmp_ok_re }}"
+          task: Preflight | the library root is a real directory
+        - name: switched on, the root an empty mount point (not on the declared mount)
+          vars:
+            research_gate_enabled: true
+            research_gate_library_root: "{{ test_lib }}"
+            research_gate_library_mount: "{{ test_lib }}"
+            research_gate_library_forbidden_re: "{{ test_tmp_ok_re }}"
+          task: Preflight | the library root is on the declared mount (not the disk under an empty mount point)
+        - name: switched on, no sentinel
+          vars:
+            research_gate_enabled: true
+            research_gate_library_root: "{{ test_tmp }}/lib/nosentinel"
+            research_gate_library_mount: "{{ test_mount }}"
+            research_gate_library_forbidden_re: "{{ test_tmp_ok_re }}"
+          task: Preflight | the library sentinel is a regular file
+        - name: switched on, the sentinel a symlink
+          vars:
+            research_gate_enabled: true
+            research_gate_library_root: "{{ test_tmp }}/lib/linksentinel"
+            research_gate_library_mount: "{{ test_mount }}"
+            research_gate_library_forbidden_re: "{{ test_tmp_ok_re }}"
+          task: Preflight | the library sentinel is a regular file
+        - name: switched on, the sentinel a directory
+          vars:
+            research_gate_enabled: true
+            research_gate_library_root: "{{ test_tmp }}/lib/dirsentinel"
+            research_gate_library_mount: "{{ test_mount }}"
+            research_gate_library_forbidden_re: "{{ test_tmp_ok_re }}"
+          task: Preflight | the library sentinel is a regular file
+        - name: switched on, no 35-forge (not an initialized library)
+          vars:
+            research_gate_enabled: true
+            research_gate_library_root: "{{ test_tmp }}/lib/noforge"
+            research_gate_library_mount: "{{ test_mount }}"
+            research_gate_library_forbidden_re: "{{ test_tmp_ok_re }}"
+          task: Preflight | the library has its forge folder (an initialized library)
+        - name: switched on, 35-forge a symlink
+          vars:
+            research_gate_enabled: true
+            research_gate_library_root: "{{ test_tmp }}/lib/linkforge"
+            research_gate_library_mount: "{{ test_mount }}"
+            research_gate_library_forbidden_re: "{{ test_tmp_ok_re }}"
+          task: Preflight | the library has its forge folder (an initialized library)
+
+    # ---- 2. install -------------------------------------------------------------------------------------
+    - name: Install, first run
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Plant strays in the install (top level, inside packages, a cache dir)
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          a="{{ research_gate_app_dir }}"
+          echo stray > "$a/stray.py"
+          echo stray > "$a/config.example.json"
+          mkdir -p "$a/tests" && echo stray > "$a/tests/test_gate.py"
+          mkdir -p "$a/old_pkg" "$a/forge/__pycache__" "$a/research_gate/sub/tests"
+          echo stray > "$a/old_pkg/__init__.py"
+          echo stray > "$a/forge/__pycache__/core.cpython-314.pyc"
+          echo stray > "$a/library/removed.py"
+          echo stray > "$a/research_gate/sub/tests/t.py"
+          echo stray > "$a/.hidden"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Install, second run (prunes the strays)
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Flush the restart requests of runs 1 and 2
+      ansible.builtin.meta: flush_handlers
+
+    - name: Count the restart requests so far
+      ansible.builtin.set_fact:
+        rg_test_restarts_before: "{{ rg_test_restarts }}"
+
+    - name: Install, third run (no change)
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Flush any restart request of run 3
+      ansible.builtin.meta: flush_handlers
+
+    - name: List the installed tree
+      ansible.builtin.command:
+        argv: [find, "{{ research_gate_app_dir }}", -mindepth, "1", -printf, "%P|%m|%y\n"]
+      register: rg_test_tree
+      changed_when: false
+
+    - name: List what should be there (every *.py of the three sources, minus the never-deployed dirs)
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          s="{{ test_tmp }}/src"
+          echo "research-gate|755|f"
+          { cd "$s/research-gate" && find research_gate; cd "$s/skill-library" && find forge library; } \
+            | grep -Ev '(^|/)(__pycache__|tests?|node_modules)(/|$)' \
+            | while read -r p; do
+                if [ -d "$s/research-gate/$p" ] || [ -d "$s/skill-library/$p" ]; then echo "$p|755|d"
+                else case "$p" in *.py) echo "$p|644|f" ;; esac; fi
+              done
+        executable: /bin/bash
+      register: rg_test_want
+      changed_when: false
+
+    - name: The install holds exactly the three packages' code, root-style modes, and run 3 changed nothing
+      ansible.builtin.assert:
+        that:
+          - rg_test_tree.stdout_lines | sort == rg_test_want.stdout_lines | sort
+          - rg_test_tree.stdout_lines | select('search', '(^|/)(__pycache__|tests?|node_modules|old_pkg)(/|$)|stray|removed|hidden') | list == []
+          - "'research_gate/sub/__init__.py|644|f' in rg_test_tree.stdout_lines"
+          - "'forge/core.py|644|f' in rg_test_tree.stdout_lines and 'library/core.py|644|f' in rg_test_tree.stdout_lines"
+          - "'research_gate/config.py|644|f' in rg_test_tree.stdout_lines and 'research-gate|755|f' in rg_test_tree.stdout_lines"
+          - rg_test_tree.stdout_lines | select('search', '^(config[.]example[.]json|README[.]md|tests)') | list == []
+          - rg_test_restarts_before | int >= 1
+          - rg_test_restarts | int == rg_test_restarts_before | int
+        fail_msg: >-
+          extra {{ rg_test_tree.stdout_lines | difference(rg_test_want.stdout_lines) }},
+          missing {{ rg_test_want.stdout_lines | difference(rg_test_tree.stdout_lines) }},
+          restarts {{ rg_test_restarts_before }} -> {{ rg_test_restarts }}
+        quiet: true
+
+    - name: Install refuses symlinked directories
+      ansible.builtin.include_tasks: expect_guard_refusal.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - {name: app-dir, root: "{{ test_tmp }}/g1/research-gate", link: "{{ test_tmp }}/g1/research-gate"}
+        - {name: gate-package, root: "{{ test_tmp }}/g2/research-gate", link: "{{ test_tmp }}/g2/research-gate/research_gate"}
+        - {name: forge-package, root: "{{ test_tmp }}/g3/research-gate", link: "{{ test_tmp }}/g3/research-gate/forge"}
+        - {name: gate-subpackage, root: "{{ test_tmp }}/g4/research-gate", link: "{{ test_tmp }}/g4/research-gate/research_gate/sub"}
+
+    # ---- 3. config ---------------------------------------------------------------------------------------
+    - name: Config, first run
+      ansible.builtin.include_tasks: ../tasks/config.yml
+
+    - name: Flush the config's restart request
+      ansible.builtin.meta: flush_handlers
+
+    - name: Count the restart requests after the first config run
+      ansible.builtin.set_fact:
+        rg_test_restarts_before: "{{ rg_test_restarts }}"
+
+    - name: Config, second run (no change)
+      ansible.builtin.include_tasks: ../tasks/config.yml
+
+    - name: Flush any restart request of the second config run
+      ansible.builtin.meta: flush_handlers
+
+    - name: Stat config.json
+      ansible.builtin.stat:
+        path: "{{ research_gate_config_file }}"
+      register: rg_test_config_stat
+
+    - name: Stat the config dir
+      ansible.builtin.stat:
+        path: "{{ research_gate_config_dir }}"
+      register: rg_test_config_dir_stat
+
+    - name: Config.json holds exactly R's keys with the role's values
+      vars:
+        c: "{{ lookup('ansible.builtin.file', research_gate_config_file) | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - c.keys() | sort == research_gate_config_keys
+          - research_gate_config_keys == ['fetch_timeout', 'ipv4_only', 'library_root', 'max_bytes', 'max_redirects',
+                                        'poll_interval', 'results_per_query', 'searxng_url', 'user_agent']
+          - c.ipv4_only is sameas true
+          - c.library_root == '/srv/ai-library'
+          - c.searxng_url == 'http://172.29.16.2:8080'
+          - c.poll_interval == 60 and c.poll_interval is integer
+          - c.results_per_query == 8 and c.results_per_query is integer
+          - c.max_bytes == 5242880 and c.max_bytes is integer
+          - c.fetch_timeout == 30 and c.fetch_timeout is integer
+          - c.max_redirects == 3 and c.max_redirects is integer
+          - c.user_agent == research_gate_user_agent
+          - rg_test_config_stat.stat.mode == '0640'
+          - rg_test_config_dir_stat.stat.mode == '0750'
+          - rg_test_restarts_before | int >= 1
+          - rg_test_restarts | int == rg_test_restarts_before | int
+        fail_msg: "{{ c }} mode {{ rg_test_config_stat.stat.mode }} restarts {{ rg_test_restarts_before }} -> {{ rg_test_restarts }}"
+        quiet: true
+
+    - name: Bad configs for the deploy-time validator
+      ansible.builtin.copy:
+        content: >-
+          {{ (lookup('ansible.builtin.file', research_gate_config_file) | from_json | dict2items
+              | rejectattr('key', 'equalto', item.drop | default('')) | items2dict)
+             | combine(item.patch | default({})) | to_json }}
+        dest: "{{ test_tmp }}/bad-{{ item.name }}.json"
+        mode: "0644"
+      loop:
+        - {name: extra-key, patch: {proxy: "http://192.0.2.1:3128"}}
+        - {name: string-number, patch: {max_bytes: "5242880"}}
+        - {name: file-searxng, patch: {searxng_url: "file:///etc/passwd"}}
+        - {name: relative-root, patch: {library_root: "mnt/ai-library"}}
+        - {name: four-redirects, patch: {max_redirects: 4}}
+        - {name: ua-newline, patch: {user_agent: "ua\nX-Injected: 1"}}
+        - {name: ipv4-only-false, patch: {ipv4_only: false}}
+        - {name: ipv4-only-string, patch: {ipv4_only: "true"}}
+        - {name: ipv4-only-missing, drop: ipv4_only}
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: The validator refuses each bad config
+      ansible.builtin.command:
+        cmd: "{{ research_gate_config_validate | replace('%s', test_tmp ~ '/bad-' ~ item ~ '.json') }}"
+      loop: [extra-key, string-number, file-searxng, relative-root, four-redirects, ua-newline, ipv4-only-false, ipv4-only-string,
+             ipv4-only-missing]
+      register: rg_test_bad
+      changed_when: false
+      failed_when: rg_test_bad.rc == 0
+
+    - name: The validator accepts the rendered config
+      ansible.builtin.command:
+        cmd: "{{ research_gate_config_validate | replace('%s', research_gate_config_file) }}"
+      changed_when: false
+
+    - name: Config refuses a symlinked config directory
+      block:
+        - name: Config guard | a victim dir and the link
+          ansible.builtin.shell:
+            cmd: |
+              set -eu
+              v="{{ test_tmp }}/victim-config"
+              mkdir -p "$v" "{{ test_tmp }}/c1"
+              echo keep > "$v/sentinel"
+              chmod 0644 "$v/sentinel"
+              chmod 0700 "$v"
+              ln -sfn "$v" "{{ test_tmp }}/c1/research-gate"
+            executable: /bin/bash
+          changed_when: true
+
+        - name: Config guard | config.yml through the link
+          ansible.builtin.include_tasks: ../tasks/config.yml
+          vars:
+            research_gate_config_dir: "{{ test_tmp }}/c1/research-gate"
+            research_gate_config_file: "{{ test_tmp }}/c1/research-gate/config.json"
+
+        - name: Config guard | not reached
+          ansible.builtin.set_fact:
+            rg_test_config_guard_by: ""
+      rescue:
+        - name: Config guard | note which task refused
+          ansible.builtin.set_fact:
+            rg_test_config_guard_by: "{{ ansible_failed_task.name }}"
+
+    - name: Config guard | read the victim
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          v="{{ test_tmp }}/victim-config"
+          find "$v" -printf '%P|%m|%y\n' | LC_ALL=C sort
+          cat "$v/sentinel"
+        executable: /bin/bash
+      register: rg_test_config_victim
+      changed_when: false
+
+    - name: Config guard | refused by the guard, victim untouched
+      ansible.builtin.assert:
+        that:
+          - rg_test_config_guard_by == 'Guard | each pruned directory is absent or a real directory (never a symlink)'
+          - rg_test_config_victim.stdout_lines == ['sentinel|644|f', '|700|d', 'keep']
+        fail_msg: "refused by '{{ rg_test_config_guard_by }}'; victim: {{ rg_test_config_victim.stdout_lines }}"
+        quiet: true
+
+    # ---- 4. the unit ------------------------------------------------------------------------------------
+    - name: Units, with the real paths
+      ansible.builtin.include_tasks: units_case.yml
+      vars:
+        research_gate_app_dir: /opt/research-gate
+        research_gate_config_file: /etc/research-gate/config.json
+        rg_case: default
+        rg_expect_allow: 172.29.16.2/32 127.0.0.53/32
+
+    - name: Units, with another SearXNG address (the allow line follows role searxng's value)
+      ansible.builtin.include_tasks: units_case.yml
+      vars:
+        research_gate_app_dir: /opt/research-gate
+        research_gate_config_file: /etc/research-gate/config.json
+        searxng_ipv4: 172.29.200.34
+        rg_case: other
+        rg_expect_allow: 172.29.200.34/32 127.0.0.53/32

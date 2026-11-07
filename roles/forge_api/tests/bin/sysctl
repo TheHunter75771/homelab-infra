@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Fake sysctl for tests/test_forge_api.yml (preflight.yml): only `-n net.ipv4.ip_unprivileged_port_start`.
+# knob `unpriv`: the value to print (1024 by default), or fail (an error, as on a kernel without the key).
+set -euo pipefail
+: "${FA_TEST_DIR:?}"
+. "$(dirname "$0")/_knob"
+[ "$*" = "-n net.ipv4.ip_unprivileged_port_start" ] || { echo "fake sysctl: unexpected arguments: $*" >&2; exit 2; }
+v="$(knob unpriv 1024)"
+[ "$v" != fail ] || { echo "sysctl: cannot stat /proc/sys/net/ipv4/ip_unprivileged_port_start: No such file or directory" >&2; exit 255; }
+echo "$v"

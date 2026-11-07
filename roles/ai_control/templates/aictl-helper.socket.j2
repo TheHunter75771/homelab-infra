@@ -1,0 +1,23 @@
+# {{ ansible_managed }}
+# aictl-helper (docs/CONTRACTS.md §12.15.2): ai-control's only way to Docker, the journal and the sudo
+# I/O logs. Accept=yes: one short-lived root process per connection, the connection on stdin.
+# Only aictl (group) can connect; the helper also checks SO_PEERCRED uid == aictl.
+[Unit]
+Description=AI Control helper socket (read-only root helper for ai-control)
+Documentation=file://{{ ai_control_helper_script }}
+
+[Socket]
+ListenStream={{ ai_control_helper_socket }}
+SocketUser=root
+SocketGroup={{ ai_control_user }}
+SocketMode=0660
+Accept=yes
+MaxConnections={{ ai_control_helper_max_connections }}
+# Throttles a runaway client without latching the socket into "failed" (the trigger limit stays at
+# systemd's default for Accept=yes, far above this).
+PollLimitIntervalSec={{ ai_control_helper_poll_limit_interval }}
+PollLimitBurst={{ ai_control_helper_poll_limit_burst }}
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

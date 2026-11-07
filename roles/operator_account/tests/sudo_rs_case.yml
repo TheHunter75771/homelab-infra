@@ -1,0 +1,87 @@
+---
+# One guarded-set case (rs_case: {name, status, setuid, expect: pass | <substring of the error>}).
+# status: what the fake dpkg-query -W prints ("" = package unknown).
+# Detection runs against scratch paths only: the candidate paths point at a scratch host h (classic sudo and
+# visudo, no sudo-rs), so the guarded set comes from the fake package alone. This machine's own binaries never
+# count: a runner whose sudo is sudo-rs (Ubuntu 25.10+, /usr/lib/cargo/bin/sudo) would otherwise join every set.
+- name: "Guarded-set case {{ rs_case.name }}"
+  environment:
+    PATH: "{{ t }}/bin:{{ ansible_env.PATH }}"
+  vars:
+    present: "{{ rs_case.status not in ['', 'not-installed', 'config-files'] }}"
+    bin: "{{ t }}/pkg/usr/lib/cargo/bin"
+    h: "{{ t }}/rs-host"
+  block:
+    - name: "This machine's detection inputs, put back afterwards ({{ rs_case.name }})"
+      ansible.builtin.set_fact:
+        rs_saved_inputs:
+          sudo: "{{ operator_account_sudo_candidates }}"
+          visudo: "{{ operator_account_visudo_candidates }}"
+          rs: "{{ operator_account_sudo_rs_candidates }}"
+
+    - name: "Package state ({{ rs_case.name }})"
+      ansible.builtin.copy:
+        dest: "{{ t }}/pkg-installed"
+        content: "{{ rs_case.status }}"
+        mode: "0644"
+      when: rs_case.status | length > 0
+
+    - name: "No package ({{ rs_case.name }})"
+      ansible.builtin.file:
+        path: "{{ t }}/pkg-installed"
+        state: absent
+      when: rs_case.status | length == 0
+
+    - name: "Setuid bits ({{ rs_case.name }})"
+      ansible.builtin.file:
+        path: "{{ bin }}/{{ item }}"
+        mode: "{{ '04755' if rs_case.setuid else '0755' }}"
+      loop: [sudo, sudo.distrib, su]
+
+    - name: "Pretend to be Debian, with detection pointed at the scratch host ({{ rs_case.name }})"
+      ansible.builtin.set_fact:
+        operator_account_os_family: Debian
+        operator_account_sudo_candidates: ["{{ h }}/usr/bin/sudo.ws", "{{ h }}/usr/bin/sudo"]
+        operator_account_visudo_candidates: ["{{ h }}/usr/sbin/visudo.ws", "{{ h }}/usr/sbin/visudo"]
+        operator_account_sudo_rs_candidates: ["{{ h }}/usr/lib/cargo/bin/sudo", "{{ h }}/usr/bin/sudo-rs", "{{ h }}/usr/bin/sudo"]
+
+    - name: "Detect ({{ rs_case.name }})"
+      ansible.builtin.include_tasks: ../tasks/sudo_detect.yml
+
+    # The last two hold only if the fake dpkg-query (first on PATH) answered: the package state it was given,
+    # and "sudo-rs: <path>" for the package's files ("passwd: <path>" for anything else).
+    - name: "Guarded set, the sudo-rs sudo subset, and the fake dpkg-query's answers ({{ rs_case.name }})"
+      vars:
+        fake_owners: "{{ {bin ~ '/su': ['sudo-rs'], bin ~ '/sudo': ['sudo-rs'], bin ~ '/sudo.distrib': ['sudo-rs'], t ~ '/other/passwd': ['passwd']} }}"
+      ansible.builtin.assert:
+        that:
+          - operator_account_sudo_rs == ([bin ~ '/su', bin ~ '/sudo', bin ~ '/sudo.distrib'] if present | bool else [])
+          - operator_account_sudo_rs_sudo == ([bin ~ '/sudo', bin ~ '/sudo.distrib'] if present | bool else [])
+          - operator_account_sudo_rs_installed == (['sudo-rs'] if present | bool else [])
+          - (operator_account_rs_owner | from_json) == (fake_owners if present | bool else {})
+        fail_msg: >-
+          {{ operator_account_sudo_rs | to_json }} / {{ operator_account_sudo_rs_sudo | to_json }}
+          / {{ operator_account_sudo_rs_installed | to_json }} / {{ operator_account_rs_owner }}
+        quiet: true
+
+    - name: "Record a pass ({{ rs_case.name }})"
+      ansible.builtin.set_fact:
+        rs_verdicts: "{{ rs_verdicts | default({}) | combine({rs_case.name: rs_case.expect == 'pass'}) }}"
+  rescue:
+    - name: "Record a failure ({{ rs_case.name }})"
+      ansible.builtin.set_fact:
+        rs_verdicts: >-
+          {{ rs_verdicts | default({}) | combine({rs_case.name: rs_case.expect != 'pass'
+             and rs_case.expect in (ansible_failed_result.msg | default(''))}) }}
+  always:
+    - name: "Back to this host's OS family and detection inputs ({{ rs_case.name }})"
+      ansible.builtin.set_fact:
+        operator_account_os_family: "{{ ansible_facts.os_family }}"
+        operator_account_sudo_candidates: "{{ rs_saved_inputs.sudo }}"
+        operator_account_visudo_candidates: "{{ rs_saved_inputs.visudo }}"
+        operator_account_sudo_rs_candidates: "{{ rs_saved_inputs.rs }}"
+
+    - name: "Detection stayed in the scratch dir ({{ rs_case.name }})"
+      ansible.builtin.include_tasks: detect_scope.yml
+      vars:
+        scope_case: "{{ rs_case.name }}"

@@ -1,0 +1,55 @@
+---
+# One symlink case for test_render.yml: one folder on the seeding path (hf_link_case) is moved aside and replaced
+# by a symlink to it. Before that, model-a loses its config.json and its refs/main says "victim", so a seeding
+# that wrote through the link would put them back. The seeding must refuse, and nothing may change.
+- name: HF link case | model-a needs a write (config.json gone, refs/main not the revision)
+  ansible.builtin.file:
+    path: "{{ ai_stack_test_hf_paths.a_cfg }}"
+    state: absent
+
+- name: HF link case | refs/main says victim
+  ansible.builtin.copy:
+    content: victim
+    dest: "{{ ai_stack_test_hf_paths.a_ref }}"
+    mode: "0644"
+
+- name: HF link case | move the folder aside and link it back
+  ansible.builtin.command:
+    argv: [sh, -c, 'mv "$1" "$1.real" && ln -s "$1.real" "$1"', sh, "{{ hf_link_case }}"]
+  changed_when: true
+
+- name: HF link case | the seeding refuses
+  ansible.builtin.include_tasks: hf_seed_case.yml
+  vars:
+    hf_seed_case: {name: "link {{ hf_link_case }}", ok: false, error: Refusing to write through it}
+
+- name: HF link case | the link is still there
+  ansible.builtin.stat:
+    path: "{{ hf_link_case }}"
+    follow: false
+  register: hf_link_case_stat
+
+- name: HF link case | put the folder back
+  ansible.builtin.command:
+    argv: [sh, -c, 'rm "$1" && mv "$1.real" "$1"', sh, "{{ hf_link_case }}"]
+  changed_when: true
+
+- name: HF link case | nothing was written through the link
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: true
+    checksum_algorithm: sha256
+  loop:
+    - "{{ ai_stack_test_hf_paths.a_cfg }}"
+    - "{{ ai_stack_test_hf_paths.a_ref }}"
+  register: hf_link_case_after
+
+- name: HF link case | config.json still gone, refs/main still victim
+  ansible.builtin.assert:
+    that:
+      - hf_link_case_stat.stat.islnk
+      - not hf_link_case_after.results[0].stat.exists
+      - hf_link_case_after.results[1].stat.checksum == 'victim' | hash('sha256')
+    fail_msg: "{{ hf_link_case }}: {{ hf_link_case_after.results | map(attribute='stat') | list | to_json }}"
+    quiet: true

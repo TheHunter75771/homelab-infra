@@ -1,0 +1,36 @@
+---
+# One seeding case for test_render.yml: runs the role's tasks/hf_models.yml against the scratch seed folder and
+# the local server standing in for huggingface.co, and checks it passes or fails as expected (and why). The
+# caller checks what is on disk afterwards.
+- name: HF seed case | the role's seeding
+  block:
+    - name: HF seed case | tasks/hf_models.yml
+      ansible.builtin.include_tasks: "{{ ai_stack_test_role }}/tasks/hf_models.yml"
+      vars:
+        ai_stack_hf_models: "{{ ai_stack_test_hf_models }}"
+        ai_stack_hf_seed_dir: "{{ ai_stack_test_hf_seed }}"
+        ai_stack_hf_owner: "{{ hf_seed_case.owner | default(ai_stack_test_hf_user) }}"
+        ai_stack_hf_group: "{{ ai_stack_test_hf_group }}"
+        ai_stack_hf_base_url: "{{ ai_stack_test_hf_url }}"
+
+    - name: HF seed case | it passed
+      ansible.builtin.set_fact:
+        hf_seed_case_failed: false
+        hf_seed_case_error: ""
+  rescue:
+    - name: HF seed case | it failed
+      ansible.builtin.set_fact:
+        hf_seed_case_failed: true
+        hf_seed_case_error: "{{ ansible_failed_result | to_json }}"
+  always:
+    - name: HF seed case | outcome is as expected
+      ansible.builtin.assert:
+        that:
+          - hf_seed_case_failed is defined
+          - (not hf_seed_case_failed) == (hf_seed_case.ok | bool)
+          - hf_seed_case.error is not defined or hf_seed_case_error is search(hf_seed_case.error)
+        fail_msg: "{{ hf_seed_case.name }}: expected {{ 'pass' if hf_seed_case.ok | bool else 'fail' }}. {{ hf_seed_case_error | default('') }}"
+        quiet: true
+
+    - name: HF seed case | what is on disk now
+      ansible.builtin.include_tasks: hf_seed_state.yml

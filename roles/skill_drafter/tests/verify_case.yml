@@ -1,0 +1,60 @@
+---
+# One verify.yml run against the fake systemctl and systemd-run (tests/bin), with the real installed drafter
+# running `status`. case = {name, unit (steady | flapping | failed), config (the config file status reads),
+# refused_by ('' = must pass)}.
+- name: Verify case | the fake unit's mode for {{ case.name }}
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      echo "{{ case.unit }}" > "$SD_TEST_SYSTEMCTL"
+      rm -f "$SD_TEST_SYSTEMCTL.calls" "$SD_TEST_RUN_ARGS"
+    executable: /bin/bash
+  changed_when: true
+
+- name: Verify case | verify.yml for {{ case.name }}
+  block:
+    - name: Verify case | run verify.yml ({{ case.name }})
+      ansible.builtin.include_tasks: ../tasks/verify.yml
+      vars:
+        skill_drafter_config_file: "{{ case.config }}"
+        skill_drafter_verify_retries: 2
+        skill_drafter_verify_delay: 1
+
+    - name: Verify case | passed ({{ case.name }})
+      ansible.builtin.set_fact:
+        sd_test_verify_by: ""
+  rescue:
+    - name: Verify case | note which task refused ({{ case.name }})
+      ansible.builtin.set_fact:
+        sd_test_verify_by: "{{ ansible_failed_task.name }}"
+
+- name: Verify case | the outcome matches ({{ case.name }})
+  ansible.builtin.assert:
+    that: sd_test_verify_by == case.refused_by
+    fail_msg: "{{ case.name }}: refused by '{{ sd_test_verify_by }}', expected '{{ case.refused_by }}'"
+    quiet: true
+
+- name: Verify case | the arguments the fake systemd-run got ({{ case.name }})
+  ansible.builtin.command:
+    argv: [cat, "{{ lookup('ansible.builtin.env', 'SD_TEST_RUN_ARGS') }}"]
+  register: sd_test_run_args
+  changed_when: false
+  when: case.unit == 'steady'
+
+- name: Verify case | a waited, piped, collected oneshot with every sandbox property, then status ({{ case.name }})
+  vars:
+    got: "{{ sd_test_run_args.stdout_lines }}"
+    sep: "{{ 7 + skill_drafter_sandbox | length }}"
+  ansible.builtin.assert:
+    that:
+      - got[:6] == ['--wait', '--pipe', '--collect', '--quiet', '--service-type=oneshot', '--description=skill-drafter status (Ansible verify)']
+      - got[6] == '--property=TimeoutStartSec=2min'
+      - got[7:sep | int] == skill_drafter_sandbox | map('regex_replace', '^', '--property=') | list
+      - got[sep | int] == '--'
+      - "'--property=IPAddressDeny=any' in got"
+      - "'--property=ReadWritePaths=' ~ skill_drafter_forge_dir in got"
+      - "'--property=Environment=AI_LIBRARY_CAP=500GB' in got"
+      - got[sep | int + 1:] == ['/usr/bin/python3', '-I', '-B', skill_drafter_launcher, '--config', case.config, 'status']
+    fail_msg: "{{ got }}"
+    quiet: true
+  when: case.unit == 'steady'

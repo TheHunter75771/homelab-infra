@@ -1,0 +1,52 @@
+---
+# One symlink case for test_ai_host_agent.yml: case = {name, dir, link}. `link` (inside the scratch
+# install dir `dir`) is made a symlink to a victim directory holding one sentinel file. install.yml
+# must refuse at its guard, before writing anything, and the victim must be untouched.
+- name: Guard case | set up the victim and the link for {{ case.name }}
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      v="{{ test_tmp }}/victim-{{ case.name }}"
+      mkdir -p "$v" "$(dirname "{{ case.link }}")"
+      echo keep > "$v/sentinel"
+      chmod 0700 "$v"
+      ln -sfn "$v" "{{ case.link }}"
+    executable: /bin/bash
+  changed_when: true
+
+- name: Guard case | install through the link for {{ case.name }}
+  block:
+    - name: Guard case | install for {{ case.name }}
+      ansible.builtin.include_tasks: ../tasks/install.yml
+      vars:
+        ai_host_agent_install_dir: "{{ case.dir }}"
+
+    - name: Guard case | not reached for {{ case.name }}
+      ansible.builtin.set_fact:
+        agent_test_guard_by: ""
+  rescue:
+    - name: Guard case | note which task refused for {{ case.name }}
+      ansible.builtin.set_fact:
+        agent_test_guard_by: "{{ ansible_failed_task.name }}"
+
+- name: Guard case | list the victim for {{ case.name }}
+  ansible.builtin.find:
+    paths: "{{ test_tmp }}/victim-{{ case.name }}"
+    recurse: true
+    hidden: true
+    file_type: any
+  register: agent_test_victim
+
+- name: Guard case | stat the victim for {{ case.name }}
+  ansible.builtin.stat:
+    path: "{{ test_tmp }}/victim-{{ case.name }}"
+  register: agent_test_victim_dir
+
+- name: Guard case | refused by the guard, victim untouched for {{ case.name }}
+  ansible.builtin.assert:
+    that:
+      - agent_test_guard_by == 'Guard | each pruned directory is absent or a real directory (never a symlink)'
+      - agent_test_victim.files | map(attribute='path') | map('basename') | list == ['sentinel']
+      - agent_test_victim_dir.stat.mode == '0700'
+    fail_msg: "refused by '{{ agent_test_guard_by }}'; victim holds {{ agent_test_victim.files | map(attribute='path') | list }}"
+    quiet: true

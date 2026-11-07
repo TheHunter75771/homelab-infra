@@ -1,0 +1,27 @@
+---
+# ai-box has no backup-pull account from role users (§12.2: users_media_accounts false). This one exists only for
+# the Open WebUI pull, with the attributes role users gives the mediaserver's (system, locked, /bin/sh because
+# sshd runs the forced command through the shell).
+- name: Account | group
+  ansible.builtin.group:
+    name: "{{ ai_backup_account }}"
+    system: true
+    state: present
+
+- name: Account | user
+  ansible.builtin.user:
+    name: "{{ ai_backup_account }}"
+    group: "{{ ai_backup_account }}"
+    system: true
+    home: "{{ ai_backup_account_home }}"
+    create_home: true
+    shell: /bin/sh
+    password_lock: true
+
+- name: Account | home is private
+  ansible.builtin.file:
+    path: "{{ ai_backup_account_home }}"
+    state: directory
+    owner: "{{ ai_backup_account }}"
+    group: "{{ ai_backup_account }}"
+    mode: "0750"

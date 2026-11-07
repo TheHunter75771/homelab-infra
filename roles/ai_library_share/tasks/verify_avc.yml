@@ -1,0 +1,18 @@
+---
+# No recent AVC denial in smbd's domain smbd_t (every smbd process, whatever its process title;
+# §12.17.2 Verify). Clean means exactly: ausearch exits 1 and prints "<no matches>" (the §12.15
+# lesson). rc 0 is denials found; a missing ausearch, or any other error, fails too (never a
+# silent pass). tests/test_ai_library_share.yml runs this with stub programs.
+- name: Verify | ausearch finds no AVC for smbd
+  ansible.builtin.command:
+    argv:
+      - "{{ ai_library_share_ausearch }}"
+      - --message
+      - AVC,USER_AVC
+      - --start
+      - recent
+      - --context
+      - smbd_t
+  register: ai_library_share_avc
+  changed_when: false
+  failed_when: ai_library_share_avc.rc != 1 or '<no matches>' not in ai_library_share_avc.stderr

@@ -1,0 +1,45 @@
+---
+# One mismatch case for tasks/ownership.yml: case = {name, user, group} as the force user/group. The
+# scratch library is owned by the test user, so every entry mismatches; the stub chown records its
+# arguments instead of changing anything.
+- name: Own case | clear the stub's record for {{ case.name }}
+  ansible.builtin.file:
+    path: "{{ test_tmp }}/chown-args"
+    state: absent
+
+- name: Own case | run ownership.yml for {{ case.name }}
+  ansible.builtin.include_tasks: ../tasks/ownership.yml
+  vars:
+    ai_library_share_force_user: "{{ case.user }}"
+    ai_library_share_force_group: "{{ case.group }}"
+
+- name: Own case | read what chown got for {{ case.name }}
+  ansible.builtin.command:
+    argv: [cat, "{{ test_tmp }}/chown-args"]
+  register: test_chown
+  changed_when: false
+
+- name: Own case | changed, -execdir chown -h on every entry incl. the link itself, never through it, for {{ case.name }}
+  vars:
+    # One line per chown call: "<cwd>\t-h --no-dereference U:G ./a ./b"; rebuilt into absolute paths.
+    calls: "{{ test_chown.stdout_lines | map('split', '\t') | list }}"
+    names: >-
+      {% set out = [] %}{% for c in calls %}{% set _ = out.extend(c[1].split(' ')[3:]) %}{% endfor %}{{ out }}
+    chowned: >-
+      {% set out = [] %}{% for c in calls %}{% set words = c[1].split(' ') %}{% for w in words[3:] %}{% set _ =
+      out.append(c[0] ~ '/' ~ w[2:]) %}{% endfor %}{% endfor %}{{ out | sort }}
+  ansible.builtin.assert:
+    that:
+      - ai_library_share_owned is changed
+      - calls | length > 0
+      - calls | map(attribute=1) | reject('match', '^-h --no-dereference ' ~ (case.user ~ ':' ~ case.group) | regex_escape ~ ' ') | list == []
+      # -execdir: every name is ./<basename>, run from the entry's own directory.
+      - names | length > 0
+      - names | reject('match', '^\./[^/]+$') | list == []
+      - ai_library_share_dir in chowned
+      - (ai_library_share_dir ~ '/.ai-library-sentinel') in chowned
+      - (ai_library_share_dir ~ '/00-inbox/link') in chowned
+      - chowned | select('search', '-victim|/secret$') | list == []
+      - chowned == ai_library_share_owned.stdout_lines | sort
+    fail_msg: "{{ test_chown.stdout_lines }}"
+    quiet: true

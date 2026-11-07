@@ -1,0 +1,59 @@
+---
+# Client half (docs/CONTRACTS.md §12.17.3), ai-box (Ubuntu 26.04):
+#   include_role: {name: ai_library_share, tasks_from: client}
+#   vars: {ai_library_share_client_password: "{{ hostvars[<pc>].ai_library_share_password | default('') }}"}
+# Order: read-only preflight, package, the rgate account, code (for the probe), credentials, units,
+# automount on, read-only checks (plus the one probe file in 00-inbox/).
+
+- name: Client | preflight (read-only)
+  ansible.builtin.import_tasks: preflight_client.yml
+
+- name: Client | the tailnet address the mount waits for
+  ansible.builtin.set_fact:
+    ai_library_share_wait_ips: ["{{ tailnet_ip }}"]
+
+- name: Client | packages (cifs-utils)
+  ansible.builtin.apt:
+    name: "{{ ai_library_share_packages_client }}"
+    state: present
+
+# The mount's uid=/gid= owner. research_gate creates the same account (§12.16.4); both roles set
+# exactly these attributes and nothing else (no comment, no supplementary groups), so neither undoes
+# the other.
+- name: Client | mount user's group ({{ ai_library_share_mount_user }})
+  ansible.builtin.group:
+    name: "{{ ai_library_share_mount_user }}"
+    system: true
+
+- name: Client | mount user, system, no login, no home ({{ ai_library_share_mount_user }})
+  ansible.builtin.user:
+    name: "{{ ai_library_share_mount_user }}"
+    group: "{{ ai_library_share_mount_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: /nonexistent
+    create_home: false
+
+- name: Client | library package and helper scripts (the verify's probe)
+  ansible.builtin.import_tasks: install.yml
+
+- name: Client | credentials
+  ansible.builtin.import_tasks: credentials.yml
+
+- name: Client | units
+  ansible.builtin.import_tasks: units_client.yml
+
+- name: Client | load changed units (and remount if the share was mounted)
+  ansible.builtin.meta: flush_handlers
+
+- name: Client | the automount is enabled and running
+  ansible.builtin.systemd_service:
+    name: "{{ ai_library_share_automount_unit }}"
+    enabled: true
+    state: started
+  # On a first check run the unit file doesn't exist yet.
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Client | read-only checks (as {{ ai_library_share_mount_user }})
+  ansible.builtin.include_tasks: verify_client.yml
+  when: not ansible_check_mode

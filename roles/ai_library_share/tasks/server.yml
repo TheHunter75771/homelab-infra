@@ -1,0 +1,41 @@
+---
+# Server half (docs/CONTRACTS.md §12.17.2), gaming PC (Fedora, SELinux enforcing):
+#   include_role: {name: ai_library_share, tasks_from: server}
+# then, in the same play, tasks_from: export_credentials for the client play.
+# Order: read-only preflight (both drives mounted, G guards 445), packages, code, library folder +
+# sentinel, account + password, Samba, backup, read-only checks.
+
+- name: Server | preflight (read-only)
+  ansible.builtin.import_tasks: preflight_server.yml
+
+- name: Server | packages (Samba, testparm, rsync)
+  ansible.builtin.dnf:
+    name: "{{ ai_library_share_packages_server }}"
+    state: present
+
+- name: Server | library package and helper scripts
+  ansible.builtin.import_tasks: install.yml
+
+# Ownership first: a root-owned library (first live run) must belong to the force user before
+# library.yml, running as that user, adds folders or the sentinel.
+- name: Server | library owned by the force user and group
+  ansible.builtin.import_tasks: ownership.yml
+
+- name: Server | library folder and sentinel
+  ansible.builtin.import_tasks: library.yml
+
+- name: Server | ailib account
+  ansible.builtin.import_tasks: account.yml
+
+- name: Server | ailib Samba password (generated once)
+  ansible.builtin.import_tasks: password.yml
+
+- name: Server | Samba
+  ansible.builtin.import_tasks: samba.yml
+
+- name: Server | nightly backup
+  ansible.builtin.import_tasks: backup.yml
+
+- name: Server | read-only checks
+  ansible.builtin.include_tasks: verify_server.yml
+  when: not ansible_check_mode

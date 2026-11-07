@@ -1,0 +1,47 @@
+---
+# One service.yml run for test_forge_api.yml through the fake systemctl (tests/bin), which emulates systemd on the
+# unit files service.yml installs. case = {name, enabled, log (the exact state changes, in order), active (each
+# unit's state afterwards), reloads, socket_restarts, restarts (handler requests in this run)}.
+- name: Switch case | before ({{ case.name }})
+  ansible.builtin.set_fact:
+    fa_test_sw_counts: ["{{ fa_test_reloads }}", "{{ fa_test_socket_restarts }}", "{{ fa_test_restarts }}"]
+
+- name: Switch case | clear the fake's action log ({{ case.name }})
+  ansible.builtin.file:
+    path: "{{ lookup('ansible.builtin.env', 'FA_TEST_DIR') }}/systemctl.log"
+    state: absent
+
+- name: Switch case | service.yml ({{ case.name }})
+  ansible.builtin.include_tasks: ../tasks/service.yml
+  vars:
+    forge_api_enabled: "{{ case.enabled }}"
+
+- name: Switch case | what the fake systemctl did ({{ case.name }})
+  ansible.builtin.command:
+    argv:
+      - bash
+      - -c
+      - |
+        d="$FA_TEST_DIR"
+        echo "== log"; if [ -f "$d/systemctl.log" ]; then cat "$d/systemctl.log"; fi
+        for u in forge-api.socket forge-api.service; do
+          printf 'state %s %s\n' "$u" "$(cat "$d/units/$u.active" 2>/dev/null || echo inactive)"
+        done
+  register: fa_test_sw
+  changed_when: false
+
+- name: Switch case | exactly the expected actions, states and handler requests ({{ case.name }})
+  vars:
+    got_log: "{{ fa_test_sw.stdout_lines | reject('match', '^(== log|state )') | list }}"
+  ansible.builtin.assert:
+    that:
+      - got_log == case.log
+      - "'state forge-api.socket ' ~ case.active['forge-api.socket'] in fa_test_sw.stdout_lines"
+      - "'state forge-api.service ' ~ case.active['forge-api.service'] in fa_test_sw.stdout_lines"
+      - fa_test_reloads | int - fa_test_sw_counts[0] | int == case.reloads
+      - fa_test_socket_restarts | int - fa_test_sw_counts[1] | int == case.socket_restarts
+      - fa_test_restarts | int - fa_test_sw_counts[2] | int == case.restarts
+    fail_msg: >-
+      {{ case.name }}: {{ fa_test_sw.stdout_lines }}; reloads/socket restarts/restarts
+      {{ fa_test_sw_counts }} -> {{ [fa_test_reloads, fa_test_socket_restarts, fa_test_restarts] }}
+    quiet: true

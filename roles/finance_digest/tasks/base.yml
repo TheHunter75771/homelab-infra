@@ -1,0 +1,56 @@
+---
+# The library package needs Python 3.12+ (§12.11); D is stdlib only. Ubuntu 26.04 ships newer.
+- name: Base | Python version
+  ansible.builtin.command:
+    argv:
+      - "{{ finance_digest_python }}"
+      - -I
+      - -c
+      - "import sys; print(sys.version_info >= (3, 12))"
+  register: finance_digest_py
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Base | Python is 3.12 or newer
+  ansible.builtin.assert:
+    that: finance_digest_py.rc == 0 and finance_digest_py.stdout | trim == 'True'
+    fail_msg: "Need Python >= 3.12 at {{ finance_digest_python }}: {{ finance_digest_py.stdout | default('') }} {{ finance_digest_py.stderr | default('') }}"
+    quiet: true
+
+# §12.18.1: system account, no login, no home, primary group fdigest, supplementary group rgate (the library
+# mount), never docker. `groups` + `append: false` makes rgate the ONLY supplementary group: a converge removes
+# any other membership. The read-only check below proves the result.
+- name: Base | fdigest group
+  ansible.builtin.group:
+    name: "{{ finance_digest_user }}"
+    system: true
+
+- name: Base | fdigest system user (no login, no home, group rgate only)
+  ansible.builtin.user:
+    name: "{{ finance_digest_user }}"
+    group: "{{ finance_digest_user }}"
+    groups: ["{{ finance_digest_library_group }}"]
+    append: false
+    system: true
+    shell: /usr/sbin/nologin
+    home: /nonexistent
+    create_home: false
+  register: finance_digest_user_task
+
+- name: Base | fdigest's groups
+  ansible.builtin.command:
+    argv: [id, -Gn, "{{ finance_digest_user }}"]
+  register: finance_digest_user_groups
+  changed_when: false
+  check_mode: false
+  when: not (ansible_check_mode and finance_digest_user_task is changed)
+
+- name: Base | fdigest is in exactly its own group and the library's (never docker)
+  ansible.builtin.assert:
+    that: finance_digest_user_groups.stdout.split() == [finance_digest_user, finance_digest_library_group]
+    fail_msg: >-
+      {{ finance_digest_user }} is in groups '{{ finance_digest_user_groups.stdout }}'; it must be exactly
+      '{{ finance_digest_user }} {{ finance_digest_library_group }}' (never docker).
+    quiet: true
+  when: not (ansible_check_mode and finance_digest_user_task is changed)

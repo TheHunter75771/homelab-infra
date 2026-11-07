@@ -1,0 +1,14 @@
+# {{ ansible_managed }}
+# Finance digest schedule (docs/CONTRACTS.md §12.18.2): daily 09:30 local, after Money Hub's 09:00 sync.
+# Persistent: a run missed while ai-box was off happens at the next boot.
+[Unit]
+Description=Daily finance digest
+
+[Timer]
+OnCalendar={{ finance_digest_on_calendar }}
+Persistent=true
+RandomizedDelaySec={{ finance_digest_randomized_delay }}
+Unit={{ finance_digest_service }}
+
+[Install]
+WantedBy=timers.target

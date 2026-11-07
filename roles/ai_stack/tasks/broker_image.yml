@@ -1,0 +1,66 @@
+---
+# gpu-broker image (docs/CONTRACTS.md §12.7, §12.10), the same build gate as role stacks' local images:
+# the source hash covers every file in the build context (relative path + sha256) plus the base image, and
+# is stamped on the image as label homelab.source-hash. The image is built only when no image with this tag
+# carries that exact hash: first run, a source change, a base-image bump, or a failed/overwritten build.
+
+- name: Broker image | build context directory
+  ansible.builtin.file:
+    path: "{{ ai_stack_broker_build_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Only what the Dockerfile uses (the filters in vars/main.yml); the app's .venv, tests and docs stay behind.
+# Same sync settings as role dashboard's code sync.
+- name: Broker image | source from apps/gpu-broker
+  ansible.posix.synchronize:
+    src: "{{ ai_stack_broker_src }}/"
+    dest: "{{ ai_stack_broker_build_dir }}/"
+    delete: true
+    checksum: true
+    times: false
+    owner: false
+    group: false
+    perms: true
+    rsync_path: "{{ ansible_become_exe | default('sudo') }} -n rsync"
+    rsync_opts: "{{ ai_stack_broker_sync_filters + ['--delete-excluded', '--chmod=D0755,F0644'] }}"
+
+- name: Broker image | files in the build context
+  ansible.builtin.find:
+    paths: "{{ ai_stack_broker_build_dir }}"
+    recurse: true
+    hidden: true
+    file_type: file
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: ai_stack_broker_files
+
+- name: Broker image | source hash
+  ansible.builtin.set_fact:
+    ai_stack_broker_hash: >-
+      {%- set ns = namespace(lines=['PYTHON_IMAGE ' ~ images.python_base]) -%}
+      {%- for f in ai_stack_broker_files.files | sort(attribute='path') -%}
+      {%-   set ns.lines = ns.lines + [(f.path | relpath(ai_stack_broker_build_dir)) ~ ' ' ~ f.checksum] -%}
+      {%- endfor -%}
+      {{ ns.lines | join('\n') | hash('sha256') }}
+
+- name: Broker image | current image
+  community.docker.docker_image_info:
+    name: "{{ local_images.gpu_broker }}"
+  register: ai_stack_broker_image_info
+
+- name: Broker image | built only when its source changed
+  vars:
+    ai_stack_broker_current_hash: >-
+      {{ ((ai_stack_broker_image_info.images | first).Config.Labels | default({}, true))['homelab.source-hash'] | default('')
+         if ai_stack_broker_image_info.images | length > 0 else '' }}
+  community.docker.docker_image_build:
+    name: "{{ local_images.gpu_broker }}"
+    path: "{{ ai_stack_broker_build_dir }}"
+    args:
+      PYTHON_IMAGE: "{{ images.python_base }}"
+    labels:
+      homelab.source-hash: "{{ ai_stack_broker_hash }}"
+    rebuild: "{{ 'never' if ai_stack_broker_current_hash == ai_stack_broker_hash else 'always' }}"

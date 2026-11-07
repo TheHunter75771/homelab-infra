@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Fake ss: only `-H -l -t -n -p sport = :<port>`. The bind address comes from $FA_TEST_DIR/bind.
+# knob `ss`: one (default: the socket on the bind address, held by systemd pid 1 and the service pid 4321) |
+# any (0.0.0.0) | two (plus [::]) | otherpid (systemd and pid 999) | selfbound (the service alone, no systemd) |
+# extra (systemd, the service and a third process) | none
+set -euo pipefail
+: "${FA_TEST_DIR:?}"
+. "$(dirname "$0")/_knob"
+[ "$#" -eq 6 ] && [ "$1 $2 $3 $4 $5" = "-H -l -t -n -p" ] && [[ "$6" == "sport = :"* ]] \
+  || { echo "fake ss: unexpected arguments: $*" >&2; exit 2; }
+p="${6#sport = :}"; b="$(knob bind 172.20.0.1)"
+l() { printf 'LISTEN 0      4096   %s:%s 0.0.0.0:* users:(%s)\n' "$1" "$p" "$2"; }
+both='("python3",pid=4321,fd=3),("systemd",pid=1,fd=57)'
+case "$(knob ss one)" in
+  one) l "$b" "$both" ;;
+  any) l 0.0.0.0 "$both" ;;
+  two) l "$b" "$both"; printf 'LISTEN 0      128    [::]:%s [::]:* users:(("python3",pid=4321,fd=4))\n' "$p" ;;
+  otherpid) l "$b" '("python3",pid=999,fd=3),("systemd",pid=1,fd=57)' ;;
+  selfbound) l "$b" '("python3",pid=4321,fd=3)' ;;
+  extra) l "$b" "$both"',("nc",pid=777,fd=3)' ;;
+  none) ;;
+  *) echo "fake ss: bad knob" >&2; exit 2 ;;
+esac

@@ -1,0 +1,61 @@
+---
+# Reviewer Q: the local-access guard (README, "Local-access guard"). A dedicated nftables table (inet ai_control_guard)
+# refuses serve's 443 on ai-box's tailnet addresses unless the packet came in on the tailscale interface (so nothing
+# on ai-box, root and tailscaled's local API included, reaches AI Control as Noah), and lets only the listed users'
+# sockets reach S on 127.0.0.1. Loaded by ai-control-guard.service (a oneshot, RemainAfterExit), which the server unit
+# requires. The file replaces only its own table: never `flush ruleset`, never /etc/nftables.conf, never UFW's or
+# Docker's tables.
+
+# Names to uids, on every converge. A listed user that doesn't exist yet (mc before mission-control.yml's first run)
+# is skipped, so the guard keeps refusing it; nothing is opened for a name that doesn't resolve.
+- name: Guard | the accounts on ai-box (names to uids)
+  ansible.builtin.getent:
+    database: passwd
+
+- name: Guard | the allowed users that exist, and their uids
+  ansible.builtin.set_fact:
+    ai_control_guard_present_users: "{{ ai_control_guard_allow_users | select('in', ansible_facts.getent_passwd) | list }}"
+    ai_control_guard_missing_users: "{{ ai_control_guard_allow_users | reject('in', ansible_facts.getent_passwd) | list }}"
+    ai_control_guard_uids: >-
+      {{ ai_control_guard_allow_users | select('in', ansible_facts.getent_passwd)
+         | map('extract', ansible_facts.getent_passwd) | map(attribute=1) | map('int') | unique | sort | list }}
+
+- name: Guard | root resolves to uid 0 (tailscaled and the role's checks run as root)
+  ansible.builtin.assert:
+    that:
+      - "'root' in ai_control_guard_present_users"
+      - 0 in ai_control_guard_uids
+    fail_msg: "root must resolve to uid 0; the guard's uids would be {{ ai_control_guard_uids }}"
+    quiet: true
+
+- name: Guard | WARNING, allowed users that don't exist yet are skipped (the guard keeps refusing them)
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: ai_control_guard_allow_users lists {{ ai_control_guard_missing_users | join(', ') }}, which doesn't exist on
+      {{ inventory_hostname }} yet, so the guard doesn't let it reach AI Control on 127.0.0.1:{{ ai_control_listen_port }}.
+      If it is Mission Control's user (mc), run playbooks/mission-control.yml and then playbooks/ai-control.yml again:
+      until then Mission Control's AI Control card can't read /api/summary.
+  when: ai_control_guard_missing_users | length > 0
+
+- name: Guard | the rules file (validated with `nft -c`)
+  ansible.builtin.template:
+    src: guard.nft.j2
+    dest: "{{ ai_control_guard_file }}"
+    owner: "{{ ai_control_root_owner }}"
+    group: "{{ ai_control_root_owner }}"
+    mode: "0644"
+    follow: false
+    validate: "{{ ai_control_nft }} -c -f %s"
+  notify: Reload ai-control guard
+
+- name: Guard | the unit that loads it
+  ansible.builtin.template:
+    src: ai-control-guard.service.j2
+    dest: "{{ ai_control_unit_dir }}/{{ ai_control_guard_unit }}"
+    owner: "{{ ai_control_root_owner }}"
+    group: "{{ ai_control_root_owner }}"
+    mode: "0644"
+    follow: false
+  notify:
+    - Reload systemd for ai-control
+    - Reload ai-control guard

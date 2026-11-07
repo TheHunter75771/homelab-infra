@@ -1,0 +1,19 @@
+---
+# Role mc_notify_client (B2-CONTRACT.md §5): mc-notify, the stdlib-only CLI any host uses to push to Noah's phone
+# through Mission Control (POST /api/notify on ai-box, role mission_control), and notify-failure@.service, the
+# oneshot a unit names in OnFailure=notify-failure@%n.service.
+#
+# --- Inventory ---
+# mc_notify_client_token (REQUIRED, VAULT ONLY, never in host_vars or any file in this repo): this host's sender
+#   token, 32-256 visible ASCII characters. On ai-box the same value is mission_control_notify_tokens[<this sender's
+#   name>] (role mission_control writes only its sha256). README "Add a sender".
+
+# system: root's mc-notify for system units (/usr/local/bin, /etc/mc-notify, /etc/systemd/system); the play needs
+#   become. user: a desktop user's own copy for `systemd --user` timers (the gaming PC; ~/.local/bin,
+#   ~/.config/mc-notify, ~/.config/systemd/user), in a play with become: false and facts (gather_subset: min).
+mc_notify_client_scope: system
+# Mission Control's notify endpoint: ai-box's tailnet name on Mission Control's serve port (role mission_control,
+# mission_control_serve_port 8443), from this host's own tailnet_fqdn (the same tailnet). Override in host_vars when
+# this host has no tailnet_fqdn. Preflight requires https://<name>.ts.net[:port]/api/notify.
+mc_notify_client_url: "https://ai-box.{{ (tailnet_fqdn | default('')).split('.', 1)[-1] }}:8443/api/notify"
+mc_notify_client_token: ""

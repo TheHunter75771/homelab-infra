@@ -1,0 +1,118 @@
+---
+# Reviewer Q: the local-access guard, live (README, "Local-access guard"). TCP connects only (nothing sent), plus one
+# local-API dial per tailnet address as nobody, which sends one read-only GET /api/summary if (and only if) the guard
+# failed to stop it.
+#   - the guard's table is loaded;
+#   - serve's 443 on ai-box's tailnet IPv4 and IPv6 refuses root and nobody alike;
+#   - S on 127.0.0.1 accepts root and every other allowed user that exists (mc), and refuses nobody;
+#   - tailscaled's local API, used by nobody to dial ai-box's own tailnet IPv6 and IPv4 :443, gets no 200 and no JSON;
+#   - Q-2: in S's mount namespace /run has the helper socket and not tailscaled's;
+#   - after `ufw reload` (when ufw is active) the table is still there and still refuses.
+- name: Verify guard | the probe (files/guard_probe.py)
+  ansible.builtin.set_fact:
+    ai_control_guard_probe: "{{ lookup('ansible.builtin.file', ai_control_guard_probe_src) }}"
+    ai_control_guard_setpriv_nobody:
+      - setpriv
+      - --reuid={{ ai_control_verify_guard_user }}
+      - --regid={{ ai_control_verify_guard_group }}
+      - --clear-groups
+      - --no-new-privs
+      - --
+
+- name: Verify guard | probe round 1
+  ansible.builtin.include_tasks: verify_guard_round.yml
+
+- name: Verify guard | connect to S as each other allowed user that exists (mc)
+  ansible.builtin.command:
+    argv: >-
+      {{ ['setpriv', '--reuid=' ~ item, '--regid=' ~ ansible_facts.getent_passwd[item][2], '--clear-groups',
+          '--no-new-privs', '--', ai_control_python, '-I', '-B', '-c', ai_control_guard_probe, 'tcp',
+          [ai_control_guard_targets[2]] | to_json] }}
+  loop: "{{ ai_control_guard_present_users | reject('equalto', 'root') | list }}"
+  register: ai_control_guard_users
+  changed_when: false
+  failed_when: false
+
+- name: Verify guard | tailscaled's local API, used by nobody, dials ai-box's own tailnet IPv6 and IPv4 :443
+  ansible.builtin.command:
+    argv: >-
+      {{ ai_control_guard_setpriv_nobody + [ai_control_python, '-I', '-B', '-c', ai_control_guard_probe, 'dial',
+         ai_control_tailscaled_socket, item, ai_control_serve_port | string, tailnet_fqdn] }}
+  loop:
+    - "{{ ai_control_guard_ip6 }}"
+    - "{{ tailnet_ip }}"
+  register: ai_control_guard_dial
+  changed_when: false
+  failed_when: false
+
+# Q-2: /proc/<pid>/root is the server's own view of the filesystem (its mount namespace).
+- name: Verify guard | the server's main PID
+  ansible.builtin.command:
+    argv: [systemctl, show, -p, MainPID, --value, "{{ ai_control_service }}"]
+  register: ai_control_guard_pid
+  changed_when: false
+
+- name: Verify guard | what the server sees in /run
+  ansible.builtin.stat:
+    path: "/proc/{{ ai_control_guard_pid.stdout | trim }}/root{{ item }}"
+    follow: false
+    get_checksum: false
+  loop:
+    - "{{ ai_control_tailscaled_socket }}"
+    - "{{ ai_control_helper_socket }}"
+  register: ai_control_guard_ns
+
+- name: Verify guard | the guard's answers
+  ansible.builtin.include_tasks: verify_guard_assert.yml
+  vars:
+    ai_control_guard_round: initial
+    ai_control_guard_list_rc: "{{ ai_control_guard_list.rc }}"
+    ai_control_guard_root_out: "{{ ai_control_guard_root.stdout | default('') }}"
+    ai_control_guard_nobody_out: "{{ ai_control_guard_nobody.stdout | default('') }}"
+    ai_control_guard_users_out: >-
+      {{ dict(ai_control_guard_users.results | map(attribute='item')
+              | zip(ai_control_guard_users.results | map(attribute='stdout', default=''))) }}
+    ai_control_guard_dial_out: "{{ ai_control_guard_dial.results | map(attribute='stdout', default='') | list }}"
+    ai_control_guard_main_pid: "{{ ai_control_guard_pid.stdout | trim }}"
+    ai_control_guard_ns_tailscaled: "{{ ai_control_guard_ns.results[0].stat.exists }}"
+    ai_control_guard_ns_helper: "{{ ai_control_guard_ns.results[1].stat.exists }}"
+
+# The guard is its own table, so UFW reloading its own rules must leave it in place. The reload re-applies UFW's
+# unchanged configuration, so it isn't reported as a change.
+- name: Verify guard | is ufw active
+  ansible.builtin.command:
+    argv: [ufw, status]
+  register: ai_control_guard_ufw
+  changed_when: false
+  failed_when: false
+  when: ai_control_verify_guard_ufw_reload | bool
+
+- name: Verify guard | survives ufw reload
+  when:
+    - ai_control_verify_guard_ufw_reload | bool
+    - ai_control_guard_ufw.rc | default(1) == 0
+    - >-
+      ai_control_guard_ufw.stdout | default('') is search('(?m)^Status: active$')
+  block:
+    - name: Verify guard | ufw reload
+      ansible.builtin.command:
+        argv: [ufw, reload]
+      changed_when: false
+
+    - name: Verify guard | probe round 2 (after ufw reload)
+      ansible.builtin.include_tasks: verify_guard_round.yml
+
+    - name: Verify guard | the guard's answers after ufw reload
+      ansible.builtin.include_tasks: verify_guard_assert.yml
+      vars:
+        ai_control_guard_round: after ufw reload
+        ai_control_guard_list_rc: "{{ ai_control_guard_list.rc }}"
+        ai_control_guard_root_out: "{{ ai_control_guard_root.stdout | default('') }}"
+        ai_control_guard_nobody_out: "{{ ai_control_guard_nobody.stdout | default('') }}"
+        ai_control_guard_users_out: >-
+          {{ dict(ai_control_guard_users.results | map(attribute='item')
+                  | zip(ai_control_guard_users.results | map(attribute='stdout', default=''))) }}
+        ai_control_guard_dial_out: "{{ ai_control_guard_dial.results | map(attribute='stdout', default='') | list }}"
+        ai_control_guard_main_pid: "{{ ai_control_guard_pid.stdout | trim }}"
+        ai_control_guard_ns_tailscaled: "{{ ai_control_guard_ns.results[0].stat.exists }}"
+        ai_control_guard_ns_helper: "{{ ai_control_guard_ns.results[1].stat.exists }}"

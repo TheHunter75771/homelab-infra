@@ -1,0 +1,23 @@
+---
+# Memory budget (docs/CONTRACTS.md §12.18b): every container limit on this host plus the host reserve must
+# fit in RAM, unless an overcommit was decided (ai_stack_mem_overcommit_mb, README "Memory budget").
+# ai-server.yml gathers facts; a play that doesn't gets the hardware subset here.
+- name: Preflight | memory facts
+  ansible.builtin.setup:
+    gather_subset: ['!all', '!min', hardware]
+  when: ansible_facts.memtotal_mb is undefined
+
+- name: Preflight | container memory limits fit the host's RAM
+  ansible.builtin.assert:
+    that:
+      - ai_stack_mem_overcommit_mb | int >= 0
+      - ai_stack_mem_needed_mb | int <= ai_stack_host_memtotal_mb | int + ai_stack_mem_overcommit_mb | int
+    fail_msg: >-
+      Memory budget: containers {{ ai_stack_mem_containers_mb | to_json }} MiB plus host reserve
+      {{ ai_stack_mem_host_reserve_mb }} MiB = {{ ai_stack_mem_needed_mb }} MiB, but this host has
+      {{ ai_stack_host_memtotal_mb }} MiB (allowed overcommit {{ ai_stack_mem_overcommit_mb }} MiB). Lower a
+      limit in ai_stack_mem_limits, or accept the overcommit by setting ai_stack_mem_overcommit_mb (README,
+      "Memory budget").
+    success_msg: >-
+      Memory budget {{ ai_stack_mem_needed_mb }} MiB of {{ ai_stack_host_memtotal_mb }} MiB RAM
+      (+{{ ai_stack_mem_overcommit_mb }} MiB allowed overcommit).

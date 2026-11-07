@@ -1,0 +1,16 @@
+---
+# §12.15.7: `tailscale serve --bg --https=443 http://127.0.0.1:8095`, idempotent. Role tailscale_serve
+# (module C) is reused unchanged, only parameterised: its handler list, and its "one origin, one
+# backend" guard pointed at AI Control instead of the mediaserver's dashboard. It reads
+# `tailscale serve status --json`, compares it with the declared config and touches nothing when they
+# match; on drift it resets this node's serve config and applies every declared handler (never funnel): AI
+# Control's 443 plus the other roles' handlers in ai_control_serve_extra_handlers (Mission Control's :8443, §12.29),
+# so this converge never removes them. The one-origin guard stays on AI Control's 443.
+# Needs host var tailnet_fqdn (its precondition: equal to this node's tailnet name).
+- name: Serve | tailscale serve 443 to the server's loopback port, plus the extra handlers (role tailscale_serve)
+  ansible.builtin.include_role:
+    name: tailscale_serve
+  vars:
+    tailscale_serve_handlers: "{{ ai_control_serve_handlers }}"
+    tailscale_serve_dashboard_port: "{{ ai_control_serve_port | int }}"
+    tailscale_serve_dashboard_backend: "{{ ai_control_serve_backend }}"

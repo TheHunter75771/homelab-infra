@@ -1,0 +1,76 @@
+# {{ ansible_managed }}
+# AI Control server S (docs/CONTRACTS.md §12.15.5, §12.15.7): read-only aiohttp API + the static web
+# app W, on 127.0.0.1:{{ ai_control_listen_port }} behind `tailscale serve` 443. User aictl: no capabilities,
+# not in docker; Docker, the journal and the sudo I/O logs go through aictl-helper.socket only.
+# Hardening as §11.1 (the dashboard), plus the extra directives below them.
+[Unit]
+Description=AI Control dashboard server (read-only; tailnet-only via tailscale serve)
+Documentation=file://{{ ai_control_server_dir }}
+After=network-online.target {{ ai_control_helper_socket_unit }} {{ ai_control_guard_unit }}
+Wants=network-online.target {{ ai_control_helper_socket_unit }}
+# Reviewer Q: never listen without the local-access guard (it lets only the listed users reach this port).
+Requires={{ ai_control_guard_unit }}
+# The helper socket is bound into this unit's /run (below) by inode: when the socket unit restarts (RemoveOnStop
+# recreates the file), S restarts with it and binds the new one.
+PartOf={{ ai_control_helper_socket_unit }}
+
+[Service]
+Type=exec
+User={{ ai_control_user }}
+Group={{ ai_control_user }}
+WorkingDirectory={{ ai_control_server_dir }}
+# -E -s: no PYTHON* variables, no user site. -m adds only the working directory (the root-owned
+# code dir) to sys.path. -B: the read-only code dir never gets bytecode written.
+ExecStart={{ ai_control_python }} -E -s -B -m ai_control --config {{ ai_control_config_file }}
+Restart=always
+RestartSec=5s
+SyslogIdentifier=ai-control
+UMask=0077
+MemoryMax={{ ai_control_memory_max }}
+TasksMax={{ ai_control_tasks_max }}
+
+# Hardening (CONTRACTS §11.1 / §12.15.7).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# Reviewer Q, Q-2: /run is an empty read-only tmpfs with only the helper socket bound in, so S can't see
+# tailscaled's local API (/run/tailscale/tailscaled.sock), D-Bus or anything else there. S needs nothing else in
+# /run: chronyc falls back to UDP 127.0.0.1:323 (as before: aictl can't use /run/chrony), and every peer is an IP
+# literal. Connecting to the read-only bound socket is not a write.
+TemporaryFileSystem=/run:ro
+BindReadOnlyPaths={{ ai_control_helper_socket }}
+ReadWritePaths={{ ai_control_state_dir }}
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+# Hides other users' processes. Not ProcSubset=pid: S reads /proc/loadavg and /proc/meminfo.
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# CPython (no JIT) and aiohttp's C extensions need no W+X memory.
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+{% if ai_control_ip_allowlist | bool %}
+# S talks only to loopback (tailscale serve in, chronyc), ai-box's tailnet address (broker, Open WebUI)
+# and the gaming PC's (gate, host agent).
+IPAddressDeny=any
+IPAddressAllow={{ ai_control_ip_allow | join(' ') }}
+{% endif %}
+
+[Install]
+WantedBy=multi-user.target

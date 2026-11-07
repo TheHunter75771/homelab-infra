@@ -1,0 +1,82 @@
+---
+# Reviewer Q, Q-1 and Q2-1: the local-access guard, live. TCP connects (no request) and local-API dials (one GET
+# that must never get an answer); `ufw reload` re-applies UFW's own rules and is the Lead's chosen survival check.
+#   - nobody: refused on the server (127.0.0.1:8097) and on serve's :8443 at ai-box's tailnet IPv4 and IPv6;
+#   - root: connects to the server (tailscaled's path), but is refused on :8443 too (it doesn't arrive on the
+#     tailscale interface);
+#   - nobody through tailscaled's local API (tailscaled dials as root): the dial may be upgraded, but no HTTP answer
+#     comes back;
+#   - the table is the same after `ufw reload` (counters aside).
+- name: Verify | the guard's table
+  ansible.builtin.command:
+    argv: ["{{ mission_control_nft }}", list, table, inet, "{{ mission_control_guard_table }}"]
+  register: mission_control_guard_list
+  changed_when: false
+  failed_when: false
+
+- name: Verify | connect as nobody
+  ansible.builtin.command:
+    argv: >-
+      {{ ['setpriv', '--reuid=' ~ mission_control_verify_guard_user, '--regid=' ~ mission_control_verify_guard_group,
+          '--clear-groups', '--no-new-privs', '--', mission_control_python, '-I', '-B',
+          mission_control_lib_dir ~ '/egress_probe.py', mission_control_guard_targets | to_json, '--no-crypto'] }}
+  register: mission_control_guard_nobody
+  changed_when: false
+  failed_when: false
+
+- name: Verify | connect as root
+  ansible.builtin.command:
+    argv:
+      - "{{ mission_control_python }}"
+      - -I
+      - -B
+      - "{{ mission_control_lib_dir }}/egress_probe.py"
+      - "{{ mission_control_guard_targets | to_json }}"
+      - --no-crypto
+  register: mission_control_guard_root
+  changed_when: false
+  failed_when: false
+
+- name: Verify | dial serve through tailscaled's local API as nobody
+  ansible.builtin.command:
+    argv: >-
+      {{ ['setpriv', '--reuid=' ~ mission_control_verify_guard_user, '--regid=' ~ mission_control_verify_guard_group,
+          '--clear-groups', '--no-new-privs', '--', mission_control_python, '-I', '-B',
+          mission_control_lib_dir ~ '/localapi_probe.py', mission_control_tailscaled_socket, tailnet_fqdn,
+          mission_control_localapi_targets | to_json] }}
+  register: mission_control_guard_localapi
+  changed_when: false
+  failed_when: false
+
+- name: Verify | is UFW active
+  ansible.builtin.command:
+    argv: [ufw, status]
+  register: mission_control_ufw_status
+  changed_when: false
+  failed_when: false
+
+# UFW re-applies its own rules (iptables-nft-restore of its chains); it must not touch this table.
+- name: Verify | ufw reload
+  ansible.builtin.command:
+    argv: [ufw, reload]
+  register: mission_control_ufw_reload
+  changed_when: false
+  when: "mission_control_ufw_status.stdout is search('(?m)^Status: active$')"
+
+- name: Verify | the guard's table after ufw reload
+  ansible.builtin.command:
+    argv: ["{{ mission_control_nft }}", list, table, inet, "{{ mission_control_guard_table }}"]
+  register: mission_control_guard_list_after
+  changed_when: false
+  failed_when: false
+
+- name: Verify | the guard holds
+  ansible.builtin.include_tasks: verify_guard_assert.yml
+  vars:
+    mission_control_guard_list_rc: "{{ mission_control_guard_list.rc }}"
+    mission_control_guard_before: "{{ mission_control_guard_list.stdout | default('') }}"
+    mission_control_guard_after: "{{ mission_control_guard_list_after.stdout | default('') }}"
+    mission_control_guard_ufw_reloaded: "{{ mission_control_ufw_reload is not skipped }}"
+    mission_control_guard_nobody_out: "{{ mission_control_guard_nobody.stdout | default('') }}"
+    mission_control_guard_root_out: "{{ mission_control_guard_root.stdout | default('') }}"
+    mission_control_guard_localapi_out: "{{ mission_control_guard_localapi.stdout | default('') }}"

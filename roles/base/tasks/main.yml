@@ -10,6 +10,9 @@
     update_cache: true
     cache_valid_time: 3600
 
+- name: Classic sudo
+  ansible.builtin.import_tasks: sudo.yml
+
 - name: Journald drop-in directory exists
   ansible.builtin.file:
     path: /etc/systemd/journald.conf.d
@@ -84,6 +87,24 @@
     mode: "0644"
   notify: Reload chrony sources (base)
 
+- name: Chrony's conf.d directory exists (Ubuntu's chrony.conf reads it last, via confdir)
+  ansible.builtin.file:
+    path: /etc/chrony/conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# conf.d isn't reloadable (`chronyc reload sources` covers only sources.d), so a change restarts chronyd.
+- name: Chrony steps a large clock offset at any time
+  ansible.builtin.template:
+    src: chrony-homelab.conf.j2
+    dest: /etc/chrony/conf.d/homelab.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart chrony (base)
+
 - name: APT timers that drive unattended-upgrades are enabled
   ansible.builtin.systemd_service:
     name: "{{ item }}"
@@ -144,45 +165,8 @@
 - name: Apply base changes before checking them
   ansible.builtin.meta: flush_handlers
 
-- name: Read the live hardening settings
-  ansible.builtin.slurp:
-    src: "/proc/sys/{{ item }}"
-  loop:
-    - net/ipv4/conf/all/send_redirects
-    - net/ipv4/conf/default/send_redirects
-    - "net/ipv4/conf/{{ lan_iface }}/send_redirects"
-    - net/ipv4/conf/all/log_martians
-    - net/ipv4/conf/default/log_martians
-    - fs/suid_dumpable
-    - fs/protected_fifos
-    - kernel/kptr_restrict
-    - net/core/bpf_jit_harden
-    - kernel/unprivileged_bpf_disabled
-    - kernel/sysrq
-  register: base_sysctl_live
-
-- name: Hardening sysctls are live (redirects off incl. the LAN interface, martians logged, BPF/kptr/FIFO locked down)
-  ansible.builtin.assert:
-    that:
-      - base_live['net/ipv4/conf/all/send_redirects'] == '0'
-      - base_live['net/ipv4/conf/default/send_redirects'] == '0'
-      - base_live['net/ipv4/conf/' ~ lan_iface ~ '/send_redirects'] == '0'
-      - base_live['net/ipv4/conf/all/log_martians'] == '1'
-      - base_live['net/ipv4/conf/default/log_martians'] == '1'
-      - base_live['fs/suid_dumpable'] == '0'
-      - base_live['fs/protected_fifos'] == '2'
-      - base_live['kernel/kptr_restrict'] == '2'
-      - base_live['net/core/bpf_jit_harden'] == '2'
-      - base_live['kernel/unprivileged_bpf_disabled'] == '1'
-      # Left alone on purpose: the emergency SysRq path must still exist. (Forwarding isn't checked:
-      # base runs before Docker, which is what turns it on.)
-      - base_live['kernel/sysrq'] != '0'
-    fail_msg: "Live kernel settings: {{ base_live }}"
-    quiet: true
-  vars:
-    base_live: >-
-      {{ dict(base_sysctl_live.results | map(attribute='item')
-         | zip(base_sysctl_live.results | map(attribute='content') | map('b64decode') | map('trim'))) }}
+- name: Hardening sysctls are live (drift is re-applied, then asserted)
+  ansible.builtin.import_tasks: sysctl_live.yml
 
 # The live check above only proves the values right after our handler. This one proves they
 # survive a reboot: systemd-sysctl merges every sysctl.d file in name order, and a later vendor
@@ -195,6 +179,19 @@
 
 - name: Hardening settings win at boot
   ansible.builtin.import_tasks: sysctl_boot_check.yml
+
+# The handlers ran at the flush above. -a includes the NTS pools' unresolved placeholder sources (ID#...),
+# which is where a "required" (R) option would show.
+- name: Read chrony's source selection data
+  ansible.builtin.command: chronyc -n selectdata -a
+  register: base_chrony_selectdata
+  changed_when: false
+  check_mode: false
+  when: not ansible_check_mode
+
+- name: Chrony can fall back to the IP-literal sources
+  ansible.builtin.import_tasks: chrony_selectdata.yml
+  when: not ansible_check_mode
 
 - name: Read service states
   ansible.builtin.service_facts:

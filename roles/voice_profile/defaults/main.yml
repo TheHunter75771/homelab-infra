@@ -1,0 +1,86 @@
+---
+# Role voice_profile (docs/CONTRACTS.md §12.21, module H7): the "write in Noah's voice" profile builder (module V,
+# apps/voice-profile) on ai-box. A oneshot voice-profile.service, started on demand only (Noah or Claude:
+# `systemctl start voice-profile`): never enabled, no timer, never started by a converge. User vprof; code at
+# /opt/voice-profile (V's voice_profile package plus apps/skill-library's library, read-only); config
+# /etc/voice-profile/config.json.
+
+# --- Inventory (host_vars, git-ignored) ---
+# tailnet_ip: ai-box's tailnet IPv4 (the broker publishes there; role ai_stack).
+# ai_stack_broker_port: the broker's published port (role ai_stack's default, 11434, when unset).
+
+# The AI Library on ai-box: role ai_library_share's client automount (§12.17.3; CIFS as uid/gid rgate, dir_mode
+# 0770, so vprof writes through its supplementary group rgate). Absolute, plain characters only (it goes into
+# the unit unescaped), and not under /home, /root, /run, /tmp (ProtectHome / ProtectSystem / PrivateTmp).
+voice_profile_library_root: /srv/ai-library
+# The mount point the library lives on: the root itself, or a parent of it. `findmnt --target <root>` must name
+# exactly this mount, and it can't be /.
+voice_profile_library_mount: "{{ voice_profile_library_root }}"
+# The library's size cap, as the library CLI takes it (AI_LIBRARY_CAP; decimal units unless "i": 500GB,
+# 750GiB). The unit sets it for V's library writes. Same default as the library (§12.11).
+voice_profile_library_cap: 500GB
+
+# V's settings: every key of apps/voice-profile/config.example.json except library_root and broker_url (the role
+# sets those), with V's defaults. V's own loader checks the ranges (preflight on the controller, `validate:` on
+# the host) and refuses unknown keys. Override the whole dict, or combine() into it, in the inventory.
+voice_profile_settings:
+  model: assistant
+  num_ctx: 16384
+  # One broker call, in seconds (the CPU model writes ~8 tok/s). The unit's TimeoutStartSec must outlive it.
+  timeout: 1800
+  # Caps (zip bombs, sizes, the dedupe, the prompt's excerpts).
+  max_samples: 200
+  max_docx_bytes: 5242880
+  max_zip_entries: 2000
+  max_uncompressed_bytes: 209715200
+  max_xml_bytes: 8388608
+  max_ratio: 200
+  min_words: 150
+  dedupe_jaccard: 0.6
+  excerpts: 6
+  excerpt_chars: 1200
+
+# The broker: published by role ai_stack on ai-box's tailnet address.
+voice_profile_broker_port: "{{ ai_stack_broker_port | default(11434) }}"
+# The tailnet range ai-box's address must sit in.
+voice_profile_tailnet_range: 100.64.0.0/10
+
+# No resolver allow (Reviewer M, M-5): the broker URL is an IPv4 literal (preflight), so V never resolves a name.
+
+# The broker is published on tailnet_ip with Docker's userland proxy off, so a connection to it is DNATed in
+# nat OUTPUT to the broker container's address on the `ai` network, and systemd's egress filter sees that
+# rewritten destination; the replies are un-NATed before delivery, so the ingress filter sees tailnet_ip
+# (§12.15 Reviewer D, §12.18.3, §12.19). Both must be allowed. The `ai` network's subnet is pinned and owned by
+# role ai_stack (§12.18b, ai_stack_network_subnet), so the DNAT target range is that /24: the inventory's
+# value, else role ai_stack's default (include_vars, never copied). SearXNG sits on its own subnet; preflight
+# proves no range here reaches it (SearXNG forwards query strings to public search engines, a way out for
+# Noah's writing samples). Override with a list of CIDRs (a /32 once the broker's address is pinned).
+voice_profile_ai_stack_defaults_file: "{{ role_path }}/../ai_stack/defaults/main.yml"
+voice_profile_searxng_defaults_file: "{{ role_path }}/../searxng/defaults/main.yml"
+voice_profile_ai_subnet: >-
+  {{ ai_stack_network_subnet
+     | default(voice_profile_ai_stack_role_defaults.ai_stack_network_subnet | default('')) }}
+voice_profile_searxng_subnet: >-
+  {{ searxng_subnet | default(voice_profile_searxng_role_defaults.searxng_subnet | default('')) }}
+voice_profile_broker_ranges: "{{ [voice_profile_ai_subnet | trim] | select | list }}"
+
+# Unit limits. A build holds 20-odd extracted .docx texts (V caps their size), the shingles for the dedupe, the
+# stats and one prompt and reply; nothing is cached between runs.
+voice_profile_memory_max: 256M
+voice_profile_tasks_max: 32
+# One whole build, start to finish: the CPU model may take most of this to draft the profile (§12.21.2 step 4),
+# so it is generous and must exceed V's per-call broker timeout (preflight). Plain systemd time span, no spaces.
+voice_profile_timeout_start: 40min
+
+# Sources on the controller: V's launcher and package, and library from apps/skill-library.
+voice_profile_src_dir: "{{ role_path }}/../../apps/voice-profile"
+voice_profile_pkg_src: "{{ voice_profile_src_dir }}/voice_profile"
+voice_profile_launcher_src: "{{ voice_profile_src_dir }}/voice-profile"
+voice_profile_library_src_dir: "{{ role_path }}/../../apps/skill-library"
+# Owner of the installed code (the tests run unprivileged and override it).
+voice_profile_owner: root
+
+# Post-install check (not in check mode): the unit is static (no [Install]) and nothing triggers it (no timer),
+# and `voice-profile status` as vprof in the unit's sandbox exits 0. It never starts a build.
+voice_profile_verify: true
+voice_profile_verify_timeout: 2min

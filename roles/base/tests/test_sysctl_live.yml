@@ -1,0 +1,92 @@
+---
+# Test for tasks/sysctl_live.yml (the live check that re-applies the hardening file on drift), with the
+# role's real tasks and expected values, against a scratch tree standing in for /proc/sys. No root and
+# no real sysctl changes: the apply command copies a "file applied" tree over the scratch tree.
+# The check-mode cases are in test_sysctl_live_check.yml (run with --check).
+#   .venv/bin/ansible-playbook -i localhost, -c local roles/base/tests/test_sysctl_live.yml </dev/null 2>&1 | cat
+- name: Live hardening sysctls are re-applied only on drift and still fail loudly when they won't stick
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  vars:
+    lan_iface: lan0
+    live_test_good: "{{ base_sysctl_live_expected | combine({'kernel/sysrq': '176'}) }}"
+    live_test_apply: [cp, -R, "{{ live_test_tmp.path }}/applied/.", "{{ live_test_tmp.path }}/proc/"]
+  tasks:
+    - name: Not in check mode (that's test_sysctl_live_check.yml)
+      ansible.builtin.assert:
+        that:
+          - not ansible_check_mode
+        quiet: true
+
+    - name: Make a scratch directory
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: .sysctl-live
+      register: live_test_tmp
+
+    - name: Every case
+      # Block vars beat the role defaults loaded through vars_files (play vars wouldn't).
+      vars:
+        base_sysctl_proc_dir: "{{ live_test_tmp.path }}/proc"
+      block:
+        - name: Set up the trees
+          ansible.builtin.include_tasks: live_setup.yml
+
+        - name: Run each case
+          ansible.builtin.include_tasks: live_case.yml
+          loop:
+            - name: converged
+              fail: false
+              reapplied: false
+            - name: UFW start turned martian logging off
+              live: {net/ipv4/conf/all/log_martians: "0", net/ipv4/conf/default/log_martians: "0"}
+              fail: false
+              reapplied: true
+              after: {net/ipv4/conf/all/log_martians: "1", net/ipv4/conf/default/log_martians: "1"}
+            - name: converged again after the re-apply
+              fail: false
+              reapplied: false
+            - name: only the LAN interface's send_redirects drifted
+              live: {net/ipv4/conf/lan0/send_redirects: "1"}
+              fail: false
+              reapplied: true
+              after: {net/ipv4/conf/lan0/send_redirects: "0"}
+            - name: only kptr_restrict drifted
+              live: {kernel/kptr_restrict: "1"}
+              fail: false
+              reapplied: true
+              after: {kernel/kptr_restrict: "2"}
+            - name: a value that won't stick
+              live: {net/ipv4/conf/all/log_martians: "0"}
+              apply: ["true"]
+              fail: true
+              reapplied: true
+              msg_has: ["net/ipv4/conf/all/log_martians=0 (want 1)", "after re-applying", "UFW"]
+              msg_lacks: ["default/log_martians", "kptr_restrict", "sysrq"]
+              after: {net/ipv4/conf/all/log_martians: "0"}
+            - name: sysrq is 0 (not ours to set, so no re-apply, and it fails)
+              live: {kernel/sysrq: "0"}
+              fail: true
+              reapplied: false
+              msg_has: ["kernel.sysrq is 0"]
+              msg_lacks: ["UFW", "Still drifted"]
+              after: {kernel/sysrq: "0"}
+          loop_control:
+            loop_var: live_case
+            label: "{{ live_case.name }}"
+
+      always:
+        # Deletes recursively, so only what the guard accepts (it fails the cleanup otherwise).
+        - name: The scratch directory is safe to delete
+          ansible.builtin.include_tasks: live_guard.yml
+          when: live_test_tmp is defined
+
+        - name: Remove the scratch directory
+          ansible.builtin.file:
+            path: "{{ live_test_tmp.path }}"
+            state: absent
+          when: live_test_tmp is defined

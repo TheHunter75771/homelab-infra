@@ -1,0 +1,60 @@
+---
+- name: Inputs for gpu-gate are set
+  ansible.builtin.assert:
+    that:
+      - gaming_pc_tailnet_ip | default('') | length > 0
+    fail_msg: Needs gaming_pc_tailnet_ip in inventory/host_vars/{{ inventory_hostname }}.yml.
+    quiet: true
+
+# The unit runs as User=ollama (same uid as Ollama, for its fdinfo; §12.9). Role ollama_rocm
+# creates that user, so it has to run first.
+- name: The ollama user exists (role ollama_rocm runs first)
+  ansible.builtin.getent:
+    database: passwd
+    key: ollama
+    fail_key: true
+
+- name: Install the gpu-gate code
+  ansible.builtin.include_tasks: install.yml
+
+- name: Config directory exists
+  ansible.builtin.file:
+    path: "{{ gpu_gate_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Validated with the installed code's own loader (unknown keys and bad values are errors).
+- name: Config is installed
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ gpu_gate_config_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: >-
+      /usr/bin/python3 -I -B -c "import sys; sys.path.insert(0, '{{ gpu_gate_install_dir }}');
+      from gpu_gate.config import load; load(sys.argv[1])" %s
+  notify: Restart gpu-gate
+
+# The reviewed unit, verbatim: its paths already match this layout.
+- name: Unit is installed
+  ansible.builtin.copy:
+    src: "{{ gpu_gate_src_dir }}/gpu-gate.service"
+    dest: "{{ gpu_gate_unit }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd for gpu-gate
+    - Restart gpu-gate
+
+- name: Load a changed unit before enabling it
+  ansible.builtin.meta: flush_handlers
+
+- name: The gpu-gate service is enabled and running
+  ansible.builtin.systemd_service:
+    name: gpu-gate.service
+    enabled: true
+    state: started

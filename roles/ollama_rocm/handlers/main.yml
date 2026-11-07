@@ -1,0 +1,10 @@
+---
+# Order matters: handlers run in this order, so the unit is reloaded before the restart.
+- name: Reload systemd for ollama
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Restart ollama
+  ansible.builtin.systemd_service:
+    name: ollama.service
+    state: restarted

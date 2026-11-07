@@ -1,0 +1,38 @@
+---
+# §12.29 verify: no secrets in the journal. files/journal_scan.py (root, system Python) gathers the secrets that
+# exist (the VAPID private key in three encodings, the Home Assistant token, the subscriptions' endpoints and keys)
+# and searches both units' whole journal for them. It prints counts and labels only, never a value.
+- name: Verify | scan both units' journal for the secrets
+  ansible.builtin.command:
+    argv:
+      - "{{ mission_control_python }}"
+      - -I
+      - -B
+      - "{{ mission_control_lib_dir }}/journal_scan.py"
+      - "{{ mission_control_journalctl }}"
+      - "{{ mission_control_vapid_file }}"
+      - "{{ mission_control_ha_token_file }}"
+      - "{{ mission_control_subscriptions_file }}"
+      - "{{ mission_control_service }}"
+      - "{{ mission_control_briefing_service }}"
+  register: mission_control_journal_scan
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Verify | the journal holds none of them
+  vars:
+    scan: "{{ mission_control_journal_scan.stdout | default('{}') | from_json }}"
+  ansible.builtin.assert:
+    that:
+      - mission_control_journal_scan.rc | default(1) == 0
+      - scan.error | default('missing') == ''
+      - scan.secrets | default(0) | int >= 1
+      - scan.leaks | default(['scan failed']) | length == 0
+    fail_msg: >-
+      Journal scan of {{ mission_control_service }} + {{ mission_control_briefing_service }}: rc
+      {{ mission_control_journal_scan.rc | default('?') }}, {{ scan.lines | default('?') }} lines, {{ scan.secrets | default('?') }}
+      secrets checked, error '{{ scan.error | default('missing') }}', found: {{ scan.leaks | default([]) | join(', ') or 'none' }}.
+      A leak is a bug in MC1 (it must never log keys, tokens or push endpoints); rotate what leaked.
+    success_msg: "No secrets in the journal ({{ scan.lines | default(0) }} lines, {{ scan.secrets | default(0) }} secrets checked)."
+    quiet: true

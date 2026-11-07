@@ -1,0 +1,17 @@
+---
+# One sudo -l output case (rules_case: {name, results: [{item, rc, stdout, stderr}], expect: pass | fail}).
+# Runs the role's own tasks/verify_sudo_rules.yml.
+- name: "Sudo rules case {{ rules_case.name }}"
+  block:
+    - name: "Check ({{ rules_case.name }})"
+      ansible.builtin.include_tasks: ../tasks/verify_sudo_rules.yml
+      vars:
+        operator_account_sudo_rules: "{{ rules_case.results }}"
+
+    - name: "Record a pass ({{ rules_case.name }})"
+      ansible.builtin.set_fact:
+        rules_verdicts: "{{ rules_verdicts | default({}) | combine({rules_case.name: rules_case.expect == 'pass'}) }}"
+  rescue:
+    - name: "Record a failure ({{ rules_case.name }})"
+      ansible.builtin.set_fact:
+        rules_verdicts: "{{ rules_verdicts | default({}) | combine({rules_case.name: rules_case.expect == 'fail'}) }}"

@@ -1,0 +1,23 @@
+---
+# One exec-check case (exec_case: {name, deny: [file], allow: [file], test_says: yes|no, expect: pass|fail}).
+# Runs the role's tasks/verify_exec.yml as the current user (prefix `env`, which execs like runuser:
+# rc 126 + "Permission denied" when the kernel refuses). A lying `test` is first on PATH: it answers
+# test_says for everything, so a role that asked `test` would get the wrong verdict.
+- name: "Exec case {{ exec_case.name }}"
+  environment:
+    PATH: "{{ t }}/exec/liar-{{ exec_case.test_says }}:{{ ansible_env.PATH }}"
+  block:
+    - name: "Check ({{ exec_case.name }})"
+      ansible.builtin.include_tasks: ../tasks/verify_exec.yml
+      vars:
+        operator_account_runas_prefix: [env]
+        operator_account_exec_deny: "{{ ['me'] | product(exec_case.deny | map('regex_replace', '^', t ~ '/exec/')) | list }}"
+        operator_account_exec_allow: "{{ ['me'] | product(exec_case.allow | map('regex_replace', '^', t ~ '/exec/')) | list }}"
+
+    - name: "Record a pass ({{ exec_case.name }})"
+      ansible.builtin.set_fact:
+        exec_verdicts: "{{ exec_verdicts | default({}) | combine({exec_case.name: exec_case.expect == 'pass'}) }}"
+  rescue:
+    - name: "Record a failure ({{ exec_case.name }})"
+      ansible.builtin.set_fact:
+        exec_verdicts: "{{ exec_verdicts | default({}) | combine({exec_case.name: exec_case.expect == 'fail'}) }}"

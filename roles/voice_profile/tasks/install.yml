@@ -1,0 +1,62 @@
+---
+# /opt/voice-profile holds exactly V's launcher and package plus the library code, all root-owned: the launcher
+# `voice-profile` (0755) and the packages in voice_profile_packages (0755 dirs, 0644 *.py): V's voice_profile and
+# apps/skill-library's library (V imports it; installed beside it, read-only). The launcher puts its own
+# directory first on sys.path (and, finding library there, adds nothing else), so under `python3 -I` a build
+# imports exactly these copies. Anything else (a removed file, a stray, a test dir, V's tests, README and
+# example config) is pruned. Nothing is restarted: the unit is on-demand.
+- name: Install | the code directories are real directories (before any write)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    voice_profile_guard_dirs: >-
+      {{ [voice_profile_app_dir]
+         + (voice_profile_packages | map(attribute='name') | map('regex_replace', '^', voice_profile_app_dir ~ '/') | list) }}
+
+- name: Install | code directory
+  ansible.builtin.file:
+    path: "{{ voice_profile_app_dir }}"
+    state: directory
+    owner: "{{ voice_profile_owner }}"
+    group: "{{ voice_profile_owner }}"
+    mode: "0755"
+
+- name: Install | packages
+  ansible.builtin.include_tasks: tree.yml
+  vars:
+    voice_profile_tree_src: "{{ voice_profile_pkg.src }}"
+    voice_profile_tree_dest: "{{ voice_profile_app_dir }}/{{ voice_profile_pkg.name }}"
+    voice_profile_tree_name: "{{ voice_profile_pkg.name }}"
+  loop: "{{ voice_profile_packages }}"
+  # Not `item`: the included file's own loops would shadow it (its vars are evaluated lazily).
+  loop_control:
+    loop_var: voice_profile_pkg
+    label: "{{ voice_profile_pkg.name }}"
+
+- name: Install | launcher
+  ansible.builtin.copy:
+    src: "{{ voice_profile_launcher_src }}"
+    dest: "{{ voice_profile_launcher }}"
+    owner: "{{ voice_profile_owner }}"
+    group: "{{ voice_profile_owner }}"
+    mode: "0755"
+    follow: false
+
+- name: Install | the code directory is still a real directory (before the find and prune)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    voice_profile_guard_dirs: ["{{ voice_profile_app_dir }}"]
+
+- name: Install | entries of the code directory
+  ansible.builtin.find:
+    paths: "{{ voice_profile_app_dir }}"
+    file_type: any
+    hidden: true
+  register: voice_profile_app_found
+
+- name: Install | anything but the launcher and the packages is removed
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: >-
+    {{ voice_profile_app_found.files | map(attribute='path')
+       | reject('in', voice_profile_app_entries | map('regex_replace', '^', voice_profile_app_dir ~ '/') | list) | sort }}

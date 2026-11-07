@@ -1,0 +1,50 @@
+---
+# One symlink case for test_research_gate.yml: case = {name, root, link}. The scratch code root `root` gets
+# real dirs up to `link`, which is made a symlink to a victim directory holding one sentinel. install.yml must
+# refuse at a guard before writing anything, and the victim must be untouched.
+- name: Guard case | set up the victim and the link for {{ case.name }}
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      v="{{ test_tmp }}/victim-{{ case.name }}"
+      mkdir -p "$v" "$(dirname "{{ case.link }}")"
+      echo keep > "$v/sentinel"
+      chmod 0644 "$v/sentinel"
+      chmod 0700 "$v"
+      ln -sfn "$v" "{{ case.link }}"
+    executable: /bin/bash
+  changed_when: true
+
+- name: Guard case | install through the link for {{ case.name }}
+  block:
+    - name: Guard case | install for {{ case.name }}
+      ansible.builtin.include_tasks: ../tasks/install.yml
+      vars:
+        finance_digest_app_dir: "{{ case.root }}"
+
+    - name: Guard case | not reached for {{ case.name }}
+      ansible.builtin.set_fact:
+        fd_test_guard_by: ""
+  rescue:
+    - name: Guard case | note which task refused for {{ case.name }}
+      ansible.builtin.set_fact:
+        fd_test_guard_by: "{{ ansible_failed_task.name }}"
+
+- name: Guard case | read the victim for {{ case.name }}
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      v="{{ test_tmp }}/victim-{{ case.name }}"
+      find "$v" -printf '%P|%m|%y\n' | LC_ALL=C sort
+      cat "$v/sentinel"
+    executable: /bin/bash
+  register: fd_test_victim
+  changed_when: false
+
+- name: Guard case | refused by a guard, victim untouched for {{ case.name }}
+  ansible.builtin.assert:
+    that:
+      - fd_test_guard_by == 'Guard | each pruned directory is absent or a real directory (never a symlink)'
+      - fd_test_victim.stdout_lines == ['sentinel|644|f', '|700|d', 'keep']
+    fail_msg: "refused by '{{ fd_test_guard_by }}'; victim: {{ fd_test_victim.stdout_lines }}"
+    quiet: true

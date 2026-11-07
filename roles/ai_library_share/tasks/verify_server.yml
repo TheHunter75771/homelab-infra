@@ -1,0 +1,58 @@
+---
+# Read-only checks after the server converge (§12.17.2 Verify; skipped in check mode). The smbclient
+# login as ailib can't run here (loopback is outside hosts allow): the client half's verify mounts the
+# share from ai-box instead.
+- name: Verify | smb is active
+  ansible.builtin.command:
+    argv: [systemctl, is-active, "{{ ai_library_share_smb_unit }}"]
+  register: ai_library_share_smb_active
+  changed_when: false
+  failed_when: ai_library_share_smb_active.stdout | trim != 'active'
+
+- name: Verify | nmb is masked
+  ansible.builtin.command:
+    argv: [systemctl, is-enabled, "{{ ai_library_share_nmb_unit }}"]
+  register: ai_library_share_nmb_enabled
+  changed_when: false
+  failed_when: ai_library_share_nmb_enabled.stdout | trim != 'masked'
+
+- name: Verify | the installed smb.conf passes testparm (strict)
+  ansible.builtin.command:
+    argv:
+      - "{{ ai_library_share_python }}"
+      - -I
+      - -B
+      - "{{ ai_library_share_lib_dir }}/testparm-strict.py"
+      - --testparm
+      - "{{ ai_library_share_testparm }}"
+      - "{{ ai_library_share_smb_conf }}"
+  changed_when: false
+
+- name: Verify | 445 listens on the wildcard address(es)
+  ansible.builtin.include_tasks: verify_listen.yml
+
+- name: Verify | the filters in front of 445 (IP filter, module G's policy, LAN zones)
+  ansible.builtin.include_tasks: verify_filter.yml
+
+- name: Verify | the force user can write the library (probe in 00-inbox)
+  ansible.builtin.include_tasks: verify_server_write.yml
+
+- name: Verify | the backup timer is enabled and active
+  ansible.builtin.command:
+    argv: [systemctl, is-active, "{{ ai_library_share_backup_timer }}"]
+  register: ai_library_share_timer_active
+  changed_when: false
+  failed_when: ai_library_share_timer_active.stdout | trim != 'active'
+
+- name: Verify | SELinux boolean and AVCs
+  when: ai_library_share_selinux.rc | default(1) == 0
+  block:
+    - name: Verify | the boolean is on
+      ansible.builtin.command:
+        argv: ["{{ ai_library_share_getsebool }}", "{{ ai_library_share_selinux_boolean }}"]
+      register: ai_library_share_sebool_after
+      changed_when: false
+      failed_when: ai_library_share_sebool_after.stdout | trim != ai_library_share_selinux_boolean ~ ' --> on'
+
+    - name: Verify | no recent AVC denial for smbd
+      ansible.builtin.include_tasks: verify_avc.yml

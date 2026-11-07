@@ -1,0 +1,26 @@
+#!/usr/sbin/nft -f
+# Ansible managed
+# Mission Control's local-access guard (docs/CONTRACTS.md §12.29; Reviewer Q, Q-1 and Q2-1). MC1 trusts the
+# Tailscale-User-Login header, which only tailscale serve may set. Two local paths would let any process on ai-box
+# act as Noah:
+# - straight to the server on 127.0.0.1:8097 with a forged header. Output hook: only root may connect (tailscaled
+#   proxies serve's requests to it as root);
+# - through serve on ai-box's own tailnet address :8443 (ai-box is Noah's node, so serve stamps Noah's login).
+#   A uid rule can't stop this: tailscaled's local API (/run/tailscale/tailscaled.sock, open to every local user)
+#   dials for its caller, as root. So the input hook decides by interface: real serve traffic always arrives on
+#   tailscale0; anything else (lo, whoever dialled; a Docker bridge) gets a reset.
+# Only this table is replaced: it is declared (so the delete can't fail on a first load), deleted and re-added in one
+# nft transaction. Never `flush ruleset`: UFW's, Docker's and every other table are left alone.
+table inet mission_control_guard
+delete table inet mission_control_guard
+table inet mission_control_guard {
+	chain output {
+		type filter hook output priority filter; policy accept;
+		ip daddr 127.0.0.1 tcp dport 8097 meta skuid != 0 counter reject with tcp reset
+	}
+	chain input {
+		type filter hook input priority filter; policy accept;
+		ip daddr 100.64.0.10 tcp dport { 8443 } iifname != "tailscale0" counter reject with tcp reset
+		ip6 daddr fd7a:115c:a1e0::a tcp dport { 8443 } iifname != "tailscale0" counter reject with tcp reset
+	}
+}

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Fake curl: `-sS|-s -m N -o /dev/null -w %{http_code} <url>`. Inside the fake nsenter (FA_NETNS=1) the knob is
+# `netns_curl` (401 default | 000 | 200 | 403), from the host `host_curl` (timeout default | refused | 403 | 401 | 200 |
+# empty: curl rc 52, the connection was accepted and closed | reset: curl rc 56, accepted then reset).
+set -euo pipefail
+: "${FA_TEST_DIR:?}"
+. "$(dirname "$0")/_knob"
+case "$*" in
+  "-sS -m "*" -o /dev/null -w %{http_code} http://"*|"-s -m "*" -o /dev/null -w %{http_code} http://"*) ;;
+  *) echo "fake curl: unexpected arguments: $*" >&2; exit 2 ;;
+esac
+printf '%s\n' "$@" >"$FA_TEST_DIR/curl-${FA_NETNS:-host}.args"
+if [ "${FA_NETNS:-}" = 1 ]; then mode="$(knob netns_curl 401)"; else mode="$(knob host_curl timeout)"; fi
+case "$mode" in
+  timeout) printf 000; echo "curl: (28) Connection timed out" >&2; exit 28 ;;
+  000) printf 000; exit 28 ;;
+  refused) printf 000; echo "curl: (7) Failed to connect" >&2; exit 7 ;;
+  empty) printf 000; echo "curl: (52) Empty reply from server" >&2; exit 52 ;;
+  reset) printf 000; echo "curl: (56) Recv failure: Connection reset by peer" >&2; exit 56 ;;
+  200|401|403) printf '%s' "$mode" ;;
+  *) echo "fake curl: bad knob" >&2; exit 2 ;;
+esac

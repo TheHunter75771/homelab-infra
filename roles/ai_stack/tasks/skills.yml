@@ -1,0 +1,181 @@
+---
+# Read-only share views (docs/CONTRACTS.md §12.19 skills, §12.21 writing; README "Skills"): one design for
+# every entry of ai_stack_ro_shares. The play never touches a mount path or the network share: "mounted" is
+# `systemctl is-active` of the share's mount unit (systemd tracks the mount table; no stat of the path,
+# which would hang on a stale soft mount). It installs the units and the reconcile script and starts the
+# timer; the reconcile service mounts and unmounts. The one exception: a share whose mount unit changed
+# while active is stopped (lazy, never waits) so the next reconcile mounts it anew.
+
+- name: Skills | is each share's mount active? (systemd's view; never stats the path)
+  ansible.builtin.command:
+    argv: [systemctl, is-active, --quiet, "{{ share.mount_unit }}"]
+  loop: "{{ ai_stack_ro_shares }}"
+  loop_control:
+    loop_var: share
+    label: "{{ share.name }}"
+  register: ai_stack_ro_share_active
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# Owner, mode and marker belong to the local directory underneath; while the mount is on top they can't
+# (and needn't) be touched, and touching them would stat the share.
+- name: Skills | parent of the view directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ ai_stack_ro_shares | map(attribute='view') | map('dirname') | unique | list }}"
+
+# §12.27: a read-write share's local directory and marker are immutable while nothing is mounted on top
+# (see the end of this block). A marker whose text must change is unlocked first, here; only then.
+- name: Skills | read-write shares, current marker (while not mounted)
+  ansible.builtin.stat:
+    path: "{{ item.share.view }}/{{ item.share.marker }}"
+    get_checksum: true
+  loop: "{{ ai_stack_ro_share_active.results }}"
+  loop_control:
+    label: "{{ item.share.name }}"
+  register: ai_stack_rw_marker_stat
+  when:
+    - item.rc != 0
+    - item.share.mode == 'rw'
+
+- name: Skills | read-write shares, unlock an outdated marker (while not mounted)
+  ansible.builtin.command:
+    argv: [chattr, -i, "{{ item.item.share.view }}", "{{ item.item.share.view }}/{{ item.item.share.marker }}"]
+  loop: "{{ ai_stack_rw_marker_stat.results }}"
+  loop_control:
+    label: "{{ item.item.share.name }}"
+  vars:
+    ai_stack_marker_for: "{{ item.item.share }}"
+  changed_when: true
+  when:
+    - item.stat is defined
+    - item.stat.exists
+    - item.stat.checksum != (ai_stack_share_marker_text | hash('sha1'))
+
+- name: Skills | local view directory per share (what open-webui binds)
+  ansible.builtin.file:
+    path: "{{ item.share.view }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ ai_stack_ro_share_active.results }}"
+  loop_control:
+    label: "{{ item.share.name }}"
+  when: item.rc != 0
+
+- name: Skills | marker the tool sees while the share isn't mounted
+  ansible.builtin.copy:
+    content: "{{ ai_stack_share_marker_text }}"
+    dest: "{{ item.share.view }}/{{ item.share.marker }}"
+    owner: root
+    group: root
+    mode: "0444"
+  loop: "{{ ai_stack_ro_share_active.results }}"
+  loop_control:
+    label: "{{ item.share.name }}"
+  vars:
+    ai_stack_marker_for: "{{ item.share }}"
+  when: item.rc != 0
+
+# The fail-safe (§12.27): while the read-write share isn't mounted, open-webui (root, CAP_DAC_OVERRIDE) must
+# not be able to write to ai-box's own disk through its rw bind. File modes can't stop root; the immutable
+# attribute can (changing it needs CAP_LINUX_IMMUTABLE, which no container here has). Marker first, then the
+# directory (no new entries). Mounting on top of an immutable directory is unaffected.
+- name: Skills | read-write shares, marker immutable (while not mounted)
+  ansible.builtin.file:
+    path: "{{ item.share.view }}/{{ item.share.marker }}"
+    attributes: "+i"
+  loop: "{{ ai_stack_ro_share_active.results }}"
+  loop_control:
+    label: "{{ item.share.name }}"
+  when:
+    - item.rc != 0
+    - item.share.mode == 'rw'
+
+- name: Skills | read-write shares, local directory immutable (while not mounted)
+  ansible.builtin.file:
+    path: "{{ item.share.view }}"
+    attributes: "+i"
+  loop: "{{ ai_stack_ro_share_active.results }}"
+  loop_control:
+    label: "{{ item.share.name }}"
+  when:
+    - item.rc != 0
+    - item.share.mode == 'rw'
+
+- name: Skills | reconcile script directory
+  ansible.builtin.file:
+    path: "{{ ai_stack_skills_reconcile_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Skills | reconcile script
+  ansible.builtin.copy:
+    src: skills_reconcile.py
+    dest: "{{ ai_stack_skills_reconcile_script }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Skills | mount unit per share
+  ansible.builtin.template:
+    src: homelab-ai-share.mount.j2
+    dest: /etc/systemd/system/{{ share.mount_unit }}
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ ai_stack_ro_shares }}"
+  loop_control:
+    loop_var: share
+    label: "{{ share.name }}"
+  register: ai_stack_ro_share_units
+
+- name: Skills | reconcile service and timer units
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: /etc/systemd/system/{{ item.dest }}
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - {src: homelab-ai-skills-reconcile.service.j2, dest: "{{ ai_stack_skills_reconcile_unit }}"}
+    - {src: homelab-ai-skills.timer.j2, dest: "{{ ai_stack_skills_timer_unit }}"}
+  loop_control:
+    label: "{{ item.dest }}"
+  register: ai_stack_skills_units
+
+# The round-3 design made the skills a bind wanted by the library mount; that link must not survive.
+- name: Skills | no leftover link from the library mount
+  ansible.builtin.file:
+    path: "{{ ai_stack_skills_legacy_wants }}"
+    state: absent
+  register: ai_stack_skills_legacy
+
+- name: Skills | reconcile timer is enabled and running
+  ansible.builtin.systemd_service:
+    name: "{{ ai_stack_skills_timer_unit }}"
+    enabled: true
+    state: started
+    daemon_reload: >-
+      {{ ai_stack_ro_share_units is changed or ai_stack_skills_units is changed or ai_stack_skills_legacy is changed }}
+
+# New options apply only to a new mount. Stop (lazy, never waits on the PC); the next reconcile, within a
+# minute, mounts it with the new unit if the PC answers. Pairs each share's probe with its unit's result.
+- name: Skills | unmount a share whose mount unit changed
+  ansible.builtin.systemd_service:
+    name: "{{ item.0.share.mount_unit }}"
+    state: stopped
+  loop: "{{ ai_stack_ro_share_active.results | zip(ai_stack_ro_share_units.results) | list }}"
+  loop_control:
+    label: "{{ item.0.share.name }}"
+  when:
+    - item.0.rc == 0
+    - item.1 is changed

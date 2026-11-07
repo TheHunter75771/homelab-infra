@@ -1,0 +1,69 @@
+---
+# Role ai_backup (docs/CONTRACTS.md §12.28, module H10): Open WebUI's nightly backup. Two entry points, no main:
+#   tasks_from: stage        ai-box (Ubuntu): the account, the restricted pull key, the 03:45 timer that writes
+#                            /var/backups/ai-box/owui-<UTC stamp>.tar + LAST_OK (keep 3).
+#   tasks_from: export_key   ai-box, after stage, in the same play: hands the pull key's private half and ai-box's
+#                            ssh host key to the PC play as host facts (no_log).
+#   tasks_from: pull         gaming PC (Fedora), root: the key, the 06:30 pull timer into
+#                            /mnt/backup/ai-box/openwebui (verify, keep 14, LAST_OK age) and a restore-check unit.
+# Host vars: gaming_pc_tailnet_ip (+ gaming_pc_tailnet_ip6 when set) on ai-box; ai_box_tailnet_ip on the PC.
+
+# ---- stage (ai-box) ------------------------------------------------------------------------------------------
+# The open-webui volume's HOST path (docker volume inspect ai_open-webui-data; checked live 2026-10-28). The
+# backup reads it read-only from the host, never through the container.
+ai_backup_volume_dir: /var/lib/docker/volumes/ai_open-webui-data/_data
+# The ai stack's .env (role ai_stack: {{ homelab_stacks_dir }}/ai/.env, root 0600, WEBUI_SECRET_KEY only).
+ai_backup_env_file: "{{ homelab_stacks_dir | default('/srv/homelab/stacks') }}/ai/.env"
+ai_backup_stage_dir: /var/backups/ai-box
+ai_backup_stage_keep: 3
+ai_backup_stage_calendar: "*-*-* 03:45:00"
+# The read-only pull account (the §8 name). It exists only for this pull on ai-box: system, locked password,
+# shell /bin/sh (sshd runs the forced rrsync command through it), its only key the restricted pull key.
+ai_backup_account: "{{ backup_pull_user | default('backuppull') }}"
+ai_backup_account_home: "/var/lib/{{ ai_backup_account }}"
+ai_backup_rrsync: /usr/bin/rrsync
+# from= on the pull key: the gaming PC's tailnet address(es).
+ai_backup_pull_from: >-
+  {{ [gaming_pc_tailnet_ip | default(''), gaming_pc_tailnet_ip6 | default('')]
+     | select('string') | reject('equalto', '') | list }}
+# Refuse to start a run unless this much space stays free in the staging dir (on top of 2x the data).
+ai_backup_stage_min_free_mb: 1024
+# Seconds one database copy may take before the run fails (chroma.sqlite3 is ~365 MB).
+ai_backup_sqlite_deadline: 900
+
+# ---- pull (gaming PC) ----------------------------------------------------------------------------------------
+# ai-box's tailnet IPv4 address (host var ai_box_tailnet_ip). The only address the pull unit may talk to.
+ai_backup_pull_host: "{{ ai_box_tailnet_ip | default('') }}"
+# The backup drive and the folder on it: the destination is exactly <mount>/<subdir> (vars/main.yml).
+ai_backup_pull_dest_mount: /mnt/backup
+ai_backup_pull_dest_fstypes: [ext4]
+ai_backup_pull_subdir: ai-box/openwebui
+ai_backup_pull_keep: 14
+ai_backup_pull_calendar: "*-*-* 06:30:00"
+ai_backup_pull_max_age_hours: 48
+# Bounds on what ai-box may hand over (Reviewer X: ai-box is not trusted to be well-behaved, and /mnt/backup also
+# holds restic, the AI Library and a LUKS header image). The pull refuses before fetching anything when ai-box lists
+# more than max_remote archives or one over max_size, or when the drive would keep less than min_free_mb free; it
+# promotes none when more than max_new are new, and rejects names dated more than max_future_minutes ahead.
+ai_backup_pull_max_remote: "{{ ai_backup_stage_keep | int + 2 }}"
+ai_backup_pull_max_new: "{{ ai_backup_stage_keep | int + 2 }}"
+ai_backup_pull_max_size: 8G
+ai_backup_pull_min_free_mb: 20480
+ai_backup_pull_max_future_minutes: 60
+# A failed pull (exit 1: ai-box or the tailnet not reachable yet at a boot catch-up, a bad transfer) is retried
+# after this long, at most ai_backup_pull_start_burst starts per ai_backup_pull_start_interval. A refusal (exit 2:
+# the drive, the listing's bounds) is never retried.
+ai_backup_pull_restart_sec: 5min
+ai_backup_pull_start_burst: 4
+ai_backup_pull_start_interval: 2h
+# From play 1 (hostvars[<ai-box>].ai_backup_pull_private_key / .ai_backup_host_pubkey | default('')). Empty: the
+# files already on the PC are kept (they must exist). Never set in inventory.
+ai_backup_pull_private_key: ""
+ai_backup_pull_host_pubkey: ""
+
+# ---- both ----------------------------------------------------------------------------------------------------
+# Each unit's MemoryMax (ai-box's memory budget lists host services: README, "Wiring").
+ai_backup_memory_max: 256M
+ai_backup_python: /usr/bin/python3
+# This role's own files/ (the tests run the task files outside the role).
+ai_backup_files_dir: "{{ role_path }}/files"

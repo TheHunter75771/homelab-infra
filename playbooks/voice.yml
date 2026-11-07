@@ -1,0 +1,10 @@
+---
+# Voice profile builder on ai-box (docs/CONTRACTS.md §12.21). Run as the operator account `claude`, after
+# ai-library.yml, research.yml (creates rgate) and the AI stack. Never starts a build: Noah or Claude runs
+# `sudo systemctl start voice-profile`, and the draft profile waits for Noah's approval.
+- name: Voice profile builder on ai-box
+  hosts: ai_servers
+  become: true
+  gather_facts: false
+  roles:
+    - role: voice_profile

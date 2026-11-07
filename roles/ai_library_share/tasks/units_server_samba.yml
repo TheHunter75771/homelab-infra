@@ -1,0 +1,23 @@
+---
+# smb.service drop-in (§12.11 mount safety, §12.17.2 after Reviewer G): smbd starts only with the
+# library drive mounted, and systemd's IP filter lets only loopback and ai-box reach it. A changed
+# drop-in restarts smb, so the filter is live. tests/test_ai_library_share.yml renders it into a
+# scratch dir and runs systemd-analyze verify on it.
+- name: Units | smb drop-in directory
+  ansible.builtin.file:
+    path: "{{ ai_library_share_smb_dropin_dir }}"
+    state: directory
+    owner: "{{ ai_library_share_owner }}"
+    group: "{{ ai_library_share_owner }}"
+    mode: "0755"
+
+- name: Units | smb drop-in (share drive mounted, IP filter)
+  ansible.builtin.template:
+    src: smb-ai-library.conf.j2
+    dest: "{{ ai_library_share_smb_dropin }}"
+    owner: "{{ ai_library_share_owner }}"
+    group: "{{ ai_library_share_owner }}"
+    mode: "0644"
+  notify:
+    - Reload systemd for ai-library-share
+    - Restart smb for ai-library-share

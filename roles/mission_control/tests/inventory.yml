@@ -1,0 +1,14 @@
+---
+# Synthetic inventory for tests/test_mission_control.yml. Both hosts run locally and are never "real":
+#   box     runs the role's task files into a scratch dir (venv, code, config, VAPID, verify fakes);
+#   render  renders the units and the serve set with the role's REAL paths (no scratch overrides: set_fact is
+#           per host, so box's overrides never reach it).
+all:
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  children:
+    ai_servers:
+      hosts:
+        box:
+        render:

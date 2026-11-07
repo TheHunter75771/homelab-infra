@@ -1,0 +1,3045 @@
+---
+# Role ai_stack, rendered on the control node into a temp dir (no Docker, no root, no real host):
+#   1. compose.yaml: four services, tailnet-only publishes, labels, limits, Open WebUI settings, and tika
+#      (internal network only, hardened, its config mounted read-only); tika-config.xml; the memory budget.
+#   2. gpu-broker.json for every model combination, each validated by the broker's own `--check`.
+#   3. the boot helper script against fake `ip` and `docker` commands (tests/boot_case.yml, one per case).
+# Needs the broker's dev venv (apps/gpu-broker/README.md, "Run"); override with -e ai_stack_test_python=...
+#   .venv/bin/ansible-playbook -i localhost, -c local roles/ai_stack/tests/test_render.yml </dev/null 2>&1 | cat
+- name: Role ai_stack renders a valid stack, broker config and boot helper
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../../../inventory/group_vars/all/main.yml
+    - ../../../inventory/group_vars/all/versions.yml
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  vars:
+    # Documentation-only addresses: 100.64.0.0/10 is the tailnet range, 192.0.2.0/24 is TEST-NET-1.
+    tailnet_ip: 100.64.0.10
+    gaming_pc_tailnet_ip: 100.64.0.20
+    lan_ip: 192.0.2.10
+    ai_stack_test_role: "{{ playbook_dir | dirname }}"
+    ai_stack_test_repo: "{{ playbook_dir }}/../../.."
+    ai_stack_test_broker_dir: "{{ ai_stack_test_repo }}/apps/gpu-broker"
+    ai_stack_test_python: "{{ ai_stack_test_broker_dir }}/.venv/bin/python"
+  tasks:
+    - name: Make a scratch directory
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: .ai-stack
+      register: ai_stack_test_tmp
+
+    - name: The broker's dev venv exists (it validates the configs)
+      ansible.builtin.stat:
+        path: "{{ ai_stack_test_python }}"
+      register: ai_stack_test_python_stat
+
+    - name: Stop if there is no broker venv
+      ansible.builtin.assert:
+        that: ai_stack_test_python_stat.stat.exists
+        fail_msg: >-
+          {{ ai_stack_test_python }} is missing. Create it as apps/gpu-broker/README.md says
+          (python3 -m venv .venv && .venv/bin/pip install --require-hashes --only-binary=:all: -r requirements.lock).
+        quiet: true
+
+    - name: Stack lock defaults (root-only path; the holder outlives lock wait + compose wait)
+      ansible.builtin.assert:
+        that:
+          - ai_stack_lock_file == '/run/homelab-ai-stack.lock'
+          - not ai_stack_lock_file.startswith('/run/lock/')
+          - ai_stack_lock_hold_max | int == 1020
+          - ai_stack_lock_hold_max | int > ai_stack_lock_wait | int + ai_stack_compose_wait_timeout | int
+        fail_msg: "{{ ai_stack_lock_file }} {{ ai_stack_lock_hold_max }}"
+        quiet: true
+
+    # ---- 1. compose.yaml ------------------------------------------------------------------------------
+    - name: Render compose.yaml (both models set, sign-ups on by default)
+      ansible.builtin.template:
+        src: "{{ ai_stack_test_role }}/templates/compose.yaml.j2"
+        dest: "{{ ai_stack_test_tmp.path }}/compose.yaml"
+        mode: "0644"
+      vars:
+        ai_cpu_model: qwen3:1.7b
+        ai_gpu_model: qwen3:8b
+        ai_embed_model: nomic-embed-text:v1.5
+        ai_stack_tika_config_template: "{{ ai_stack_test_role }}/templates/tika-config.xml.j2"
+
+    - name: Read compose.yaml back
+      ansible.builtin.slurp:
+        src: "{{ ai_stack_test_tmp.path }}/compose.yaml"
+      register: ai_stack_test_compose_raw
+
+    - name: Compose file has the declared shape
+      vars:
+        ai_cpu_model: qwen3:1.7b
+        ai_gpu_model: qwen3:8b
+        ai_embed_model: nomic-embed-text:v1.5
+        ai_stack_tika_config_template: "{{ ai_stack_test_role }}/templates/tika-config.xml.j2"
+        compose: "{{ ai_stack_test_compose_raw.content | b64decode | from_yaml }}"
+        svc: "{{ compose.services }}"
+        all_ports: "{{ svc.values() | map(attribute='ports') | select('defined') | flatten }}"
+        webui_env: "{{ svc['open-webui'].environment }}"
+        all_volume_sources: >-
+          {{ svc.values() | map(attribute='volumes') | select('defined') | flatten
+             | map('regex_replace', '^([^:]*):.*$', '\\1') | map('string') | list
+             + svc.values() | map(attribute='volumes') | select('defined') | flatten
+             | select('mapping') | map(attribute='source') | list }}
+      ansible.builtin.assert:
+        that:
+          - compose.name == 'ai'
+          - svc.keys() | sort == ['gpu-broker', 'ollama-cpu', 'open-webui', 'tika']
+          # Every service: restart policy, watch label, memory limit, private network.
+          - svc.values() | map(attribute='restart') | unique | list == ['unless-stopped']
+          - svc['ollama-cpu'].labels['homelab.watch'] == 'true'
+          - svc['gpu-broker'].labels['homelab.watch'] == 'true'
+          - svc['open-webui'].labels['homelab.watch'] == 'true'
+          - svc['tika'].labels['homelab.watch'] == 'true'
+          # §12.23: every service on `ai` has its pinned address (the broker tells open-webui apart by it).
+          - >-
+            svc['ollama-cpu'].networks == {'ai': {'ipv4_address': '172.20.0.2'}}
+          - >-
+            svc['gpu-broker'].networks == {'ai': {'ipv4_address': '172.20.0.3'}}
+          - svc['open-webui'].networks.ai.ipv4_address == '172.20.0.4'
+          - compose['x-common'].networks is not defined
+          # open-webui: `ai` (its publish and egress, gateway first) plus the internal `extract`.
+          - svc['open-webui'].networks.keys() | sort == ['ai', 'extract']
+          - svc['open-webui'].networks.ai.gw_priority == 1
+          - svc['open-webui'].depends_on is not defined
+          - svc['ollama-cpu'].mem_limit == '5g'
+          - svc['gpu-broker'].mem_limit == '256m'
+          - svc['open-webui'].mem_limit == '4g'
+          - svc['tika'].mem_limit == '1g'
+          # No swap: memswap_limit equals mem_limit on every service.
+          - svc.values() | map(attribute='memswap_limit') | list == svc.values() | map(attribute='mem_limit') | list
+          # Images only from versions.yml.
+          - svc['ollama-cpu'].image == images.ollama
+          - svc['gpu-broker'].image == local_images.gpu_broker
+          - svc['open-webui'].image == images.open_webui
+          - svc['tika'].image == images.tika
+          - images.tika is search('^docker\\.io/apache/tika:[0-9.]+-full@sha256:[0-9a-f]{64}$')
+          - svc['gpu-broker'].pull_policy == 'never'
+          # Publishing: exactly two ports, both on the tailnet address; ollama-cpu and tika publish nothing.
+          - svc['ollama-cpu'].ports is not defined
+          - svc['tika'].ports is not defined
+          - svc['tika'].expose is not defined
+          - svc['gpu-broker'].ports == ['100.64.0.10:11434:11434']
+          - svc['open-webui'].ports == ['100.64.0.10:8080:8080']
+          - all_ports | length == 2
+          - all_ports | select('match', '^100\.64\.0\.10:') | list | length == 2
+          - all_ports | select('search', '0\.0\.0\.0|192\.0\.2\.10|^\d+:\d+$|^\d+$') | list | length == 0
+          # Ollama on CPU.
+          - svc['ollama-cpu'].environment.OLLAMA_KEEP_ALIVE == '10m'
+          - svc['ollama-cpu'].volumes == ['ollama-models:/root/.ollama']
+          - svc['ollama-cpu'].healthcheck.test == ['CMD', 'ollama', 'list']
+          # Broker: config via env and a read-only bind that is never auto-created; config hash label.
+          - svc['gpu-broker'].environment.GPU_BROKER_CONFIG == '/etc/gpu-broker/config.json'
+          - svc['gpu-broker'].volumes | length == 1
+          - svc['gpu-broker'].volumes[0].source == '/etc/homelab-ai/gpu-broker.json'
+          - svc['gpu-broker'].volumes[0].target == '/etc/gpu-broker/config.json'
+          - svc['gpu-broker'].volumes[0].read_only
+          - not svc['gpu-broker'].volumes[0].bind.create_host_path
+          - svc['gpu-broker'].labels['homelab.config-hash'] == ai_stack_broker_config_hash
+          - svc['gpu-broker'].labels['homelab.config-hash'] | length == 64
+          - svc['gpu-broker'].read_only
+          - svc['gpu-broker'].cap_drop == ['ALL']
+          # §12.25 S-8: no service on `ai` (or `extract`) keeps NET_RAW: no ARP spoofing of the gateway.
+          - svc['ollama-cpu'].cap_drop == ['NET_RAW']
+          - svc['open-webui'].cap_drop == ['NET_RAW']
+          - svc.values() | map(attribute='cap_drop') | map('default', []) | reject('contains', 'ALL') | reject('contains', 'NET_RAW') | list | length == 0
+          - svc.values() | selectattr('cap_add', 'defined') | list | length == 0
+          # Open WebUI: broker only, auth on, telemetry off, secret from .env, data on a named volume.
+          - webui_env.OLLAMA_BASE_URL == 'http://gpu-broker:11434'
+          - webui_env.WEBUI_AUTH == 'true'
+          - webui_env.ENABLE_SIGNUP == 'true'
+          - webui_env.DEFAULT_USER_ROLE == 'pending'
+          - webui_env.SCARF_NO_ANALYTICS == 'true'
+          - webui_env.DO_NOT_TRACK == 'true'
+          - webui_env.ANONYMIZED_TELEMETRY == 'false'
+          - webui_env.WEBUI_SECRET_KEY is not defined
+          # Document extraction (§12.18b).
+          - webui_env.CONTENT_EXTRACTION_ENGINE == 'tika'
+          - webui_env.TIKA_SERVER_URL == 'http://tika:9998'
+          - webui_env.TIKA_SERVER_VERSION == '3'
+          - webui_env.RAG_FILE_MAX_SIZE == '25'
+          - webui_env.CONTENT_EXTRACTION_SUPPORTED_MEDIA_MIME_TYPES == 'image/png,image/jpeg,image/tiff,image/bmp,image/gif'
+          # Document search (§12.22): embeddings through the broker's embed alias, 8 passages, hybrid.
+          - webui_env.RAG_EMBEDDING_ENGINE == 'ollama'
+          - webui_env.RAG_EMBEDDING_MODEL == 'embed'
+          - webui_env.RAG_OLLAMA_BASE_URL == 'http://gpu-broker:11434'
+          - webui_env.RAG_EMBEDDING_BATCH_SIZE == '16'
+          # nomic's task prefixes, each with its trailing space.
+          - webui_env.RAG_EMBEDDING_QUERY_PREFIX is match('^search_query:\\s$')
+          - webui_env.RAG_EMBEDDING_CONTENT_PREFIX is match('^search_document:\\s$')
+          - webui_env.RAG_EMBEDDING_QUERY_PREFIX[-1] == ' ' and webui_env.RAG_EMBEDDING_CONTENT_PREFIX[-1] == ' '
+          - webui_env.RAG_TOP_K == '8'
+          - webui_env.RAG_TOP_K_RERANKER == '8'
+          # Hybrid off (R10-1: with Chroma and no reranker it only repeats the vector top-k).
+          - webui_env.ENABLE_RAG_HYBRID_SEARCH == 'false'
+          # §12.30: no reranker by default, and never online to Hugging Face.
+          - webui_env.RAG_RERANKING_MODEL == ''
+          - webui_env.HF_HUB_OFFLINE == '1'
+          - webui_env.TRANSFORMERS_OFFLINE == '1'
+          - webui_env.RAG_EMBEDDING_MODEL_AUTO_UPDATE == 'false'
+          - webui_env.RAG_RERANKING_MODEL_AUTO_UPDATE == 'false'
+          - webui_env.RAG_EMBEDDING_CONCURRENT_REQUESTS == '2'
+          - webui_env.TASK_MODEL == 'assistant'
+          # Title prompt: Open WebUI's own placeholder kept literally, JSON with the "title" key asked for,
+          # and no example value or placeholder text a small model could copy.
+          - webui_env.TITLE_GENERATION_PROMPT_TEMPLATE is search('\\{\\{MESSAGES:END:2\\}\\}')
+          - webui_env.TITLE_GENERATION_PROMPT_TEMPLATE is search('"title"')
+          - webui_env.TITLE_GENERATION_PROMPT_TEMPLATE is not search('(?i)your|concise title|example|e\\.g\\.|\\.\\.\\.|<title>|\\[title\\]')
+          - >-
+            webui_env.TITLE_GENERATION_PROMPT_TEMPLATE is not search('\\{\\s*"title"\\s*:')
+          - webui_env.TITLE_GENERATION_PROMPT_TEMPLATE.splitlines() | length <= 8
+          # ollama-cpu keeps the chat and the embedding model loaded side by side.
+          - svc['ollama-cpu'].environment.OLLAMA_MAX_LOADED_MODELS == '2'
+          # §12.23 N-1: no cloud passthrough on ollama-cpu, whatever ai_stack_ollama_env says.
+          - svc['ollama-cpu'].environment.OLLAMA_NO_CLOUD == '1'
+          - svc['ollama-cpu'].environment.OLLAMA_NUM_PARALLEL == '1'
+          # Every value Ansible checks must be a string in compose (no YAML ints/bools leaking through).
+          - webui_env.values() | reject('string') | list | length == 0
+          # Tika: internal network only, unprivileged, read-only root, tmpfs /tmp, config read-only.
+          - svc['tika'].networks == ['extract']
+          - compose.networks.extract.internal
+          - compose.networks.ai.internal is not defined
+          - svc['tika'].read_only
+          - svc['tika'].cap_drop == ['ALL']
+          - svc['tika'].security_opt == ['no-new-privileges:true']
+          - svc['tika'].user is not defined
+          - svc['tika'].pids_limit == 256
+          - svc['tika'].tmpfs == ['/tmp:size=128m,uid=35002,gid=35002,mode=0700']
+          - svc['tika'].command == ['-c', '/tika-config.xml']
+          - svc['tika'].volumes | length == 1
+          - svc['tika'].volumes[0].type == 'bind'
+          - svc['tika'].volumes[0].source == '/etc/homelab-ai/tika-config.xml'
+          - svc['tika'].volumes[0].target == '/tika-config.xml'
+          - svc['tika'].volumes[0].read_only
+          - not svc['tika'].volumes[0].bind.create_host_path
+          - svc['tika'].labels['homelab.config-hash'] == ai_stack_tika_config_hash
+          - svc['tika'].labels['homelab.config-hash'] | length == 64
+          - svc['tika'].healthcheck.test[:2] == ['CMD', 'wget']
+          - svc['tika'].healthcheck.test[-1] == 'http://127.0.0.1:9998/tika'
+          # One OpenMP thread per Tesseract run, nothing else (no secrets, no proxies).
+          - svc['tika'].environment.keys() | list == ['OMP_THREAD_LIMIT']
+          - svc['tika'].environment.OMP_THREAD_LIMIT == '1'
+          # open-webui is off *common (two networks): it must keep no-new-privileges and the restart policy.
+          - svc['open-webui'].security_opt == ['no-new-privileges:true']
+          - svc['ollama-cpu'].security_opt == ['no-new-privileges:true']
+          - svc['gpu-broker'].security_opt == ['no-new-privileges:true']
+          # Networks: `ai` is the role's (external, pinned in tasks/networks.yml); `extract` is pinned here.
+          - compose.networks.ai.keys() | sort == ['external', 'name']
+          - compose.networks.ai.external is sameas true
+          - compose.networks.ai.name == 'ai_ai'
+          - compose.networks.extract.name == 'ai_extract'
+          - compose.networks.extract.ipam.config | length == 1
+          - compose.networks.extract.ipam.config[0].subnet == '172.23.255.240/28'
+          - ai_stack_network_subnet == '172.20.0.0/24'
+          - svc['tika'].env_file is not defined
+          - svc['open-webui'].env_file == ['.env']
+          - svc['open-webui'].volumes | length == 6
+          - svc['open-webui'].volumes[0] == 'open-webui-data:/app/backend/data'
+          # Skills (§12.19): read-only, a LOCAL directory (never the CIFS automount), never auto-created,
+          # rslave so the host's bind appears and disappears inside the running container.
+          - svc['open-webui'].volumes[1].type == 'bind'
+          - svc['open-webui'].volumes[1].source == '/var/lib/homelab-ai/skills'
+          - svc['open-webui'].volumes[1].target == '/skills'
+          - svc['open-webui'].volumes[1].read_only is sameas true
+          - svc['open-webui'].volumes[1].bind.create_host_path is sameas false
+          - svc['open-webui'].volumes[1].bind.propagation == 'rslave'
+          # Writing (§12.21): exactly the same bind, its own view and target.
+          - svc['open-webui'].volumes[2].type == 'bind'
+          - svc['open-webui'].volumes[2].source == '/var/lib/homelab-ai/writing'
+          - svc['open-webui'].volumes[2].target == '/writing'
+          - svc['open-webui'].volumes[2].read_only is sameas true
+          - svc['open-webui'].volumes[2].bind.create_host_path is sameas false
+          - svc['open-webui'].volumes[2].bind.propagation == 'rslave'
+          - svc['open-webui'].volumes[2].keys() | sort == svc['open-webui'].volumes[1].keys() | sort
+          # Payday runs (§12.27): the one rw bind, otherwise the same (local view, never auto-created, rslave).
+          - svc['open-webui'].volumes[3].type == 'bind'
+          - svc['open-webui'].volumes[3].source == '/var/lib/homelab-ai/payday-runs'
+          - svc['open-webui'].volumes[3].target == '/payday-runs'
+          - svc['open-webui'].volumes[3].read_only is sameas false
+          - svc['open-webui'].volumes[3].bind.create_host_path is sameas false
+          - svc['open-webui'].volumes[3].bind.propagation == 'rslave'
+          - svc['open-webui'].volumes[3].keys() | sort == svc['open-webui'].volumes[1].keys() | sort
+          - svc['open-webui'].volumes[1:] | rejectattr('read_only') | map(attribute='target') | list == ['/payday-runs']
+          # Rerankers (§12.30, R16-1): each pinned model's folder, READ-ONLY from root's seed folder on the host
+          # (outside the data volume and Docker's volumes), onto its folder in open-webui's HF cache.
+          - svc['open-webui'].volumes[4:] | map(attribute='type') | unique | list == ['bind']
+          - >-
+            svc['open-webui'].volumes[4:] | map(attribute='source') | list
+            == ['/var/lib/homelab-ai/hf-models/models--cross-encoder--ms-marco-MiniLM-L6-v2',
+                '/var/lib/homelab-ai/hf-models/models--BAAI--bge-reranker-base']
+          - >-
+            svc['open-webui'].volumes[4:] | map(attribute='target') | list
+            == ['/app/backend/data/cache/embedding/models/models--cross-encoder--ms-marco-MiniLM-L6-v2',
+                '/app/backend/data/cache/embedding/models/models--BAAI--bge-reranker-base']
+          - svc['open-webui'].volumes[4:] | map(attribute='read_only') | list == [true, true]
+          - svc['open-webui'].volumes[4:] | map(attribute='bind.create_host_path') | list == [false, false]
+          - svc['open-webui'].volumes[4:] | map(attribute='bind') | map('list') | list == [['create_host_path']] * 2
+          - svc['open-webui'].volumes[4].keys() | sort == ['bind', 'read_only', 'source', 'target', 'type']
+          - svc['open-webui'].volumes[5].keys() | sort == ['bind', 'read_only', 'source', 'target', 'type']
+          - all_volume_sources | select('match', '^/var/lib/docker') | list | length == 0
+          # No container binds anything under the library automount.
+          - all_volume_sources | select('match', '^/srv/ai-library') | list | length == 0
+          - compose.volumes.keys() | sort == ['ollama-models', 'open-webui-data']
+          - compose.networks.keys() | sort == ['ai', 'extract']
+        fail_msg: "{{ compose | to_nice_yaml }}"
+        quiet: true
+
+    - name: Render compose.yaml with no models set (no embed alias, no task model)
+      ansible.builtin.template:
+        src: "{{ ai_stack_test_role }}/templates/compose.yaml.j2"
+        dest: "{{ ai_stack_test_tmp.path }}/compose-nomodels.yaml"
+        mode: "0644"
+      vars:
+        ai_cpu_model: "{{ undef(hint='unset in this case') }}"
+        ai_gpu_model: "{{ undef(hint='unset in this case') }}"
+        ai_embed_model: "{{ undef(hint='unset in this case') }}"
+        ai_stack_tika_config_template: "{{ ai_stack_test_role }}/templates/tika-config.xml.j2"
+
+    - name: Without ai_embed_model, Open WebUI keeps its own embedding (no alias to point at, no prefixes)
+      vars:
+        env: "{{ (lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/compose-nomodels.yaml') | from_yaml).services['open-webui'].environment }}"
+      ansible.builtin.assert:
+        that:
+          - env.keys() | select('match', '^RAG_(EMBEDDING|OLLAMA)_') | reject('match', '.*_AUTO_UPDATE$') | list == []
+          # The offline switches apply with or without an embedding model.
+          - env.HF_HUB_OFFLINE == '1' and env.RAG_EMBEDDING_MODEL_AUTO_UPDATE == 'false'
+          - env.TASK_MODEL is not defined
+          - env.RAG_TOP_K == '8'
+          - env.ENABLE_RAG_HYBRID_SEARCH == 'false'
+        fail_msg: "{{ env | to_json }}"
+        quiet: true
+
+    # §12.30, experiment E3: the inventory expects hybrid search with the pre-seeded bge reranker.
+    - name: Render compose.yaml for E3 (hybrid + BAAI/bge-reranker-base)
+      ansible.builtin.template:
+        src: "{{ ai_stack_test_role }}/templates/compose.yaml.j2"
+        dest: "{{ ai_stack_test_tmp.path }}/compose-e3.yaml"
+        mode: "0644"
+      vars:
+        ai_stack_expect_hybrid_search: true
+        ai_stack_expect_reranker_model: BAAI/bge-reranker-base
+        ai_stack_tika_config_template: "{{ ai_stack_test_role }}/templates/tika-config.xml.j2"
+
+    - name: E3 seeds a fresh database with hybrid and the reranker, and the check expects the same
+      vars:
+        env: "{{ (lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/compose-e3.yaml') | from_yaml).services['open-webui'].environment }}"
+        ai_stack_expect_hybrid_search: true
+        ai_stack_expect_reranker_model: BAAI/bge-reranker-base
+      ansible.builtin.assert:
+        that:
+          - env.ENABLE_RAG_HYBRID_SEARCH == 'true'
+          - env.RAG_RERANKING_MODEL == 'BAAI/bge-reranker-base'
+          - env.HF_HUB_OFFLINE == '1'
+          - ai_stack_webui_search_expected['rag.enable_hybrid_search'] is sameas true
+          - ai_stack_webui_search_expected['rag.reranking_model'] == 'BAAI/bge-reranker-base'
+        quiet: true
+
+    - name: Render compose.yaml with sign-ups turned off
+      ansible.builtin.template:
+        src: "{{ ai_stack_test_role }}/templates/compose.yaml.j2"
+        dest: "{{ ai_stack_test_tmp.path }}/compose-nosignup.yaml"
+        mode: "0644"
+      vars:
+        ai_webui_enable_signup: false
+        ai_stack_tika_config_template: "{{ ai_stack_test_role }}/templates/tika-config.xml.j2"
+
+    - name: Sign-ups off reaches Open WebUI
+      ansible.builtin.assert:
+        that:
+          - (lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/compose-nosignup.yaml') | from_yaml)
+            .services['open-webui'].environment.ENABLE_SIGNUP == 'false'
+        quiet: true
+
+    # ---- 1b. tika-config.xml --------------------------------------------------------------------------
+    - name: Write tika-config.xml as the role does (copy of the rendered content)
+      ansible.builtin.copy:
+        content: "{{ ai_stack_tika_config_content }}"
+        dest: "{{ ai_stack_test_tmp.path }}/tika-config.xml"
+        mode: "0644"
+      vars:
+        ai_stack_tika_config_template: "{{ ai_stack_test_role }}/templates/tika-config.xml.j2"
+
+    # The same validator the role's copy task uses, plus the OCR settings read back from the XML.
+    - name: The Tika config parses and sets OCR for images and scanned PDFs
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import json, sys, xml.etree.ElementTree as e
+            root = e.parse(sys.argv[1]).getroot()
+            parsers = [p.get("class").rsplit(".", 1)[1] for p in root.find("parsers")]
+            excluded = [x.get("class").rsplit(".", 1)[1] for x in root.find("parsers")[0].findall("parser-exclude")]
+            def params(name):
+                p = [p for p in root.find("parsers") if p.get("class").endswith("." + name)][0]
+                return {x.get("name"): x.text for x in p.find("params")}
+            server = root.find("server/params")
+            print(json.dumps({"root": root.tag, "parsers": parsers, "excluded": excluded,
+                              "pdf": params("PDFParser"), "ocr": params("TesseractOCRParser"),
+                              "timeout": server.findtext("taskTimeoutMillis"),
+                              "jvm": [a.text for a in server.find("forkedJvmArgs")]}))
+          - "{{ ai_stack_test_tmp.path }}/tika-config.xml"
+      register: ai_stack_test_tika_xml
+      changed_when: false
+
+    - name: Tika config has the declared shape
+      vars:
+        x: "{{ ai_stack_test_tika_xml.stdout | from_json }}"
+        ai_stack_tika_config_template: "{{ ai_stack_test_role }}/templates/tika-config.xml.j2"
+      ansible.builtin.assert:
+        that:
+          - x.root == 'properties'
+          # DefaultParser first (minus the two), then the explicit PDF and OCR parsers, which win.
+          - x.parsers == ['DefaultParser', 'PDFParser', 'TesseractOCRParser']
+          - x.excluded | sort == ['PDFParser', 'TesseractOCRParser']
+          - x.pdf.ocrStrategy == 'auto'
+          - x.pdf.extractInlineImages == 'false'
+          - x.ocr.language == 'eng'
+          - x.ocr.skipOcr == 'false'
+          - x.ocr.timeoutSeconds == '120'
+          - x.timeout == '600000'
+          - x.jvm == ['-Xmx512m', '-XX:+ExitOnOutOfMemoryError', '-Dpdfbox.fontcache=/tmp']
+          # The label hash is the hash of exactly the installed file.
+          - ai_stack_tika_config_hash == lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/tika-config.xml', rstrip=false) | hash('sha256')
+          # Open WebUI's "Tika 3.x" API matches the pinned image's major version.
+          - images.tika is search(':' ~ ai_stack_tika_server_version ~ '\\.')
+        fail_msg: "{{ x | to_json }}"
+        quiet: true
+
+    - name: A different OCR strategy changes the config hash (so tika is recreated)
+      vars:
+        ai_stack_tika_config_template: "{{ ai_stack_test_role }}/templates/tika-config.xml.j2"
+        ai_stack_tika_pdf_ocr_strategy: ocr_and_text_extraction
+      ansible.builtin.assert:
+        that:
+          - ai_stack_tika_config_content is search('<param name="ocrStrategy" type="string">ocr_and_text_extraction</param>')
+          - ai_stack_tika_config_hash != (lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/tika-config.xml', rstrip=false) | hash('sha256'))
+        quiet: true
+
+    # ---- 1c. Open WebUI's expected document settings and the memory budget ----------------------------
+    - name: The verify step expects exactly what compose sets
+      vars:
+        env: "{{ (lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/compose.yaml') | from_yaml).services['open-webui'].environment }}"
+        want: "{{ ai_stack_webui_extraction_expected }}"
+      ansible.builtin.assert:
+        that:
+          - want.keys() | sort == ['rag.content_extraction.supported_media_mime_types', 'rag.content_extraction_engine',
+                                   'rag.file.max_size', 'rag.tika_server_url', 'rag.tika_server_version']
+          - want['rag.content_extraction_engine'] == env.CONTENT_EXTRACTION_ENGINE
+          - want['rag.tika_server_url'] == env.TIKA_SERVER_URL
+          - want['rag.tika_server_version'] == env.TIKA_SERVER_VERSION
+          - want['rag.file.max_size'] | int == env.RAG_FILE_MAX_SIZE | int == 25
+          - want['rag.content_extraction.supported_media_mime_types'] | join(',') == env.CONTENT_EXTRACTION_SUPPORTED_MEDIA_MIME_TYPES
+        fail_msg: "{{ [want, env] | to_json }}"
+        quiet: true
+
+    - name: Memory budget arithmetic (MiB)
+      ansible.builtin.assert:
+        that:
+          - >-
+            ai_stack_mem_containers_mb == {'ollama_cpu': 5120, 'gpu_broker': 256, 'open_webui': 4096,
+                                           'tika': 1024, 'searxng': 384}
+          # ai-control, research-gate, finance-digest, skill-drafter, voice-profile, forge-api, ai-backup (256M
+          # MemoryMax each), mission-control and its briefing (128M each)
+          # + host daemons.
+          - ai_stack_mem_host_services.keys() | sort == ['ai_backup', 'ai_control', 'finance_digest', 'forge_api',
+                                                         'host_daemons', 'mission_control', 'mission_control_briefing',
+                                                         'research_gate', 'skill_drafter', 'voice_profile']
+          - ai_stack_mem_host_services.mission_control == '128m'
+          - ai_stack_mem_host_services.mission_control_briefing == '128m'
+          - ai_stack_mem_host_reserve_mb | int == 2816
+          - ai_stack_mem_needed_mb | int == 13696
+          - ai_stack_mem_overcommit_mb | int == 0
+        fail_msg: "{{ [ai_stack_mem_containers_mb, ai_stack_mem_needed_mb] | to_json }}"
+        quiet: true
+
+    # The preflight assert itself, against a 7.1 GiB host (7270 MiB here; ai-box's real MemTotal, 7305 MiB, is
+    # the inventory case further down).
+    - name: The role's default limits, for the budget cases that override one
+      ansible.builtin.set_fact:
+        ai_stack_test_default_limits: "{{ ai_stack_mem_limits }}"
+
+    - name: Memory budget refuses an unacknowledged overcommit on a 7.1 GiB host
+      ansible.builtin.include_tasks: budget_case.yml
+      vars:
+        budget_memtotal: 7270
+        budget_overcommit: 0
+        budget_expect_ok: false
+
+    - name: Memory budget passes once the overcommit is acknowledged
+      ansible.builtin.include_tasks: budget_case.yml
+      vars:
+        budget_memtotal: 7270
+        budget_overcommit: 6426
+        budget_expect_ok: true
+
+    - name: Memory budget refuses one MiB short of the accepted overcommit
+      ansible.builtin.include_tasks: budget_case.yml
+      vars:
+        budget_memtotal: 7270
+        budget_overcommit: 6425
+        budget_expect_ok: false
+
+    # The ai-box inventory since its RAM upgrade (§12.30): MemTotal 15357 MiB, no overcommit, open_webui 4g:
+    # 13696 MiB needed <= 15357 + 0.
+    - name: Memory budget passes with the ai-box inventory (15357 MiB, open_webui 4g, overcommit 0)
+      ansible.builtin.include_tasks: budget_case.yml
+      vars:
+        budget_memtotal: 15357
+        budget_overcommit: 0
+        budget_limits: {open_webui: 4096m}
+        budget_expect_ok: true
+
+    - name: Memory budget refuses open_webui 5.7g on that host (one MiB over RAM)
+      ansible.builtin.include_tasks: budget_case.yml
+      vars:
+        budget_memtotal: 15357
+        budget_overcommit: 0
+        budget_limits: {open_webui: 5758m}
+        budget_expect_ok: false
+
+    - name: Memory budget passes on a host with room (16 GiB)
+      ansible.builtin.include_tasks: budget_case.yml
+      vars:
+        budget_memtotal: 15900
+        budget_overcommit: 0
+        budget_expect_ok: true
+
+    # ---- 1d. The task files are wired in (static: a dropped import would otherwise go unnoticed) ---------
+    - name: Read the role's task files
+      ansible.builtin.set_fact:
+        ai_stack_test_main_tasks: "{{ lookup('ansible.builtin.file', ai_stack_test_role ~ '/tasks/main.yml') | from_yaml }}"
+        ai_stack_test_preflight_tasks: "{{ lookup('ansible.builtin.file', ai_stack_test_role ~ '/tasks/preflight.yml') | from_yaml }}"
+
+    - name: Preflight imports the memory budget; main imports the networks (before compose) and the checks (last)
+      vars:
+        # The key has dots, so no map(attribute=...): a loop reads it.
+        main_imports: >-
+          {%- set out = [] -%}
+          {%- for t in ai_stack_test_main_tasks -%}{%- set _ = out.append(t['ansible.builtin.import_tasks'] | default('')) -%}{%- endfor -%}
+          {{ out }}
+        preflight_imports: >-
+          {%- set out = [] -%}
+          {%- for t in ai_stack_test_preflight_tasks -%}{%- set _ = out.append(t['ansible.builtin.import_tasks'] | default('')) -%}{%- endfor -%}
+          {{ out }}
+        guarded_imports: >-
+          {%- set out = [] -%}
+          {%- for t in ai_stack_test_main_tasks + ai_stack_test_preflight_tasks -%}
+          {%- if 'ansible.builtin.import_tasks' in t and 'when' in t -%}{%- set _ = out.append(t.name) -%}{%- endif -%}
+          {%- endfor -%}
+          {{ out }}
+        main_names: "{{ ai_stack_test_main_tasks | map(attribute='name') | list }}"
+      ansible.builtin.assert:
+        that:
+          - preflight_imports is contains('memory_budget.yml')
+          - preflight_imports is contains('broker_num_ctx_check.yml')
+          - main_imports | select | list
+            == ['preflight.yml', 'broker_image.yml', 'networks.yml', 'skills.yml', 'hf_models.yml', 'boot_helper.yml',
+                'stack.yml', 'models.yml', 'verify_skills.yml', 'verify_extraction.yml', 'verify_search.yml',
+                'verify_broker.yml']
+          # §12.30 (R16-1): the rerankers are seeded before the Compose definition and compose up (the binds'
+          # sources exist then, and create_host_path is false).
+          - main_imports.index('hf_models.yml') < main_names.index('Compose definition')
+          - main_imports.index('hf_models.yml') < main_imports.index('stack.yml')
+          - main_imports.index('networks.yml') < main_names.index('Compose definition')
+          - main_imports.index('skills.yml') < main_imports.index('stack.yml')
+          - main_imports.index('verify_skills.yml') > main_imports.index('stack.yml')
+          - main_imports[-1] == 'verify_broker.yml'
+          # No import in main.yml or preflight.yml is switched off by a `when:`.
+          - guarded_imports | length == 0
+        fail_msg: "{{ [main_imports, preflight_imports] | to_json }}"
+        quiet: true
+
+    # ---- 1e. The `ai` network task can never recreate, relabel or empty the live network -----------------
+    - name: Read tasks/networks.yml
+      ansible.builtin.set_fact:
+        ai_stack_test_net_tasks: "{{ lookup('ansible.builtin.file', ai_stack_test_role ~ '/tasks/networks.yml') | from_yaml }}"
+
+    - name: The docker_network task has exactly the safe arguments, after both read-only checks
+      vars:
+        # Module keys have dots, so a loop reads them.
+        net_idx: >-
+          {%- set out = [] -%}
+          {%- for t in ai_stack_test_net_tasks -%}
+          {%- if 'community.docker.docker_network' in t or 'docker_network' in t -%}{%- set _ = out.append(loop.index0) -%}{%- endif -%}
+          {%- endfor -%}
+          {{ out }}
+        net_task: "{{ ai_stack_test_net_tasks[net_idx[0]] }}"
+        net_args: "{{ net_task['community.docker.docker_network'] | default({}) }}"
+        names: "{{ ai_stack_test_net_tasks | map(attribute='name') | list }}"
+      ansible.builtin.assert:
+        that:
+          - net_idx | length == 1
+          - net_task['community.docker.docker_network'] is mapping
+          # Exactly these keys: no force, labels, driver_options, enable_ipv4/6, internal, attachable, ...
+          - net_args.keys() | sort == ['appends', 'driver', 'ipam_config', 'name', 'state']
+          - net_args.name == '{{ "{{" }} ai_stack_network_name {{ "}}" }}'
+          - net_args.driver == 'bridge'
+          - net_args.ipam_config | length == 1
+          - net_args.ipam_config[0].keys() | list == ['subnet']
+          - net_args.ipam_config[0].subnet == '{{ "{{" }} ai_stack_network_subnet {{ "}}" }}'
+          - net_args.appends is sameas true
+          - net_args.state == 'present'
+          # Task-level switches that could bypass it or hide a failure.
+          - net_task.keys() | sort == ['community.docker.docker_network', 'name']
+          # The two read-only checks (address plan, live networks) run first, and nothing else changes state.
+          - names.index('Networks | the pinned subnets fit role docker\'s address plan') < net_idx[0]
+          - names.index('Networks | the host\'s networks agree with the pinned subnets') < net_idx[0]
+          - net_idx[0] == ai_stack_test_net_tasks | length - 1
+        fail_msg: "{{ net_task | default({}) | to_json }}"
+        quiet: true
+
+    # ---- 1f. Read-only shares (skills §12.19, writing §12.21): CIFS mounts and the reconcile timer --------
+    - name: The read-only shares are skills and writing, each with its own view, target, marker and unit
+      vars:
+        shares: "{{ ai_stack_ro_shares }}"
+      ansible.builtin.assert:
+        that:
+          - shares | map(attribute='name') | list == ['skills', 'writing', 'payday-runs']
+          - shares | map(attribute='what') | list
+            == ['//100.64.0.20/ai-library/30-skills', '//100.64.0.20/ai-library/40-writing',
+                '//100.64.0.20/ai-library/50-finance/payday-runs']
+          - shares | map(attribute='view') | list
+            == ['/var/lib/homelab-ai/skills', '/var/lib/homelab-ai/writing', '/var/lib/homelab-ai/payday-runs']
+          - shares | map(attribute='target') | list == ['/skills', '/writing', '/payday-runs']
+          - shares | map(attribute='marker') | list == ['SKILLS-NOT-MOUNTED', 'WRITING-NOT-MOUNTED', 'PAYDAY-RUNS-NOT-MOUNTED']
+          - shares | map(attribute='mount_unit') | list
+            == ['var-lib-homelab' ~ ai_stack_systemd_escaped_dash ~ 'ai-skills.mount',
+                'var-lib-homelab' ~ ai_stack_systemd_escaped_dash ~ 'ai-writing.mount',
+                'var-lib-homelab' ~ ai_stack_systemd_escaped_dash ~ 'ai-payday' ~ ai_stack_systemd_escaped_dash ~ 'runs.mount']
+          - shares | map(attribute='view') | unique | list | length == 3
+          - shares | map(attribute='mount_unit') | unique | list | length == 3
+          # §12.27: exactly one read-write share, the payday-runs subfolder; the others stay read-only.
+          - shares | map(attribute='mode') | list == ['ro', 'ro', 'rw']
+        quiet: true
+
+    - name: Render each share's mount unit
+      ansible.builtin.template:
+        src: "{{ ai_stack_test_role }}/templates/homelab-ai-share.mount.j2"
+        dest: "{{ ai_stack_test_tmp.path }}/{{ share.mount_unit }}"
+        mode: "0644"
+      loop: "{{ ai_stack_ro_shares }}"
+      loop_control:
+        loop_var: share
+        label: "{{ share.name }}"
+
+    - name: Render the reconcile service and timer units
+      ansible.builtin.template:
+        src: "{{ ai_stack_test_role }}/templates/{{ item.src }}"
+        dest: "{{ ai_stack_test_tmp.path }}/{{ item.dest }}"
+        mode: "0644"
+      loop:
+        - {src: homelab-ai-skills-reconcile.service.j2, dest: "{{ ai_stack_skills_reconcile_unit }}"}
+        - {src: homelab-ai-skills.timer.j2, dest: "{{ ai_stack_skills_timer_unit }}"}
+      loop_control:
+        label: "{{ item.dest }}"
+
+    - name: Write a stand-in for the library's tailnet wait unit
+      ansible.builtin.copy:
+        content: "[Unit]\nDescription=stand-in\n[Service]\nType=oneshot\nExecStart=/bin/true\n"
+        dest: "{{ ai_stack_test_tmp.path }}/{{ ai_stack_skills_wait_unit }}"
+        mode: "0644"
+
+    - name: Ask systemd-escape for each share's unit name, where it exists
+      ansible.builtin.command:
+        argv: [systemd-escape, --path, --suffix=mount, "{{ share.view }}"]
+      loop: "{{ ai_stack_ro_shares }}"
+      loop_control:
+        loop_var: share
+        label: "{{ share.name }}"
+      register: ai_stack_test_escape
+      changed_when: false
+      failed_when: false
+
+    - name: Systemd-analyze verify the share units, where it exists
+      ansible.builtin.command:
+        argv: >-
+          {{ ['systemd-analyze', 'verify']
+             + (ai_stack_ro_shares | map(attribute='mount_unit') | map('regex_replace', '^', ai_stack_test_tmp.path ~ '/') | list)
+             + [ai_stack_test_tmp.path ~ '/' ~ ai_stack_skills_timer_unit,
+                ai_stack_test_tmp.path ~ '/' ~ ai_stack_skills_reconcile_unit,
+                ai_stack_test_tmp.path ~ '/' ~ ai_stack_skills_wait_unit] }}
+      register: ai_stack_test_analyze
+      changed_when: false
+      failed_when: false
+
+    - name: Each share is its own read-only CIFS mount, never enabled, never tied to the library mount
+      vars:
+        mount_lines: >-
+          {{ lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/' ~ share.mount_unit).splitlines()
+             | reject('match', '^\\s*(#|$)') | list }}
+        opts: "{{ (mount_lines | select('match', '^Options=') | first)[8:].split(',') }}"
+        escaped: "{{ ai_stack_test_escape.results | selectattr('share.name', 'equalto', share.name) | first }}"
+      ansible.builtin.assert:
+        that:
+          - escaped.rc != 0 or escaped.stdout == share.mount_unit
+          # Any stderr line fails, except systemd's warnings about the machine's own unit files (ubuntu-latest's newer systemd:
+          # "<host unit dir>/x.service:26: Support for option CPUAccounting= has been removed") that name no unit verified here.
+          # Not caught: a host drop-in for a template or prefix of ours (foo@.service.d, foo-.service.d); a CI runner has none.
+          - >-
+            ai_stack_test_analyze.rc == 127 or ai_stack_test_analyze.rc is undefined
+            or (ai_stack_test_analyze.rc == 0
+            and ai_stack_test_analyze.stderr_lines | reject('match', '(/usr/lib|/lib|/etc|/run)/systemd/[^:]+:[0-9]+: ') | list | length == 0
+            and ai_stack_test_analyze.stderr_lines | select('search', ai_stack_test_analyze.cmd[2:] | map('basename') | map('regex_escape')
+            | join('|')) | list | length == 0)
+          - ('What=' ~ share.what) in mount_lines
+          - ('Where=' ~ share.view) in mount_lines
+          - "'Type=cifs' in mount_lines"
+          - "'TimeoutSec=60' in mount_lines"
+          # A stop while the PC is away never hangs, and the unmount propagates into open-webui.
+          - "'LazyUnmount=yes' in mount_lines"
+          - "'ForceUnmount=yes' in mount_lines"
+          - share.mode != 'ro' or opts
+            == ['ro', 'nosuid', 'nodev', 'noexec', 'vers=3.1.1', 'seal', 'nounix', 'serverino', 'symlink=none',
+                'soft', 'echo_interval=15', 'uid=0', 'gid=0', 'file_mode=0440', 'dir_mode=0550',
+                'credentials=/etc/ai-library/credentials', '_netdev']
+          # The read-write share: rw, files 0640 and folders 0750, everything else the same.
+          - share.mode != 'rw' or opts
+            == ['rw', 'nosuid', 'nodev', 'noexec', 'vers=3.1.1', 'seal', 'nounix', 'serverino', 'symlink=none',
+                'soft', 'echo_interval=15', 'uid=0', 'gid=0', 'file_mode=0640', 'dir_mode=0750',
+                'credentials=/etc/ai-library/credentials', '_netdev']
+          - opts | select('match', '^(suid|dev|exec|password=|username=|noperm|mfsymlinks)') | list == []
+          - share.mode == 'rw' or 'rw' not in opts
+          # Ordered after the library client's tailnet wait; nothing about the library mount itself.
+          - "'Requires=ai-library-tailnet-wait.service' in mount_lines"
+          - "'After=ai-library-tailnet-wait.service tailscaled.service network-online.target' in mount_lines"
+          - mount_lines | select('search', 'ai\\\\x2dlibrary|/srv/ai-library') | list == []
+          # Not enabled, no automount: only the reconcile starts it (open-webui's bind would fire an automount).
+          - mount_lines | select('match', '^(\\[Install\\]|WantedBy=|RequiredBy=)') | list == []
+        fail_msg: "{{ [share.name, mount_lines, ai_stack_test_analyze.stderr | default('')] | to_json }}"
+        quiet: true
+      loop: "{{ ai_stack_ro_shares }}"
+      loop_control:
+        loop_var: share
+        label: "{{ share.name }}"
+
+    - name: One reconcile service and timer for every share
+      vars:
+        timer_lines: >-
+          {{ lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/' ~ ai_stack_skills_timer_unit).splitlines()
+             | reject('match', '^\\s*(#|$)') | list }}
+        svc_lines: >-
+          {{ lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/' ~ ai_stack_skills_reconcile_unit).splitlines()
+             | reject('match', '^\\s*(#|$)') | list }}
+      ansible.builtin.assert:
+        that:
+          - ai_stack_skills_mount_unit == 'var-lib-homelab\\x2dai-skills.mount'
+          - ai_stack_writing_mount_unit == 'var-lib-homelab\\x2dai-writing.mount'
+          - ai_stack_skills_timer_unit == 'homelab-ai-skills-reconcile.timer'
+          - ai_stack_skills_legacy_wants == '/etc/systemd/system/srv-ai' ~ ai_stack_systemd_escaped_dash ~ 'library.mount.wants/' ~ ai_stack_skills_mount_unit
+          # The timer drives the reconcile service, never a mount: 30 s after boot/start, then every minute.
+          - "'Unit=homelab-ai-skills-reconcile.service' in timer_lines"
+          - "'WantedBy=timers.target' in timer_lines"
+          - timer_lines | select('match', '^On') | list == ['OnBootSec=30s', 'OnActiveSec=30s', 'OnUnitActiveSec=1min']
+          # The reconcile service: one bounded pass over every share, root, network limited to the PC.
+          - "'Type=oneshot' in svc_lines"
+          - >-
+            ('ExecStart=/usr/bin/python3 -I -B /usr/local/lib/homelab-ai/skills_reconcile.py --host 100.64.0.20'
+             ~ ' --port 445 --timeout 4 --where /var/lib/homelab-ai/skills --where /var/lib/homelab-ai/writing'
+             ~ ' --where /var/lib/homelab-ai/payday-runs') in svc_lines
+          - "'IPAddressDeny=any' in svc_lines"
+          - "'IPAddressAllow=100.64.0.20' in svc_lines"
+          - "'RestrictAddressFamilies=AF_UNIX AF_INET' in svc_lines"
+          - "'NoNewPrivileges=yes' in svc_lines"
+          - "'ProtectSystem=strict' in svc_lines"
+          - svc_lines | select('match', '^(\\[Install\\]|WantedBy=)') | list == []
+        fail_msg: "{{ [timer_lines, svc_lines] | to_json }}"
+        quiet: true
+
+    - name: Read tasks/skills.yml
+      ansible.builtin.set_fact:
+        ai_stack_test_skills_tasks: "{{ lookup('ansible.builtin.file', ai_stack_test_role ~ '/tasks/skills.yml') | from_yaml }}"
+
+    # ---- 1g. Probes, marker, credentials preflight, and /skills read-only inside the container -------------
+    - name: Search the role's task files for mountpoint
+      ansible.builtin.command:
+        argv: [grep, -l, -w, -r, --include=*.yml, mountpoint, "{{ ai_stack_test_role }}/tasks"]
+      register: ai_stack_test_mountpoint_grep
+      changed_when: false
+      failed_when: ai_stack_test_mountpoint_grep.rc > 1
+
+    # The one command in skills.yml is the probe that can't stat or mount anything, exactly.
+    - name: The share probe is exactly systemctl is-active --quiet on each mount unit (never a stat)
+      vars:
+        commands: >-
+          {%- set out = [] -%}
+          {%- for t in ai_stack_test_skills_tasks -%}
+          {%- for k in ['ansible.builtin.command', 'command', 'ansible.builtin.shell', 'shell', 'ansible.builtin.raw', 'raw',
+                        'ansible.builtin.script', 'script'] -%}
+          {%- if k in t -%}{%- set _ = out.append({'name': t.name, 'module': k, 'args': t[k]}) -%}{%- endif -%}
+          {%- endfor -%}
+          {%- endfor -%}
+          {{ out }}
+        modules: >-
+          {%- set out = [] -%}
+          {%- for t in ai_stack_test_skills_tasks -%}
+          {%- set _ = out.append(t.keys() | select('match', '^ansible\.builtin\.') | list | first | default('?')) -%}
+          {%- endfor -%}
+          {{ out }}
+        services: >-
+          {%- set out = [] -%}
+          {%- for t in ai_stack_test_skills_tasks -%}
+          {%- if 'ansible.builtin.systemd_service' in t -%}{%- set _ = out.append(t) -%}{%- endif -%}
+          {%- endfor -%}
+          {{ out }}
+        file_task: "{{ ai_stack_test_skills_tasks | selectattr('name', 'equalto', 'Skills | local view directory per share (what open-webui binds)') | first }}"
+        probe_task: "{{ ai_stack_test_skills_tasks[0] }}"
+        marker_task: "{{ ai_stack_test_skills_tasks | selectattr('name', 'search', '^Skills \\| marker the tool sees') | first }}"
+        legacy_task: "{{ ai_stack_test_skills_tasks | selectattr('name', 'equalto', 'Skills | no leftover link from the library mount') | first }}"
+        stat_task: "{{ ai_stack_test_skills_tasks | selectattr('name', 'search', 'current marker') | first }}"
+        unlock_task: "{{ ai_stack_test_skills_tasks | selectattr('name', 'search', 'unlock an outdated marker') | first }}"
+        lock_marker: "{{ ai_stack_test_skills_tasks | selectattr('name', 'search', 'marker immutable') | first }}"
+        lock_dir: "{{ ai_stack_test_skills_tasks | selectattr('name', 'search', 'local directory immutable') | first }}"
+        task_names: "{{ ai_stack_test_skills_tasks | map(attribute='name') | list }}"
+      ansible.builtin.assert:
+        that:
+          # The probe, and one chattr -i (a read-write share's outdated marker, only while it isn't mounted).
+          - commands | length == 2
+          - commands[1].args.argv[:2] == ['chattr', '-i']
+          # Only an outdated marker is unlocked (a re-run with the same text changes nothing).
+          - >-
+            unlock_task.when == ['item.stat is defined', 'item.stat.exists',
+                                 "item.stat.checksum != (ai_stack_share_marker_text | hash('sha1'))"]
+          - stat_task.when == ['item.rc != 0', "item.share.mode == 'rw'"]
+          # The fail-safe: marker, then directory, immutable while the read-write share isn't mounted.
+          - lock_marker['ansible.builtin.file'].attributes == '+i'
+          - lock_dir['ansible.builtin.file'].attributes == '+i'
+          - lock_marker['ansible.builtin.file'].path == '{{ "{{" }} item.share.view {{ "}}" }}/{{ "{{" }} item.share.marker {{ "}}" }}'
+          - lock_dir['ansible.builtin.file'].path == '{{ "{{" }} item.share.view {{ "}}" }}'
+          - lock_marker.when == ['item.rc != 0', "item.share.mode == 'rw'"]
+          - lock_dir.when == lock_marker.when
+          - task_names.index(marker_task.name) < task_names.index(lock_marker.name) < task_names.index(lock_dir.name)
+          - task_names.index(unlock_task.name) < task_names.index(marker_task.name)
+          # No task file of the role uses `mountpoint` (it stats the path; a stale soft mount would hang it).
+          - ai_stack_test_mountpoint_grep.rc == 1
+          - ai_stack_test_mountpoint_grep.stdout == ''
+          - commands[0].module == 'ansible.builtin.command'
+          - commands[0].args.keys() | list == ['argv']
+          - commands[0].args.argv == ['systemctl', 'is-active', '--quiet', '{{ "{{" }} share.mount_unit {{ "}}" }}']
+          - ai_stack_test_skills_tasks[0].name == commands[0].name
+          - commands[0].name == probe_task.name
+          # The probe runs for EVERY share, before anything else; the marker and directory read its results.
+          - probe_task.loop == '{{ "{{" }} ai_stack_ro_shares {{ "}}" }}'
+          - probe_task.loop_control.loop_var == 'share'
+          - probe_task.register == 'ai_stack_ro_share_active'
+          - probe_task.failed_when is sameas false
+          - modules | unique | sort == ['ansible.builtin.command', 'ansible.builtin.copy', 'ansible.builtin.file',
+                                        'ansible.builtin.stat', 'ansible.builtin.systemd_service', 'ansible.builtin.template']
+          # The leftover round-3 link is removed.
+          - legacy_task['ansible.builtin.file'].path == '{{ "{{" }} ai_stack_skills_legacy_wants {{ "}}" }}'
+          - legacy_task['ansible.builtin.file'].state == 'absent'
+          - legacy_task.when is not defined
+          # The play starts the TIMER; the mount itself is only ever stopped, and only while it is active.
+          - services | length == 2
+          - services[0]['ansible.builtin.systemd_service'].name == '{{ "{{" }} ai_stack_skills_timer_unit {{ "}}" }}'
+          - services[0]['ansible.builtin.systemd_service'].state == 'started'
+          - services[0]['ansible.builtin.systemd_service'].enabled is sameas true
+          - services[0].when is not defined
+          - services[1]['ansible.builtin.systemd_service'].name == '{{ "{{" }} item.0.share.mount_unit {{ "}}" }}'
+          - services[1].loop == '{{ "{{" }} ai_stack_ro_share_active.results | zip(ai_stack_ro_share_units.results) | list {{ "}}" }}'
+          - services[1]['ansible.builtin.systemd_service'].keys() | sort == ['name', 'state']
+          - services[1]['ansible.builtin.systemd_service'].state == 'stopped'
+          - services[1].when == ['item.0.rc == 0', 'item.1 is changed']
+          - ai_stack_test_skills_tasks[-1].name == services[1].name
+          # The marker and the directory's mode are only written while nothing is mounted on top.
+          - marker_task.when == 'item.rc != 0'
+          - marker_task.loop == '{{ "{{" }} ai_stack_ro_share_active.results {{ "}}" }}'
+          - marker_task['ansible.builtin.copy'].dest == '{{ "{{" }} item.share.view {{ "}}" }}/{{ "{{" }} item.share.marker {{ "}}" }}'
+          - file_task.when == 'item.rc != 0'
+          - file_task.loop == '{{ "{{" }} ai_stack_ro_share_active.results {{ "}}" }}'
+          - file_task['ansible.builtin.file'].path == '{{ "{{" }} item.share.view {{ "}}" }}'
+        fail_msg: "{{ [commands, modules] | to_json }}"
+        quiet: true
+
+    - name: Preflight imports the AI Library client check (no fd-based-mount check any more)
+      vars:
+        pf_text: "{{ lookup('ansible.builtin.file', ai_stack_test_role ~ '/tasks/preflight.yml') }}"
+        pf_tasks: "{{ pf_text | from_yaml }}"
+      ansible.builtin.assert:
+        that:
+          - pf_tasks | selectattr('name', 'equalto', 'Preflight | AI Library client prerequisites for the skills mount')
+            | map(attribute='ansible.builtin.import_tasks', default='') | list | length == 1
+          - pf_text is search('import_tasks. skills_prereqs.yml')
+          - pf_text is not search('fd-based')
+        quiet: true
+
+    - name: Scratch credentials and wait unit files
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "{{ ai_stack_test_tmp.path }}/{{ item.name }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - {name: cred-0600, mode: "0600", content: "username=x\n"}
+        - {name: cred-0644, mode: "0644", content: "username=x\n"}
+        - {name: wait.service, mode: "0644", content: "[Unit]\n"}
+
+    - name: Scratch directory in place of the credentials file
+      ansible.builtin.file:
+        path: "{{ ai_stack_test_tmp.path }}/cred-dir"
+        state: directory
+        mode: "0700"
+
+    - name: Who runs the tests (owner of the scratch files)
+      ansible.builtin.stat:
+        path: "{{ ai_stack_test_tmp.path }}/cred-0600"
+      register: ai_stack_test_cred_stat
+
+    - name: Credentials preflight cases
+      ansible.builtin.include_tasks: prereq_case.yml
+      loop:
+        - {name: good, cred: cred-0600, wait: wait.service, owner: "{{ ai_stack_test_cred_stat.stat.pw_name }}", ok: true}
+        - {name: wrong-owner, cred: cred-0600, wait: wait.service, owner: root, ok: false}
+        - {name: mode-0644, cred: cred-0644, wait: wait.service, owner: "{{ ai_stack_test_cred_stat.stat.pw_name }}", ok: false}
+        - {name: missing, cred: nope, wait: wait.service, owner: "{{ ai_stack_test_cred_stat.stat.pw_name }}", ok: false}
+        - {name: a-directory, cred: cred-dir, wait: wait.service, owner: "{{ ai_stack_test_cred_stat.stat.pw_name }}", ok: false}
+        - {name: no-wait-unit, cred: cred-0600, wait: nope.service, owner: "{{ ai_stack_test_cred_stat.stat.pw_name }}", ok: false}
+      loop_control:
+        loop_var: prereq_case
+        label: "{{ prereq_case.name }}"
+
+    - name: The skills verify reads the container first, the host second, and retries once (outside check mode)
+      vars:
+        vs_tasks: "{{ lookup('ansible.builtin.file', ai_stack_test_role ~ '/tasks/verify_skills.yml') | from_yaml }}"
+        vs_block: "{{ vs_tasks[0].block }}"
+        vs_rescue: "{{ vs_tasks[0].rescue }}"
+        vs_modules: >-
+          {%- set out = [] -%}
+          {%- for t in vs_block + vs_rescue -%}
+          {%- set _ = out.append(t.keys() | select('match', '^(ansible\.builtin|community\.docker)\.') | list | first | default('?')) -%}
+          {%- endfor -%}
+          {{ out }}
+        probe_argv: ['systemctl', 'is-active', '--quiet', '{{ "{{" }} share.mount_unit {{ "}}" }}']
+      ansible.builtin.assert:
+        that:
+          - vs_tasks | length == 3
+          - vs_tasks[0].when == 'not ansible_check_mode'
+          # §12.27: after the block, the read-write shares' local directories (lsattr, only while not mounted).
+          - vs_tasks[1]['ansible.builtin.command'].argv == ['lsattr', '-d', '{{ "{{" }} item.share.view {{ "}}" }}']
+          - vs_tasks[1].when == ['not ansible_check_mode', "item.share.mode | default('ro') == 'rw'", 'item.rc != 0']
+          - vs_tasks[1].loop == '{{ "{{" }} ai_stack_ro_share_now.results | default([]) {{ "}}" }}'
+          - vs_tasks[2]['ansible.builtin.include_tasks'] == 'verify_rw_failsafe_assert.yml'
+          - vs_tasks[2].when == 'not ansible_check_mode'
+          - vs_tasks[0].always is not defined
+          # block and rescue: container table, host state, assert; same order, same probes.
+          - vs_modules == ['community.docker.docker_container_exec', 'ansible.builtin.command', 'ansible.builtin.include_tasks'] * 2
+          - vs_block[0]['community.docker.docker_container_exec'].container == 'open-webui'
+          - vs_block[0]['community.docker.docker_container_exec'].argv == ['cat', '/proc/1/mountinfo']
+          - vs_rescue[0]['community.docker.docker_container_exec'] == vs_block[0]['community.docker.docker_container_exec']
+          - vs_block[1]['ansible.builtin.command'].argv == probe_argv
+          - vs_rescue[1]['ansible.builtin.command'].argv == probe_argv
+          - vs_block[2]['ansible.builtin.include_tasks'] == 'verify_skills_assert.yml'
+          - vs_rescue[2]['ansible.builtin.include_tasks'] == 'verify_skills_assert.yml'
+          # Every share: the probe loops over all of them, and the assert over every probe result.
+          - vs_block[1].loop == '{{ "{{" }} ai_stack_ro_shares {{ "}}" }}' and vs_rescue[1].loop == vs_block[1].loop
+          - vs_block[2].loop == '{{ "{{" }} ai_stack_ro_share_now.results {{ "}}" }}' and vs_rescue[2].loop == vs_block[2].loop
+          - vs_block[2].loop_control.loop_var == 'share_now' and vs_rescue[2].loop_control.loop_var == 'share_now'
+          # Only the probe may not fail; nothing ignores errors, nothing else is conditional.
+          - (vs_block + vs_rescue) | selectattr('ignore_errors', 'defined') | list | length == 0
+          - (vs_block + vs_rescue) | selectattr('when', 'defined') | list | length == 0
+          - (vs_block + vs_rescue) | selectattr('failed_when', 'defined') | map(attribute='failed_when') | list == [false, false]
+          - vs_rescue[2].rescue is not defined
+        fail_msg: "{{ vs_modules | to_json }}"
+        quiet: true
+
+    - name: /skills ro check, library not mounted, Docker's ro bind on top
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: unmounted-ro
+        case_view_rc: 32
+        case_expect_ok: true
+        case_lines:
+          - "1500 1400 8:1 /var/lib/homelab-ai/skills /skills ro,relatime master:1 - ext4 /dev/sda1 rw"
+
+    - name: /skills ro check, skills mounted with every flag (fd-based)
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: mounted-fd
+        case_view_rc: 0
+        case_expect_ok: true
+        case_lines:
+          - "1500 1400 8:1 /var/lib/homelab-ai/skills /skills ro,relatime master:1 - ext4 /dev/sda1 rw"
+          - "1600 1500 0:60 /30-skills /skills ro,nosuid,nodev,noexec,relatime master:9 - cifs //pc/ai-library rw,vers=3.1.1"
+
+    - name: /skills ro check, skills mounted rw (classic mount(2) path) fails
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: mounted-classic
+        case_view_rc: 0
+        case_expect_ok: false
+        case_lines:
+          - "1500 1400 8:1 /var/lib/homelab-ai/skills /skills ro,relatime master:1 - ext4 /dev/sda1 rw"
+          - "1600 1500 0:60 /30-skills /skills rw,nosuid,nodev,noexec,relatime master:9 - cifs //pc/ai-library rw"
+
+    - name: /skills ro check, skills mounted ro but missing noexec fails
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: mounted-exec
+        case_view_rc: 0
+        case_expect_ok: false
+        case_lines:
+          - "1500 1400 8:1 /var/lib/homelab-ai/skills /skills ro,relatime master:1 - ext4 /dev/sda1 rw"
+          - "1600 1500 0:60 /30-skills /skills ro,nosuid,nodev,relatime master:9 - cifs //pc/ai-library rw"
+
+    - name: /skills ro check, host mounted but nothing propagated into the container fails
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: not-propagated
+        case_view_rc: 0
+        case_expect_ok: false
+        # Docker's bind of the local view, without nosuid/nodev/noexec, on top while the host mount is active.
+        case_lines:
+          - "1500 1400 8:1 /var/lib/homelab-ai/skills /skills ro,relatime - ext4 /dev/sda1 rw"
+
+    - name: /skills ro check, ONE mount, the CIFS mount itself (mounted before the container was created)
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: single-cifs
+        case_view_rc: 0
+        case_expect_ok: true
+        # Live on ai-box 2026-10-27: Docker's bind of the view captured the active CIFS mount.
+        case_lines:
+          - "1500 1400 0:60 / /skills ro,nosuid,nodev,noexec,relatime master:9 - cifs //100.64.0.20/ai-library/30-skills ro,vers=3.1.1"
+
+    - name: /skills ro check, ONE mount, the CIFS mount but rw, fails
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: single-cifs-rw
+        case_view_rc: 0
+        case_expect_ok: false
+        case_lines:
+          - "1500 1400 0:60 / /skills rw,nosuid,nodev,noexec,relatime master:9 - cifs //100.64.0.20/ai-library/30-skills rw"
+
+    - name: /skills ro check, ONE mount, the CIFS mount without noexec, fails
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: single-cifs-exec
+        case_view_rc: 0
+        case_expect_ok: false
+        case_lines:
+          - "1500 1400 0:60 / /skills ro,nosuid,nodev,relatime master:9 - cifs //100.64.0.20/ai-library/30-skills ro"
+
+    - name: /skills ro check, host mount inactive but a stale CIFS mount still on top in the container, ro, passes
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: inactive-cifs-ro
+        case_view_rc: 3
+        case_expect_ok: true
+        case_lines:
+          - "1500 1400 0:60 / /skills ro,nosuid,nodev,noexec,relatime master:9 - cifs //100.64.0.20/ai-library/30-skills ro"
+
+    - name: /skills ro check, Docker's bind writable fails
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: docker-rw
+        case_view_rc: 32
+        case_expect_ok: false
+        case_lines:
+          - "1500 1400 8:1 /var/lib/homelab-ai/skills /skills rw,relatime master:1 - ext4 /dev/sda1 rw"
+
+    - name: /writing ro check, ONE mount, the writing CIFS mount itself
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: writing-single-cifs
+        case_share: writing
+        case_view_rc: 0
+        case_expect_ok: true
+        case_lines:
+          - "1500 1400 0:60 / /skills ro,nosuid,nodev,noexec,relatime master:9 - cifs //100.64.0.20/ai-library/30-skills ro"
+          - "1501 1400 0:61 / /writing ro,nosuid,nodev,noexec,relatime master:10 - cifs //100.64.0.20/ai-library/40-writing ro"
+
+    - name: /writing ro check, unmounted, Docker's ro bind of the view, passes
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: writing-unmounted
+        case_share: writing
+        case_view_rc: 3
+        case_expect_ok: true
+        case_lines:
+          - "1501 1400 8:1 /var/lib/homelab-ai/writing /writing ro,relatime master:1 - ext4 /dev/sda1 rw"
+
+    - name: /writing ro check, mounted rw (propagated on top), fails
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: writing-rw
+        case_share: writing
+        case_view_rc: 0
+        case_expect_ok: false
+        case_lines:
+          - "1501 1400 8:1 /var/lib/homelab-ai/writing /writing ro,relatime master:1 - ext4 /dev/sda1 rw"
+          - "1601 1501 0:61 / /writing rw,nosuid,nodev,noexec,relatime master:10 - cifs //100.64.0.20/ai-library/40-writing rw"
+
+    - name: /writing ro check, mounted without noexec, fails
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: writing-exec
+        case_share: writing
+        case_view_rc: 0
+        case_expect_ok: false
+        case_lines:
+          - "1501 1400 0:61 / /writing ro,nosuid,nodev,relatime master:10 - cifs //100.64.0.20/ai-library/40-writing ro"
+
+    - name: /writing ro check, only /skills in the table (writing bind missing), fails
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: writing-absent
+        case_share: writing
+        case_view_rc: 3
+        case_expect_ok: false
+        case_lines:
+          - "1500 1400 0:60 / /skills ro,nosuid,nodev,noexec,relatime master:9 - cifs //100.64.0.20/ai-library/30-skills ro"
+
+    - name: /payday-runs check, mounted rw CIFS with nosuid,nodev,noexec passes
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: payday-mounted rw CIFS with nosuid,nodev,noexec passes
+        case_share: payday-runs
+        case_view_rc: 0
+        case_expect_ok: true
+        case_lines:
+          - "1502 1400 8:1 /var/lib/homelab-ai/payday-runs /payday-runs rw,relatime master:1 - ext4 /dev/sda1 rw"
+          - "1602 1502 0:62 / /payday-runs rw,nosuid,nodev,noexec,relatime master:11 - cifs //100.64.0.20/ai-library/50-finance/payday-runs rw"
+
+    - name: /payday-runs check, only CIFS (mounted before the container) passes
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: payday-only CIFS (mounted before the container) passes
+        case_share: payday-runs
+        case_view_rc: 0
+        case_expect_ok: true
+        case_lines:
+          - "1502 1400 0:62 / /payday-runs rw,nosuid,nodev,noexec,relatime master:11 - cifs //100.64.0.20/ai-library/50-finance/payday-runs rw"
+
+    - name: /payday-runs check, host says mounted but the top is ai-box's own disk fails
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: payday-host says mounted but the top is ai-box's own disk fails
+        case_share: payday-runs
+        case_view_rc: 0
+        case_expect_ok: false
+        case_lines:
+          - "1502 1400 8:1 /var/lib/homelab-ai/payday-runs /payday-runs rw,nosuid,nodev,noexec,relatime - ext4 /dev/sda1 rw"
+
+    - name: /payday-runs check, mounted read-only fails (the tool could not save)
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: payday-mounted read-only fails (the tool could not save)
+        case_share: payday-runs
+        case_view_rc: 0
+        case_expect_ok: false
+        case_lines:
+          - "1502 1400 8:1 /var/lib/homelab-ai/payday-runs /payday-runs rw,relatime master:1 - ext4 /dev/sda1 rw"
+          - "1602 1502 0:62 / /payday-runs ro,nosuid,nodev,noexec,relatime master:11 - cifs //x/y ro"
+
+    - name: /payday-runs check, mounted without noexec fails
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: payday-mounted without noexec fails
+        case_share: payday-runs
+        case_view_rc: 0
+        case_expect_ok: false
+        case_lines:
+          - "1502 1400 8:1 /var/lib/homelab-ai/payday-runs /payday-runs rw,relatime master:1 - ext4 /dev/sda1 rw"
+          - "1602 1502 0:62 / /payday-runs rw,nosuid,nodev,relatime master:11 - cifs //x/y rw"
+
+    - name: /payday-runs check, not mounted, the local directory on top passes here (the immutable check is separate)
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: payday-not mounted, the local directory on top passes here (the immutable check is separate)
+        case_share: payday-runs
+        case_view_rc: 3
+        case_expect_ok: true
+        case_lines:
+          - "1502 1400 8:1 /var/lib/homelab-ai/payday-runs /payday-runs rw,relatime master:1 - ext4 /dev/sda1 rw"
+
+    - name: Read-write fail-safe, per case (lsattr -d of the local directory while not mounted)
+      ansible.builtin.include_tasks: failsafe_case.yml
+      loop:
+        - name: immutable
+          ok: true
+          results: [{rc: 0, stdout: "----i---------e------- /var/lib/homelab-ai/payday-runs", item: {share: {view: /var/lib/homelab-ai/payday-runs}}}]
+        - name: not-immutable
+          ok: false
+          results: [{rc: 0, stdout: "--------------e------- /var/lib/homelab-ai/payday-runs", item: {share: {view: /var/lib/homelab-ai/payday-runs}}}]
+        - name: lsattr-failed
+          ok: false
+          results: [{rc: 1, stdout: "", item: {share: {view: /var/lib/homelab-ai/payday-runs}}}]
+        - name: mounted-so-skipped
+          ok: true
+          results: [{skipped: true, item: {share: {view: /var/lib/homelab-ai/payday-runs}}}]
+        - name: ro-shares-only
+          ok: true
+          results: []
+      loop_control:
+        loop_var: fs_case
+        label: "{{ fs_case.name }}"
+
+    - name: /skills ro check, no /skills at all fails
+      ansible.builtin.include_tasks: skills_ro_case.yml
+      vars:
+        case_name: absent
+        case_view_rc: 32
+        case_expect_ok: false
+        case_lines:
+          - "1500 1400 8:1 /var/lib/docker/x /app/backend/data rw,relatime - ext4 /dev/sda1 rw"
+
+    # ---- 1h. Document search (§12.22): the verify, the CPU pulls, the aliases -------------------------------
+    - name: Count the role's execs of the settings checker
+      ansible.builtin.command:
+        argv: [grep, -r, -l, --include=*.yml, webui_extraction_config.py, "{{ ai_stack_test_role }}/tasks"]
+      register: ai_stack_test_settings_execs
+      changed_when: false
+
+    - name: One settings exec per converge; the search check reads its result, reports, and asserts behind its gate
+      vars:
+        vs: "{{ lookup('ansible.builtin.file', ai_stack_test_role ~ '/tasks/verify_search.yml') | from_yaml }}"
+        ve: "{{ lookup('ansible.builtin.file', ai_stack_test_role ~ '/tasks/verify_extraction.yml') | from_yaml }}"
+        ve_execs: >-
+          {%- set out = [] -%}
+          {%- for t in ve -%}{%- if 'community.docker.docker_container_exec' in t -%}
+          {%- set _ = out.append(t['community.docker.docker_container_exec']) -%}{%- endif -%}{%- endfor -%}
+          {{ out }}
+        settings_exec: "{{ ve_execs | selectattr('stdin', 'search', 'webui_extraction_config') | list }}"
+        ve_includes: >-
+          {%- set out = [] -%}
+          {%- for t in ve -%}{%- if 'ansible.builtin.include_tasks' in t -%}
+          {%- set _ = out.append({'file': t['ansible.builtin.include_tasks'], 'when': t.when | default('')}) -%}
+          {%- endif -%}{%- endfor -%}
+          {{ out }}
+      ansible.builtin.assert:
+        that:
+          # verify_search.yml has no exec of its own; it reads the one settings exec's result.
+          - vs | length == 1
+          - vs[0]['ansible.builtin.include_tasks'] == 'verify_search_assert.yml'
+          - vs[0].vars.ai_stack_webui_search == '{{ "{{" }} ai_stack_webui_extraction {{ "}}" }}'
+          - vs[0].when == ['not ansible_check_mode', 'ai_embed_model is defined']
+          - settings_exec | length == 1
+          - settings_exec[0].container == 'open-webui'
+          # The extraction checks on that result run whenever not in check mode.
+          - ve | selectattr('ansible.builtin.include_tasks', 'defined') | list | length == 0
+          - >-
+            ve_includes == [{'file': 'verify_extraction_assert.yml', 'when': 'not ansible_check_mode'}]
+          - settings_exec[0].argv == ['python3', '-', '{{ "{{" }} ai_stack_webui_settings_expected | to_json {{ "}}" }}']
+          - ai_stack_test_settings_execs.stdout_lines | length == 1
+          - ai_stack_webui_search_expected.keys() | sort
+            == ['rag.embedding_engine', 'rag.embedding_model', 'rag.enable_hybrid_search', 'rag.ollama.base_url',
+                'rag.reranking_model', 'rag.top_k']
+          # §12.30: hybrid and the reranker are expected as the inventory says; today off and none.
+          - ai_stack_webui_search_expected['rag.enable_hybrid_search'] is sameas false
+          - ai_stack_webui_search_expected['rag.reranking_model'] == ''
+          - ai_stack_webui_search_expected['rag.embedding_engine'] == 'ollama'
+          - ai_stack_webui_search_expected['rag.embedding_model'] == ai_stack_embed_alias
+          - ai_stack_webui_search_expected['rag.ollama.base_url'] == 'http://gpu-broker:11434'
+          - ai_stack_webui_search_expected['rag.top_k'] | int == 8
+          - ai_stack_webui_search_report.keys() | sort
+            == ['rag.embedding_batch_size', 'rag.embedding_concurrent_requests', 'task.model.default']
+          - ai_stack_webui_search_report['rag.embedding_concurrent_requests'] | int == 2
+          - ai_stack_verify_search_settings is sameas false
+        quiet: true
+
+    - name: The one settings exec checks extraction always, and search only with an embedding model
+      vars:
+        with_embed: "{{ ai_stack_webui_settings_expected }}"
+        ai_embed_model: nomic-embed-text:v1.5
+      ansible.builtin.assert:
+        that:
+          - with_embed.keys() | sort
+            == (ai_stack_webui_extraction_expected.keys() | list + ai_stack_webui_search_expected.keys() | list
+                + ai_stack_webui_search_report.keys() | list) | sort
+        quiet: true
+
+    - name: Without an embedding model the settings exec checks extraction only
+      vars:
+        ai_embed_model: "{{ undef(hint='unset') }}"
+      ansible.builtin.assert:
+        that:
+          - ai_stack_webui_settings_expected.keys() | sort == ai_stack_webui_extraction_expected.keys() | sort
+        quiet: true
+
+    - name: Sample checker outputs for the search settings cases
+      ansible.builtin.set_fact:
+        ai_stack_test_search_out:
+          good:
+            ok: true
+            source: database
+            settings:
+              rag.embedding_engine:
+                effective: ollama
+                expected: ollama
+                from: database
+                ok: true
+              rag.embedding_model:
+                effective: embed
+                expected: embed
+                from: database
+                ok: true
+              rag.ollama.base_url:
+                effective: http://gpu-broker:11434
+                expected: http://gpu-broker:11434
+                from: database
+                ok: true
+              rag.top_k:
+                effective: 8
+                expected: 8
+                from: database
+                ok: true
+                passages: 8
+                hybrid: true
+                top_k_reranker: 8
+              rag.enable_hybrid_search:
+                effective: true
+                expected: true
+                from: database
+                ok: true
+              rag.embedding_batch_size:
+                effective: 16
+                expected: 16
+                from: database
+                ok: true
+              task.model.default:
+                effective: assistant
+                expected: assistant
+                from: database
+                ok: true
+          bad_topk:
+            ok: false
+            source: database
+            settings:
+              rag.embedding_engine:
+                effective: ollama
+                expected: ollama
+                from: database
+                ok: true
+              rag.embedding_model:
+                effective: embed
+                expected: embed
+                from: database
+                ok: true
+              rag.ollama.base_url:
+                effective: http://gpu-broker:11434
+                expected: http://gpu-broker:11434
+                from: database
+                ok: true
+              rag.top_k:
+                effective: 8
+                expected: 8
+                from: database
+                ok: false
+                passages: 3
+                hybrid: true
+                top_k_reranker: 3
+              rag.enable_hybrid_search:
+                effective: true
+                expected: true
+                from: database
+                ok: true
+              rag.embedding_batch_size:
+                effective: 16
+                expected: 16
+                from: database
+                ok: true
+              task.model.default:
+                effective: assistant
+                expected: assistant
+                from: database
+                ok: true
+          report_only:
+            ok: false
+            source: database
+            settings:
+              rag.embedding_engine:
+                effective: ollama
+                expected: ollama
+                from: database
+                ok: true
+              rag.embedding_model:
+                effective: embed
+                expected: embed
+                from: database
+                ok: true
+              rag.ollama.base_url:
+                effective: http://gpu-broker:11434
+                expected: http://gpu-broker:11434
+                from: database
+                ok: true
+              rag.top_k:
+                effective: 8
+                expected: 8
+                from: database
+                ok: true
+                passages: 8
+                hybrid: true
+                top_k_reranker: 8
+              rag.enable_hybrid_search:
+                effective: false
+                expected: false
+                from: database
+                ok: true
+              rag.embedding_batch_size:
+                effective: 1
+                expected: 16
+                from: database
+                ok: false
+              task.model.default:
+                effective: assistant
+                expected: assistant
+                from: database
+                ok: true
+          unsup:
+            ok: false
+            source: unsupported
+            error: 'OperationalError: database is locked'
+
+    - name: Sample checker outputs for the extraction settings cases
+      ansible.builtin.set_fact:
+        ai_stack_test_extraction_out:
+          good:
+            ok: true
+            source: database
+            settings:
+              rag.content_extraction_engine:
+                effective: tika
+                expected: tika
+                from: database
+                ok: true
+              rag.tika_server_url:
+                effective: http://tika:9998
+                expected: http://tika:9998
+                from: database
+                ok: true
+              rag.tika_server_version:
+                effective: '3'
+                expected: '3'
+                from: database
+                ok: true
+              rag.file.max_size:
+                effective: 25
+                expected: 25
+                from: database
+                ok: true
+              rag.content_extraction.supported_media_mime_types:
+                effective: [image/png, image/jpeg, image/tiff, image/bmp, image/gif]
+                expected: [image/png, image/jpeg, image/tiff, image/bmp, image/gif]
+                from: database
+                ok: true
+              rag.embedding_engine:
+                effective: ollama
+                expected: ollama
+                from: database
+                ok: true
+              rag.top_k:
+                effective: 8
+                expected: 8
+                from: database
+                ok: true
+          search_wrong:
+            ok: false
+            source: database
+            settings:
+              rag.content_extraction_engine:
+                effective: tika
+                expected: tika
+                from: database
+                ok: true
+              rag.tika_server_url:
+                effective: http://tika:9998
+                expected: http://tika:9998
+                from: database
+                ok: true
+              rag.tika_server_version:
+                effective: '3'
+                expected: '3'
+                from: database
+                ok: true
+              rag.file.max_size:
+                effective: 25
+                expected: 25
+                from: database
+                ok: true
+              rag.content_extraction.supported_media_mime_types:
+                effective: [image/png, image/jpeg, image/tiff, image/bmp, image/gif]
+                expected: [image/png, image/jpeg, image/tiff, image/bmp, image/gif]
+                from: database
+                ok: true
+              rag.embedding_engine:
+                effective: ''
+                expected: ollama
+                from: database
+                ok: false
+              rag.top_k:
+                effective: 8
+                expected: 8
+                from: database
+                ok: true
+          extraction_wrong:
+            ok: false
+            source: database
+            settings:
+              rag.content_extraction_engine:
+                effective: ''
+                expected: tika
+                from: database
+                ok: false
+              rag.tika_server_url:
+                effective: http://tika:9998
+                expected: http://tika:9998
+                from: database
+                ok: true
+              rag.tika_server_version:
+                effective: '3'
+                expected: '3'
+                from: database
+                ok: true
+              rag.file.max_size:
+                effective: 25
+                expected: 25
+                from: database
+                ok: true
+              rag.content_extraction.supported_media_mime_types:
+                effective: [image/png, image/jpeg, image/tiff, image/bmp, image/gif]
+                expected: [image/png, image/jpeg, image/tiff, image/bmp, image/gif]
+                from: database
+                ok: true
+              rag.embedding_engine:
+                effective: ollama
+                expected: ollama
+                from: database
+                ok: true
+              rag.top_k:
+                effective: 8
+                expected: 8
+                from: database
+                ok: true
+          extraction_missing:
+            ok: true
+            source: database
+            settings:
+              rag.embedding_engine:
+                effective: ollama
+                expected: ollama
+                from: database
+                ok: true
+              rag.top_k:
+                effective: 8
+                expected: 8
+                from: database
+                ok: true
+          unsupported:
+            ok: false
+            source: unsupported
+            error: 'OperationalError: database is locked'
+
+    # The extraction checks read only the extraction keys of the shared result (a search key that is wrong
+    # must not fail them; the search check decides that behind its own gate).
+    - name: Extraction settings check, per case
+      ansible.builtin.include_tasks: extraction_case.yml
+      loop:
+        - {name: all-good, rc: 0, out: "{{ ai_stack_test_extraction_out.good }}", ok: true}
+        - {name: search-key-wrong-only, rc: 1, out: "{{ ai_stack_test_extraction_out.search_wrong }}", ok: true}
+        - {name: extraction-key-wrong, rc: 1, out: "{{ ai_stack_test_extraction_out.extraction_wrong }}", ok: false}
+        - {name: extraction-key-missing, rc: 0, out: "{{ ai_stack_test_extraction_out.extraction_missing }}", ok: false}
+        - {name: unreadable, rc: 2, out: "{{ ai_stack_test_extraction_out.unsupported }}", ok: false}
+        - {name: crash, rc: 1, out: "", ok: false}
+      loop_control:
+        loop_var: extraction_case
+        label: "{{ extraction_case.name }}"
+
+    - name: Search settings check, gate-off-mismatch
+      ansible.builtin.include_tasks: search_case.yml
+      vars:
+        case_name: gate-off-mismatch
+        case_rc: 1
+        case_gate: false
+        case_expect_ok: true
+        case_stdout: "{{ ai_stack_test_search_out['bad_topk'] | to_json }}"
+
+    - name: Search settings check, gate-off-unreadable
+      ansible.builtin.include_tasks: search_case.yml
+      vars:
+        case_name: gate-off-unreadable
+        case_rc: 2
+        case_gate: false
+        case_expect_ok: true
+        case_stdout: "{{ ai_stack_test_search_out['unsup'] | to_json }}"
+
+    - name: Search settings check, gate-on-good
+      ansible.builtin.include_tasks: search_case.yml
+      vars:
+        case_name: gate-on-good
+        case_rc: 0
+        case_gate: true
+        case_expect_ok: true
+        case_stdout: "{{ ai_stack_test_search_out['good'] | to_json }}"
+
+    - name: Search settings check, gate-on-top-k-trap
+      ansible.builtin.include_tasks: search_case.yml
+      vars:
+        case_name: gate-on-top-k-trap
+        case_rc: 1
+        case_gate: true
+        case_expect_ok: false
+        case_stdout: "{{ ai_stack_test_search_out['bad_topk'] | to_json }}"
+
+    - name: Search settings check, gate-on-unreadable
+      ansible.builtin.include_tasks: search_case.yml
+      vars:
+        case_name: gate-on-unreadable
+        case_rc: 2
+        case_gate: true
+        case_expect_ok: false
+        case_stdout: "{{ ai_stack_test_search_out['unsup'] | to_json }}"
+
+    - name: Search settings check, gate-on-report-key-only
+      ansible.builtin.include_tasks: search_case.yml
+      vars:
+        case_name: gate-on-report-key-only
+        case_rc: 1
+        case_gate: true
+        case_expect_ok: true
+        case_stdout: "{{ ai_stack_test_search_out['report_only'] | to_json }}"
+
+    - name: Search settings check, gate-on-crash
+      ansible.builtin.include_tasks: search_case.yml
+      vars:
+        case_name: gate-on-crash
+        case_rc: 1
+        case_gate: true
+        case_expect_ok: false
+        case_stdout: ""
+
+    # The CPU pulls are the chat and the embedding model, each once, only when set. Task vars outrank the
+    # inventory; vars/main.yml's expression is evaluated per case.
+    - name: CPU pulls, per case
+      ansible.builtin.assert:
+        that:
+          - ai_stack_cpu_pull_models == item.want
+        fail_msg: "{{ item.name }}: {{ ai_stack_cpu_pull_models }}"
+        quiet: true
+      loop:
+        - {name: both, cpu: qwen3:1.7b, embed: nomic-embed-text:v1.5, want: [qwen3:1.7b, nomic-embed-text:v1.5]}
+        - {name: none, cpu: null, embed: null, want: []}
+        - {name: cpu-only, cpu: qwen3:1.7b, embed: null, want: [qwen3:1.7b]}
+        - {name: embed-only, cpu: null, embed: nomic-embed-text:v1.5, want: [nomic-embed-text:v1.5]}
+        - {name: same-model, cpu: m:1, embed: m:1, want: ['m:1']}
+      loop_control:
+        label: "{{ item.name }}"
+      vars:
+        ai_cpu_model: "{{ item.cpu if item.cpu else undef(hint='unset') }}"
+        ai_embed_model: "{{ item.embed if item.embed else undef(hint='unset') }}"
+
+    - name: Models and preflight handle the embedding model
+      vars:
+        models: "{{ lookup('ansible.builtin.file', ai_stack_test_role ~ '/tasks/models.yml') | from_yaml }}"
+        pf: "{{ lookup('ansible.builtin.file', ai_stack_test_role ~ '/tasks/preflight.yml') | from_yaml }}"
+        alias_assert: "{{ (pf | selectattr('name', 'search', 'broker alias names') | first)['ansible.builtin.assert'].that }}"
+        model_assert: "{{ (pf | selectattr('name', 'search', 'model variables') | first)['ansible.builtin.assert'].that }}"
+      ansible.builtin.assert:
+        that:
+          - models | length == 2
+          - models[0].loop == '{{ "{{" }} ai_stack_cpu_pull_models {{ "}}" }}'
+          - models[0]['community.docker.docker_container_exec'].argv == ['ollama', 'show', '{{ "{{" }} item {{ "}}" }}']
+          - models[0].failed_when is sameas false
+          - models[1].loop == '{{ "{{" }} ai_stack_cpu_show.results {{ "}}" }}'
+            or models[1].loop == '{{ "{{" }} ai_stack_cpu_model_show.results {{ "}}" }}'
+          - models[1]['community.docker.docker_container_exec'].argv == ['ollama', 'pull', '{{ "{{" }} item.item {{ "}}" }}']
+          - models[1].when == 'item.rc | default(1) != 0'
+          - "'ai_stack_embed_alias != ai_stack_alias_name' in alias_assert"
+          - alias_assert | select('search', 'ai_stack_embed_alias is match') | list | length == 1
+          - model_assert | select('search', '^ai_embed_model is undefined or') | list | length == 1
+        quiet: true
+
+    # L-5: ai_embed_model must be in the gaming PC's ollama_rocm_extra_models (role ollama_rocm's names).
+    - name: Embedding model on the gaming PC, per case
+      ansible.builtin.include_tasks: embed_pc_case.yml
+      loop:
+        - {name: listed, embed: nomic-embed-text:v1.5, pc: gaming-pc-root, extra: [nomic-embed-text:v1.5], ok: true}
+        - {name: normalised, embed: Library/Nomic-Embed-Text, pc: gaming-pc-root, extra: [nomic-embed-text:latest], ok: true}
+        - {name: registry-prefix, embed: nomic-embed-text:v1.5, pc: gaming-pc-root,
+           extra: [registry.ollama.ai/library/nomic-embed-text:v1.5], ok: true}
+        - {name: other-tag, embed: nomic-embed-text:v1.5, pc: gaming-pc-root, extra: [nomic-embed-text], ok: false}
+        - {name: pc-untagged, embed: nomic-embed-text:latest, pc: gaming-pc-root, extra: [nomic-embed-text], ok: true}
+        - {name: not-listed, embed: nomic-embed-text:v1.5, pc: gaming-pc-root, extra: [], ok: false}
+        - {name: no-pc-in-inventory, embed: nomic-embed-text:v1.5, pc: "", extra: [], ok: true}
+        - {name: embed-unset, embed: "", pc: gaming-pc-root, extra: [], ok: true}
+      loop_control:
+        loop_var: embed_case
+        label: "{{ embed_case.name }}"
+
+    - name: The gaming PC's list is read through hostvars of the workstations_root host
+      vars:
+        pf_text: "{{ lookup('ansible.builtin.file', ai_stack_test_role ~ '/tasks/preflight.yml') }}"
+        vars_doc: "{{ lookup('ansible.builtin.file', ai_stack_test_role ~ '/vars/main.yml') | from_yaml }}"
+      ansible.builtin.assert:
+        that:
+          # This test runs without an inventory: no PC host, nothing read.
+          - ai_stack_pc_host == ''
+          - ai_stack_pc_extra_models == []
+          - pf_text is search('import_tasks. embed_pc.yml')
+          # The PC as roles/ai_control reads it (inventory/hosts.yml: workstations_root -> gaming-pc-root,
+          # where group_vars/workstations_root sets ollama_rocm_extra_models).
+          - vars_doc.ai_stack_pc_host is search("groups\\['workstations_root'\\]")
+          - vars_doc.ai_stack_pc_extra_models is search('hostvars\\[ai_stack_pc_host\\]\\.ollama_rocm_extra_models')
+        quiet: true
+
+    # ---- 1i. Broker management lock-down (§12.23) -------------------------------------------------------
+    - name: The pinned addresses and the broker's exported address
+      vars:
+        main: "{{ lookup('ansible.builtin.file', ai_stack_test_role ~ '/tasks/main.yml') | from_yaml }}"
+        export: "{{ main | selectattr('name', 'search', '^Export the broker') | first }}"
+        vb: "{{ lookup('ansible.builtin.file', ai_stack_test_role ~ '/tasks/verify_broker.yml') | from_yaml }}"
+        probe: "{{ vb[0]['ansible.builtin.uri'] }}"
+      ansible.builtin.assert:
+        that:
+          - >-
+            ai_stack_pinned_ips == {'ollama-cpu': '172.20.0.2', 'gpu-broker': '172.20.0.3', 'open-webui': '172.20.0.4'}
+          - ai_stack_network_subnet | ai_stack_pinned_ip_problems(ai_stack_pinned_ips) == []
+          - ai_stack_broker_config.management_clients == [ai_stack_webui_ip]
+          # Exported for the other roles (a host fact, so later plays read it through hostvars).
+          - export['ansible.builtin.set_fact'].ai_stack_broker_ip == '{{ "{{" }} ai_stack_broker_ip {{ "}}" }}'
+          - export['ansible.builtin.set_fact'].cacheable is sameas true
+          - export.when is not defined
+          # The push probe: from the host, through the published port, a model that can't exist, 403 only.
+          - vb | length == 2
+          - probe.url == 'http://{{ "{{" }} tailnet_ip {{ "}}" }}:{{ "{{" }} ai_stack_broker_port {{ "}}" }}/api/push'
+          - probe.method == 'POST'
+          - probe.body.model == '{{ "{{" }} ai_stack_broker_probe_model {{ "}}" }}'
+          - ai_stack_broker_probe_model is search('does-not-exist')
+          - vb[0].when == 'not ansible_check_mode' and vb[1].when == 'not ansible_check_mode'
+          - vb[1]['ansible.builtin.assert'].that
+            == ['ai_stack_broker_push.status | default(-1) == 403',
+                "'/api/push is disabled' in (ai_stack_broker_push.content | default(''))"]
+          - probe.return_content is sameas true
+        quiet: true
+
+    - name: The network tasks check the pins (and who holds them) before the network task
+      vars:
+        nt: "{{ lookup('ansible.builtin.file', ai_stack_test_role ~ '/tasks/networks.yml') | from_yaml }}"
+        names: "{{ nt | map(attribute='name') | list }}"
+        fit: "{{ nt | selectattr('name', 'search', 'pinned container addresses fit') | first }}"
+        held: "{{ nt | selectattr('name', 'search', 'no other container holds') | first }}"
+        members: "{{ nt | selectattr('name', 'search', 'containers on the .ai. network now') | first }}"
+        gw_read: "{{ nt | selectattr('name', 'search', 'gateway now') | first }}"
+        gw: "{{ nt | selectattr('name', 'search', 'is the live gateway') | first }}"
+      ansible.builtin.assert:
+        that:
+          - fit.vars.ai_stack_pin_issues
+            == '{{ "{{" }} ai_stack_network_subnet | ai_stack_pinned_ip_problems(ai_stack_pinned_ips) {{ "}}" }}'
+          - fit['ansible.builtin.assert'].that == 'ai_stack_pin_issues | length == 0'
+          - held.vars.ai_stack_pin_clashes is search('ai_stack_pinned_ip_holders\\(ai_stack_pinned_ips\\)')
+          - held['ansible.builtin.assert'].that == 'ai_stack_pin_clashes | length == 0'
+          - members['ansible.builtin.command'].argv[:4] == ['docker', 'network', 'inspect', '{{ "{{" }} ai_stack_network_name {{ "}}" }}']
+          - fit.when is not defined and held.when is not defined
+          - names.index(fit.name) < names.index(held.name) < names | length - 1
+          # No pin (open-webui's included) is the live gateway: tasks/gateway_assert.yml, cases below.
+          - gw['ansible.builtin.include_tasks'] == 'gateway_assert.yml'
+          - gw_read['ansible.builtin.command'].argv[-1] is search('Gateway')
+          - names.index(gw_read.name) < names.index(gw.name) < names | length - 1
+          - gw.when is not defined
+        quiet: true
+
+    - name: The fixed keys are refused in ai_stack_ollama_env, per case (the role's preflight check)
+      ansible.builtin.include_tasks: ollama_env_case.yml
+      loop:
+        - {name: role-default, env: "{{ ai_stack_ollama_env }}", ok: true}
+        - {name: empty, env: {}, ok: true}
+        - {name: no-cloud-0, env: {OLLAMA_KEEP_ALIVE: 10m, OLLAMA_NO_CLOUD: "0"}, ok: false}
+        - {name: no-cloud-1, env: {OLLAMA_NO_CLOUD: "1"}, ok: false}
+        - {name: host, env: {OLLAMA_HOST: "0.0.0.0:11434"}, ok: false}
+        - {name: not-a-mapping, env: [OLLAMA_KEEP_ALIVE], ok: false}
+      loop_control:
+        loop_var: env_case
+        label: "{{ env_case.name }}"
+
+    - name: The preflight runs that check
+      ansible.builtin.assert:
+        that:
+          - >-
+            lookup('ansible.builtin.file', ai_stack_test_role ~ '/tasks/preflight.yml')
+            is search('import_tasks. ollama_env_check.yml')
+        quiet: true
+
+    - name: Render compose.yaml with an empty ai_stack_ollama_env (an override can't drop OLLAMA_NO_CLOUD)
+      ansible.builtin.template:
+        src: "{{ ai_stack_test_role }}/templates/compose.yaml.j2"
+        dest: "{{ ai_stack_test_tmp.path }}/compose-noenv.yaml"
+        mode: "0644"
+      vars:
+        ai_stack_ollama_env: {}
+        ai_stack_tika_config_template: "{{ ai_stack_test_role }}/templates/tika-config.xml.j2"
+
+    - name: OLLAMA_NO_CLOUD survives an empty ai_stack_ollama_env
+      ansible.builtin.assert:
+        that:
+          - >-
+            (lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/compose-noenv.yaml') | from_yaml)
+            .services['ollama-cpu'].environment == {'OLLAMA_NO_CLOUD': '1'}
+        quiet: true
+
+    - name: No pinned address is the live gateway, per case
+      ansible.builtin.include_tasks: gateway_case.yml
+      loop:
+        - {name: default-gateway, gateway: '172.20.0.1 ', pins: {gpu-broker: 172.20.0.3, open-webui: 172.20.0.4}, ok: true}
+        - {name: no-network-yet, gateway: '', pins: {gpu-broker: 172.20.0.3, open-webui: 172.20.0.4}, ok: true}
+        - {name: webui-on-odd-gateway, gateway: '172.20.0.254 ', pins: {gpu-broker: 172.20.0.3, open-webui: 172.20.0.254},
+           ok: false}
+        - {name: broker-on-odd-gateway, gateway: '172.20.0.254 ', pins: {gpu-broker: 172.20.0.254, open-webui: 172.20.0.4},
+           ok: false}
+        - {name: two-gateways, gateway: '172.20.0.1 172.20.0.4 ', pins: {open-webui: 172.20.0.4}, ok: false}
+      loop_control:
+        loop_var: gw_case
+        label: "{{ gw_case.name }}"
+
+    - name: Compose runs compose.yaml alone, and an override file in the stack dir is refused
+      vars:
+        st: "{{ lookup('ansible.builtin.file', ai_stack_test_role ~ '/tasks/stack.yml') | from_yaml }}"
+        up: "{{ (st[0].block | selectattr('name', 'equalto', 'Stack is up and healthy') | first)['community.docker.docker_compose_v2'] }}"
+        mt: "{{ lookup('ansible.builtin.file', ai_stack_test_role ~ '/tasks/main.yml') | from_yaml }}"
+        finder: "{{ (mt | selectattr('name', 'search', 'look for Compose override files') | first)['ansible.builtin.find'] }}"
+        guard: "{{ mt | selectattr('name', 'search', 'no other Compose file') | first }}"
+        names: "{{ mt | map(attribute='name') | list }}"
+        helper: "{{ lookup('ansible.builtin.file', ai_stack_test_role ~ '/templates/homelab-ai-stack-start.sh.j2') }}"
+      ansible.builtin.assert:
+        that:
+          - up.files == ['compose.yaml']
+          - "'compose.override.yaml' in finder.patterns and 'compose.override.yml' in finder.patterns"
+          - "'docker-compose.override.yaml' in finder.patterns and 'docker-compose.override.yml' in finder.patterns"
+          - finder.paths == '{{ "{{" }} ai_stack_dir {{ "}}" }}'
+          - guard['ansible.builtin.assert'].that == ['ai_stack_compose_overrides.files | length == 0']
+          - guard.when is not defined
+          - names.index(guard.name) < names.index('Stack up, bindings healed, under the stack lock')
+          # The boot helper's compose call names the file too (-f), so it never merges an override either.
+          - helper is search('docker compose -f "\\$COMPOSE_FILE" up')
+        quiet: true
+
+    # ---- 1j. Pre-seeded rerankers (§12.30) -----------------------------------------------------------
+    - name: The pinned models, the seed folder, the binds and the seeding tasks
+      vars:
+        hf: "{{ lookup('ansible.builtin.file', ai_stack_test_role ~ '/tasks/hf_models.yml') | from_yaml }}"
+        names: "{{ hf | map(attribute='name') | list }}"
+        fetch: "{{ (hf | selectattr('name', 'search', 'fetch the missing') | first) }}"
+        verify: "{{ (hf | selectattr('name', 'search', 'every fetched file') | first) }}"
+        drop: "{{ (hf | selectattr('name', 'search', 'loses refs/main first') | first) }}"
+        refs: "{{ (hf | selectattr('name', 'search', 'refs/main names') | first) }}"
+        # The key has dots, so no map(attribute=...): a loop reads it.
+        stats: >-
+          {%- set out = [] -%}
+          {%- for t in hf -%}{%- if 'ansible.builtin.stat' in t -%}{%- set _ = out.append(t['ansible.builtin.stat']) -%}{%- endif -%}{%- endfor -%}
+          {{ out }}
+        modules: >-
+          {%- set out = [] -%}
+          {%- for t in hf -%}{%- set _ = out.append((t.keys() | select('match', '^ansible[.]builtin[.]') | first)) -%}{%- endfor -%}
+          {{ out }}
+      ansible.builtin.assert:
+        that:
+          # R16-3: the canonical names (Hugging Face renamed ms-marco-MiniLM-L-6-v2; same commit and files).
+          - ai_stack_hf_models | map(attribute='repo') | list == ['cross-encoder/ms-marco-MiniLM-L6-v2', 'BAAI/bge-reranker-base']
+          - ai_stack_hf_models[0].revision == '233902d25c440f23af6f7d6e94d2946bac0bee0a'
+          - ai_stack_hf_models[1].revision == '2cfc18c9415c912f9d8155881c133215df768a70'
+          # The weights (Hugging Face's LFS SHA-256 at the pinned revision).
+          - >-
+            (ai_stack_hf_models[0].files | selectattr('name', 'equalto', 'model.safetensors') | first).sha256
+            == '821d1aa69520101d6e0737f78a042ae25b19e5cb9160701909d10434f4aeb0ae'
+          - >-
+            (ai_stack_hf_models[1].files | selectattr('name', 'equalto', 'model.safetensors') | first).sha256
+            == 'ced967c45fd1902eb92716c9ceeca7c95a936770ea9db611f5a841b926e33fbd'
+          - ai_stack_hf_model_dirs == ['models--cross-encoder--ms-marco-MiniLM-L6-v2', 'models--BAAI--bge-reranker-base']
+          # R16-1: root's folder on the host, outside Docker's volumes; bound read-only into open-webui's cache.
+          - ai_stack_hf_seed_dir == '/var/lib/homelab-ai/hf-models'
+          - ai_stack_hf_owner == 'root' and ai_stack_hf_group == 'root'
+          - ai_stack_hf_container_cache == '/app/backend/data/cache/embedding/models'
+          - ai_stack_hf_base_url == 'https://huggingface.co'
+          - ai_stack_hf_dirs[:2] == ['/var/lib/homelab-ai', '/var/lib/homelab-ai/hf-models']
+          - ai_stack_hf_files | length == 12
+          - >-
+            ai_stack_hf_files[1].path == '/var/lib/homelab-ai/hf-models/models--cross-encoder--ms-marco-MiniLM-L6-v2/snapshots/'
+            ~ '233902d25c440f23af6f7d6e94d2946bac0bee0a/model.safetensors'
+          # Nothing in the seeding names Docker or a volume (R16-4: the volume mount-point assert is gone with it).
+          - hf | to_json is not search('docker|volume')
+          # Every stat looks at the link itself; the file stats hash with SHA-256.
+          - stats | map(attribute='follow') | list == [false] * 4
+          - stats | selectattr('get_checksum') | map(attribute='checksum_algorithm') | list == ['sha256'] * 2
+          # Fetched with the pinned hash checked (get_url), from the pinned revision only, then hashed again.
+          - fetch['ansible.builtin.get_url'].checksum == 'sha256:{{ "{{" }} item.sha256 {{ "}}" }}'
+          - >-
+            fetch['ansible.builtin.get_url'].url is match('^[{][{] ai_stack_hf_base_url [}][}]/[{][{] item.repo [}][}]/'
+            ~ 'resolve/[{][{] item.revision [}][}]/[{][{] item.name [}][}]$')
+          - fetch['ansible.builtin.get_url'].dest == '{{ "{{" }} item.path {{ "}}" }}'
+          - fetch['ansible.builtin.get_url'].force is not defined
+          - fetch['ansible.builtin.get_url'].mode == '0644'
+          - fetch.loop == '{{ "{{" }} ai_stack_hf_fetch {{ "}}" }}'
+          - verify['ansible.builtin.assert'].that is contains('item.stat.checksum == item.item.sha256')
+          - verify.when == 'not ansible_check_mode'
+          - (hf | selectattr('name', 'search', 'hash the fetched files again') | first).when == 'not ansible_check_mode'
+          - refs.when is not defined
+          # R16-5: refs/main dropped before any download, written last.
+          - drop['ansible.builtin.file'].state == 'absent'
+          - drop.loop is search('ai_stack_hf_stale [|] map[(]attribute=.dir.[)] [|] unique')
+          - names.index(drop.name) < names.index(fetch.name) < names.index(verify.name) < names.index(refs.name)
+          - names[-1] == refs.name
+          - refs['ansible.builtin.copy'].content == '{{ "{{" }} item.revision {{ "}}" }}'
+          - modules | select('match', '^ansible[.]builtin[.](command|shell|raw)$') | list | length == 0
+        fail_msg: "{{ [names, modules, stats] | to_json }}"
+        quiet: true
+
+    - name: A well-formed sample model for the preflight cases
+      ansible.builtin.set_fact:
+        ai_stack_test_hf_sample:
+          repo: org/model
+          revision: cccccccccccccccccccccccccccccccccccccccc
+          files:
+            - {name: config.json, size: 1, sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+            - {name: model.safetensors, size: 2, sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}
+
+    - name: Pinned models and the expected reranker, per case (the role's preflight)
+      ansible.builtin.include_tasks: hf_case.yml
+      loop:
+        - {name: role-default, models: "{{ ai_stack_hf_models }}", reranker: "", ok: true}
+        - {name: e2-minilm, models: "{{ ai_stack_hf_models }}", reranker: cross-encoder/ms-marco-MiniLM-L6-v2,
+           hybrid: true, ok: true}
+        # The old name (Hugging Face redirects it) isn't the pinned one: refused.
+        - {name: e2-old-name, models: "{{ ai_stack_hf_models }}", reranker: cross-encoder/ms-marco-MiniLM-L-6-v2, ok: false}
+        - {name: e3-bge, models: "{{ ai_stack_hf_models }}", reranker: BAAI/bge-reranker-base, hybrid: true, ok: true}
+        - {name: unseeded-reranker, models: "{{ ai_stack_hf_models }}", reranker: BAAI/bge-reranker-large, ok: false}
+        - {name: good-sample, models: "{{ [ai_stack_test_hf_sample] }}", reranker: "", ok: true}
+        - {name: short-revision, models: "{{ [ai_stack_test_hf_sample | combine({'revision': 'main'})] }}", reranker: "", ok: false}
+        - name: dotdot-repo
+          models: "{{ [ai_stack_test_hf_sample | combine({'repo': 'org/..x'})] }}"
+          reranker: ""
+          ok: false
+        # Passes the name pattern but holds '..' (Hugging Face refuses such names anyway).
+        - name: dotdot-inside-repo
+          models: "{{ [ai_stack_test_hf_sample | combine({'repo': 'org/x..y'})] }}"
+          reranker: ""
+          ok: false
+        - name: repo-without-org
+          models: "{{ [ai_stack_test_hf_sample | combine({'repo': 'model'})] }}"
+          reranker: ""
+          ok: false
+        - name: bad-sha
+          models: >-
+            {{ [ai_stack_test_hf_sample | combine({'files': [ai_stack_test_hf_sample.files[0] | combine({'sha256': 'xyz'}),
+                                                         ai_stack_test_hf_sample.files[1]]})] }}
+          reranker: ""
+          ok: false
+        - name: path-in-file-name
+          models: >-
+            {{ [ai_stack_test_hf_sample | combine({'files': [ai_stack_test_hf_sample.files[0] | combine({'name': '../config.json'}),
+                                                         ai_stack_test_hf_sample.files[1]]})] }}
+          reranker: ""
+          ok: false
+        # A third file with a path in its name (config and weights are fine): only the name check catches it.
+        - name: extra-file-with-path
+          models: >-
+            {{ [ai_stack_test_hf_sample | combine({'files': ai_stack_test_hf_sample.files
+                                         + [{'name': '../evil', 'size': 1, 'sha256': 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'}]})] }}
+          reranker: ""
+          ok: false
+        - {name: no-weights, models: "{{ [ai_stack_test_hf_sample | combine({'files': ai_stack_test_hf_sample.files[:1]})] }}", reranker: "", ok: false}
+        - {name: duplicate-repo, models: "{{ [ai_stack_test_hf_sample, ai_stack_test_hf_sample] }}", reranker: "", ok: false}
+        # R16-1: the seed folder is a plain absolute path with a parent below /, never under Docker's folders.
+        - {name: seed-elsewhere, models: [], reranker: "", seed_dir: /srv/hf/models, ok: true}
+        - {name: seed-in-docker-volumes, models: [], reranker: "", seed_dir: /var/lib/docker/volumes/ai_open-webui-data/_data, ok: false}
+        - {name: seed-is-docker-dir, models: [], reranker: "", seed_dir: /var/lib/docker, ok: false}
+        - {name: seed-relative, models: [], reranker: "", seed_dir: var/lib/homelab-ai/hf-models, ok: false}
+        - {name: seed-top-level, models: [], reranker: "", seed_dir: /hf-models, ok: false}
+        - {name: seed-trailing-slash, models: [], reranker: "", seed_dir: /var/lib/homelab-ai/hf-models/, ok: false}
+        - {name: seed-dotdot, models: [], reranker: "", seed_dir: /var/lib/homelab-ai/../docker/x, ok: false}
+        - {name: seed-not-a-string, models: [], reranker: "", seed_dir: [/var/lib/homelab-ai/hf-models], ok: false}
+        - {name: cache-relative, models: [], reranker: "", cache: app/backend/data/cache, ok: false}
+        - {name: cache-dotdot, models: [], reranker: "", cache: /app/backend/data/../../etc, ok: false}
+        - {name: cache-not-a-string, models: [], reranker: "", cache: [/app], ok: false}
+      loop_control:
+        loop_var: hf_case
+        label: "{{ hf_case.name }}"
+
+    # ---- 1k. Seeding (§12.30, R16): a scratch seed folder, a local server in place of huggingface.co ------
+    - name: HF seed | the test user's groups
+      ansible.builtin.command:
+        argv: [id, -Gn]
+      register: ai_stack_test_hf_groups
+      changed_when: false
+
+    # The seeding's group is a supplementary group of the test user where there is one, so owner and group
+    # differ by name (as root:root can't show).
+    - name: HF seed | two sample models, the scratch seed folder, and who owns it
+      ansible.builtin.set_fact:
+        ai_stack_test_hf_seed: "{{ ai_stack_test_tmp.path }}/hf-parent/hf-models"
+        ai_stack_test_hf_user: "{{ ai_stack_test_cred_stat.stat.pw_name }}"
+        ai_stack_test_hf_group: >-
+          {{ (ai_stack_test_hf_groups.stdout.split() | reject('equalto', ai_stack_test_cred_stat.stat.gr_name) | list
+              + [ai_stack_test_cred_stat.stat.gr_name]) | first }}
+        ai_stack_test_hf_content:
+          org/model-a/config.json: config-a
+          org/model-a/model.safetensors: weights-a
+          org/model-b/config.json: config-b
+          org/model-b/model.safetensors: weights-b
+        ai_stack_test_hf_models:
+          - repo: org/model-a
+            revision: "{{ 'a' * 40 }}"
+            files:
+              - {name: config.json, size: 8, sha256: "{{ 'config-a' | hash('sha256') }}"}
+              - {name: model.safetensors, size: 9, sha256: "{{ 'weights-a' | hash('sha256') }}"}
+          - repo: org/model-b
+            revision: "{{ 'b' * 40 }}"
+            files:
+              - {name: config.json, size: 8, sha256: "{{ 'config-b' | hash('sha256') }}"}
+              - {name: model.safetensors, size: 9, sha256: "{{ 'weights-b' | hash('sha256') }}"}
+
+    - name: HF seed | where each file and refs/main lands
+      vars:
+        a_dir: "{{ ai_stack_test_hf_seed }}/models--org--model-a"
+        b_dir: "{{ ai_stack_test_hf_seed }}/models--org--model-b"
+      ansible.builtin.set_fact:
+        ai_stack_test_hf_paths:
+          a_cfg: "{{ a_dir }}/snapshots/{{ 'a' * 40 }}/config.json"
+          a_w: "{{ a_dir }}/snapshots/{{ 'a' * 40 }}/model.safetensors"
+          a_ref: "{{ a_dir }}/refs/main"
+          b_cfg: "{{ b_dir }}/snapshots/{{ 'b' * 40 }}/config.json"
+          b_w: "{{ b_dir }}/snapshots/{{ 'b' * 40 }}/model.safetensors"
+          b_ref: "{{ b_dir }}/refs/main"
+        ai_stack_test_hf_dirs:
+          - "{{ ai_stack_test_tmp.path }}/hf-parent"
+          - "{{ ai_stack_test_hf_seed }}"
+          - "{{ a_dir }}"
+          - "{{ a_dir }}/refs"
+          - "{{ a_dir }}/snapshots"
+          - "{{ a_dir }}/snapshots/{{ 'a' * 40 }}"
+
+    - name: HF seed | the role's file and folder lists for the samples
+      vars:
+        ai_stack_hf_models: "{{ ai_stack_test_hf_models }}"
+        ai_stack_hf_seed_dir: "{{ ai_stack_test_hf_seed }}"
+      ansible.builtin.assert:
+        that:
+          - ai_stack_hf_files | map(attribute='path') | list
+            == [ai_stack_test_hf_paths.a_cfg, ai_stack_test_hf_paths.a_w, ai_stack_test_hf_paths.b_cfg, ai_stack_test_hf_paths.b_w]
+          - ai_stack_hf_files | map(attribute='dir') | unique | list == ['models--org--model-a', 'models--org--model-b']
+          - ai_stack_hf_dirs[:6] == ai_stack_test_hf_dirs
+          - ai_stack_hf_dirs | length == 10
+          - ai_stack_hf_dirs[6:] | map('regex_replace', 'model-b', 'model-a') | map('regex_replace', 'b{40}', 'a' * 40) | list
+            == ai_stack_test_hf_dirs[2:]
+        fail_msg: "{{ [ai_stack_hf_files, ai_stack_hf_dirs] | to_json }}"
+        quiet: true
+
+    - name: HF seed | the served files' folders
+      ansible.builtin.file:
+        path: "{{ ai_stack_test_tmp.path }}/hf-srv/{{ item.repo }}/resolve/{{ item.revision }}"
+        state: directory
+        mode: "0755"
+      loop: "{{ ai_stack_test_hf_models }}"
+      loop_control:
+        label: "{{ item.repo }}"
+
+    - name: HF seed | the served files
+      ansible.builtin.copy:
+        content: "{{ ai_stack_test_hf_content[item.0.repo ~ '/' ~ item.1.name] }}"
+        dest: "{{ ai_stack_test_tmp.path }}/hf-srv/{{ item.0.repo }}/resolve/{{ item.0.revision }}/{{ item.1.name }}"
+        mode: "0644"
+      loop: "{{ ai_stack_test_hf_models | subelements('files') }}"
+      loop_control:
+        label: "{{ item.0.repo }}/{{ item.1.name }}"
+
+    - name: HF seed | the seed folder's parent (the test user's, 0755)
+      ansible.builtin.file:
+        path: "{{ ai_stack_test_tmp.path }}/hf-parent"
+        state: directory
+        mode: "0755"
+
+    - name: HF seed | a free local port
+      ansible.builtin.command:
+        argv: [python3, -c, "import socket; s = socket.socket(); s.bind(('127.0.0.1', 0)); print(s.getsockname()[1])"]
+      register: ai_stack_test_hf_port
+      changed_when: false
+
+    - name: HF seed | the stand-in server, and the cases (it is stopped at the end, whatever happens)
+      vars:
+        ai_stack_test_hf_url: "http://127.0.0.1:{{ ai_stack_test_hf_port.stdout }}"
+        ai_stack_test_hf_pidfile: "{{ ai_stack_test_tmp.path }}/hf-srv.pid"
+        ai_stack_test_hf_playbook: "{{ ansible_playbook_python | dirname }}/ansible-playbook"
+        ai_stack_test_hf_check_env:
+          ANSIBLE_STDOUT_CALLBACK: ansible.posix.json
+          ANSIBLE_NOCOLOR: "1"
+        ai_stack_test_hf_check_argv:
+          - "{{ ai_stack_test_hf_playbook }}"
+          - -i
+          - localhost,
+          - -c
+          - local
+          - --check
+          - "{{ ai_stack_test_role }}/tests/hf_check_play.yml"
+          - -e
+          - "@{{ ai_stack_test_tmp.path }}/hf-check-vars.json"
+      block:
+        # timeout(1) is the backstop if the play dies before the always: below.
+        - name: HF seed | start the stand-in server
+          ansible.builtin.shell:
+            cmd: >-
+              echo $$ > {{ ai_stack_test_hf_pidfile | quote }} &&
+              exec timeout 600 python3 -m http.server --bind 127.0.0.1
+              --directory {{ (ai_stack_test_tmp.path ~ '/hf-srv') | quote }} {{ ai_stack_test_hf_port.stdout }}
+              > {{ (ai_stack_test_tmp.path ~ '/hf-srv.log') | quote }} 2>&1
+          async: 600
+          poll: 0
+          changed_when: false
+
+        - name: HF seed | the server answers
+          ansible.builtin.wait_for:
+            host: 127.0.0.1
+            port: "{{ ai_stack_test_hf_port.stdout | int }}"
+            timeout: 20
+
+        - name: HF seed | vars for the nested check runs
+          ansible.builtin.copy:
+            content: >-
+              {{ {'ai_stack_hf_models': ai_stack_test_hf_models, 'ai_stack_hf_seed_dir': ai_stack_test_hf_seed,
+                  'ai_stack_hf_owner': ai_stack_test_hf_user, 'ai_stack_hf_group': ai_stack_test_hf_group,
+                  'ai_stack_hf_base_url': ai_stack_test_hf_url} | to_json }}
+            dest: "{{ ai_stack_test_tmp.path }}/hf-check-vars.json"
+            mode: "0600"
+
+        - name: HF seed | a check run on a fresh host passes (nothing to fetch into yet)
+          ansible.builtin.command:
+            argv: "{{ ai_stack_test_hf_check_argv }}"
+            chdir: "{{ ai_stack_test_repo }}"
+          environment: "{{ ai_stack_test_hf_check_env }}"
+          register: ai_stack_test_hf_check_fresh
+          changed_when: false
+
+        - name: HF seed | look for the seed folder after the check run
+          ansible.builtin.stat:
+            path: "{{ ai_stack_test_hf_seed }}"
+          register: ai_stack_test_hf_seed_after_check
+
+        - name: HF seed | the check run created nothing
+          ansible.builtin.assert:
+            that:
+              - not ai_stack_test_hf_seed_after_check.stat.exists
+              - (ai_stack_test_hf_check_fresh.stdout | from_json).stats.localhost.failures == 0
+            fail_msg: "{{ (ai_stack_test_hf_check_fresh.stdout | from_json).stats | to_json }}"
+            quiet: true
+
+        - name: HF seed | first run seeds both models
+          ansible.builtin.include_tasks: hf_seed_case.yml
+          vars:
+            hf_seed_case: {name: fresh, ok: true}
+
+        - name: HF seed | every file has its pinned content, 0644; refs/main names the revision
+          ansible.builtin.assert:
+            that:
+              - hf_on_disk.a_cfg.checksum == 'config-a' | hash('sha256')
+              - hf_on_disk.a_w.checksum == 'weights-a' | hash('sha256')
+              - hf_on_disk.b_cfg.checksum == 'config-b' | hash('sha256')
+              - hf_on_disk.b_w.checksum == 'weights-b' | hash('sha256')
+              - hf_on_disk.a_ref.checksum == ('a' * 40) | hash('sha256')
+              - hf_on_disk.b_ref.checksum == ('b' * 40) | hash('sha256')
+              - hf_on_disk.values() | map(attribute='mode') | unique | list == ['0644']
+              - hf_on_disk.values() | map(attribute='islnk') | unique | list == [false]
+              - hf_on_disk.values() | map(attribute='pw_name') | unique | list == [ai_stack_test_hf_user]
+              - hf_on_disk.values() | map(attribute='gr_name') | unique | list == [ai_stack_test_hf_group]
+            fail_msg: "{{ hf_on_disk | to_json }}"
+            quiet: true
+
+        - name: HF seed | the folders are 0755
+          ansible.builtin.stat:
+            path: "{{ item }}"
+            follow: false
+          loop: "{{ ai_stack_test_hf_dirs[1:] }}"
+          register: ai_stack_test_hf_dir_modes
+
+        - name: HF seed | each folder is a real directory, 0755, in the seeding's group
+          ansible.builtin.assert:
+            that:
+              - ai_stack_test_hf_dir_modes.results | map(attribute='stat.mode') | unique | list == ['0755']
+              - ai_stack_test_hf_dir_modes.results | map(attribute='stat.isdir') | unique | list == [true]
+              - ai_stack_test_hf_dir_modes.results | map(attribute='stat.gr_name') | unique | list == [ai_stack_test_hf_group]
+            quiet: true
+
+        - name: HF seed | a check run on the complete seed changes nothing
+          ansible.builtin.command:
+            argv: "{{ ai_stack_test_hf_check_argv }}"
+            chdir: "{{ ai_stack_test_repo }}"
+          environment: "{{ ai_stack_test_hf_check_env }}"
+          register: ai_stack_test_hf_check_full
+          changed_when: false
+
+        - name: HF seed | nothing would change
+          vars:
+            stats: "{{ (ai_stack_test_hf_check_full.stdout | from_json).stats.localhost }}"
+          ansible.builtin.assert:
+            that:
+              - stats.changed == 0
+              - stats.failures == 0
+            fail_msg: "{{ stats | to_json }}"
+            quiet: true
+
+        # R16-5: model-a's weights differ, and the server's copy differs from the pin too, so the fetch fails.
+        # refs/main must be gone already (removed before any download); model-b keeps its refs/main untouched.
+        - name: HF seed | model-a's weights tampered with locally, the server's copy wrong as well
+          ansible.builtin.copy:
+            content: "{{ item.content }}"
+            dest: "{{ item.dest }}"
+            mode: "0644"
+          loop:
+            - {dest: "{{ ai_stack_test_hf_paths.a_w }}", content: tampered}
+            - {dest: "{{ ai_stack_test_tmp.path }}/hf-srv/org/model-a/resolve/{{ 'a' * 40 }}/model.safetensors", content: wrong}
+          loop_control:
+            label: "{{ item.dest | basename }}"
+
+        - name: HF seed | both refs/main dated 2001 (a rewrite shows)
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: file
+            modification_time: "200101010000.00"
+            modification_time_format: "%Y%m%d%H%M.%S"
+          loop:
+            - "{{ ai_stack_test_hf_paths.a_ref }}"
+            - "{{ ai_stack_test_hf_paths.b_ref }}"
+
+        - name: HF seed | the fetch fails on the hash
+          ansible.builtin.include_tasks: hf_seed_case.yml
+          vars:
+            hf_seed_case: {name: wrong-download, ok: false, error: did not match}
+
+        - name: HF seed | model-a has no refs/main and its bad download never landed; model-b is untouched
+          ansible.builtin.assert:
+            that:
+              - not hf_on_disk.a_ref.exists
+              - hf_on_disk.a_w.checksum == 'tampered' | hash('sha256')
+              - hf_on_disk.a_cfg.checksum == 'config-a' | hash('sha256')
+              - hf_on_disk.b_ref.checksum == ('b' * 40) | hash('sha256')
+              - (hf_on_disk.b_ref.mtime | int) < 1000000000
+            fail_msg: "{{ hf_on_disk | to_json }}"
+            quiet: true
+
+        - name: HF seed | the server has the right weights again
+          ansible.builtin.copy:
+            content: weights-a
+            dest: "{{ ai_stack_test_tmp.path }}/hf-srv/org/model-a/resolve/{{ 'a' * 40 }}/model.safetensors"
+            mode: "0644"
+
+        - name: HF seed | the next run fetches them and writes refs/main again
+          ansible.builtin.include_tasks: hf_seed_case.yml
+          vars:
+            hf_seed_case: {name: repaired, ok: true}
+
+        - name: HF seed | model-a complete again; model-b's refs/main still from 2001 (never removed)
+          ansible.builtin.assert:
+            that:
+              - hf_on_disk.a_w.checksum == 'weights-a' | hash('sha256')
+              - hf_on_disk.a_w.mode == '0644'
+              - hf_on_disk.a_ref.checksum == ('a' * 40) | hash('sha256')
+              - (hf_on_disk.b_ref.mtime | int) < 1000000000
+            fail_msg: "{{ hf_on_disk | to_json }}"
+            quiet: true
+
+        # A check run where model-b's config.json is gone and its refs/main is stale: it reports exactly those
+        # (a HEAD for the file, refs/main for model-b) and changes nothing.
+        - name: HF seed | model-b's config.json gone, its refs/main says old
+          ansible.builtin.copy:
+            content: old
+            dest: "{{ ai_stack_test_hf_paths.b_ref }}"
+            mode: "0644"
+
+        - name: HF seed | remove model-b's config.json
+          ansible.builtin.file:
+            path: "{{ ai_stack_test_hf_paths.b_cfg }}"
+            state: absent
+
+        - name: HF seed | a check run on the stale seed
+          ansible.builtin.command:
+            argv: "{{ ai_stack_test_hf_check_argv }}"
+            chdir: "{{ ai_stack_test_repo }}"
+          environment: "{{ ai_stack_test_hf_check_env }}"
+          register: ai_stack_test_hf_check_stale
+          changed_when: false
+
+        - name: HF seed | what is on disk after the check run
+          ansible.builtin.include_tasks: hf_seed_state.yml
+
+        - name: HF seed | the check run reports the fetch and the refs/main for model-b only, and writes nothing
+          vars:
+            run: "{{ ai_stack_test_hf_check_stale.stdout | from_json }}"
+            fetch: "{{ run.plays[0].tasks | selectattr('task.name', 'search', 'fetch the missing') | first }}"
+            refs: "{{ run.plays[0].tasks | selectattr('task.name', 'search', 'refs/main names') | first }}"
+          ansible.builtin.assert:
+            that:
+              - run.stats.localhost.failures == 0
+              - fetch.hosts.localhost.results | selectattr('changed') | map(attribute='item.path') | list == [ai_stack_test_hf_paths.b_cfg]
+              - refs.hosts.localhost.results | selectattr('changed') | map(attribute='item.repo') | list == ['org/model-b']
+              - not hf_on_disk.b_cfg.exists
+              - hf_on_disk.b_ref.checksum == 'old' | hash('sha256')
+            fail_msg: "{{ [run.stats, hf_on_disk] | to_json }}"
+            quiet: true
+
+        # A missing file (gone since the check run above): model-b gets it back and a new refs/main.
+        - name: HF seed | the next run fetches it
+          ansible.builtin.include_tasks: hf_seed_case.yml
+          vars:
+            hf_seed_case: {name: missing-file, ok: true}
+
+        - name: HF seed | model-b complete, its refs/main rewritten
+          ansible.builtin.assert:
+            that:
+              - hf_on_disk.b_cfg.checksum == 'config-b' | hash('sha256')
+              - hf_on_disk.b_ref.checksum == ('b' * 40) | hash('sha256')
+            fail_msg: "{{ hf_on_disk | to_json }}"
+            quiet: true
+
+        # Only the mode or group is off (the hash matches): fixed in place, no download, refs/main kept. The
+        # group case needs a second group of the test user (a no-op without one).
+        - name: HF seed | model-a's config.json group-writable, model-b's weights in another group, both refs/main dated 2001
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: file
+            mode: "{{ item.mode }}"
+            group: "{{ item.group }}"
+            modification_time: "{{ item.mtime }}"
+            modification_time_format: "%Y%m%d%H%M.%S"
+          loop:
+            - {path: "{{ ai_stack_test_hf_paths.a_cfg }}", mode: "0664", group: "{{ ai_stack_test_hf_group }}", mtime: preserve}
+            - {path: "{{ ai_stack_test_hf_paths.b_w }}", mode: "0644", group: "{{ ai_stack_test_hf_other_group }}", mtime: preserve}
+            - {path: "{{ ai_stack_test_hf_paths.a_ref }}", mode: "0644", group: "{{ ai_stack_test_hf_group }}", mtime: "200101010000.00"}
+            - {path: "{{ ai_stack_test_hf_paths.b_ref }}", mode: "0644", group: "{{ ai_stack_test_hf_group }}", mtime: "200101010000.00"}
+          loop_control:
+            label: "{{ item.path | basename }}"
+          vars:
+            ai_stack_test_hf_other_group: >-
+              {{ (ai_stack_test_hf_groups.stdout.split() | reject('equalto', ai_stack_test_hf_group) | list + [ai_stack_test_hf_group]) | first }}
+
+        - name: HF seed | the next run fixes the mode and the group
+          ansible.builtin.include_tasks: hf_seed_case.yml
+          vars:
+            hf_seed_case: {name: mode-and-group-drift, ok: true}
+
+        - name: HF seed | 0644 and the test user's group again, the content as pinned, refs/main never removed
+          ansible.builtin.assert:
+            that:
+              - hf_on_disk.a_cfg.mode == '0644'
+              - hf_on_disk.a_cfg.checksum == 'config-a' | hash('sha256')
+              - hf_on_disk.b_w.gr_name == ai_stack_test_hf_group
+              - hf_on_disk.b_w.checksum == 'weights-b' | hash('sha256')
+              - (hf_on_disk.a_ref.mtime | int) < 1000000000
+              - (hf_on_disk.b_ref.mtime | int) < 1000000000
+            fail_msg: "{{ hf_on_disk | to_json }}"
+            quiet: true
+
+        # Folders that aren't root's (here: the test user's), or are group-writable, are refused.
+        - name: HF seed | another owner is refused
+          ansible.builtin.include_tasks: hf_seed_case.yml
+          vars:
+            hf_seed_case: {name: wrong-owner, ok: false, owner: root, error: "isn't a real directory owned by root"}
+
+        - name: HF seed | model-a's folder group-writable
+          ansible.builtin.file:
+            path: "{{ ai_stack_test_hf_dirs[2] }}"
+            state: directory
+            mode: "0775"
+
+        - name: HF seed | a group-writable folder is refused
+          ansible.builtin.include_tasks: hf_seed_case.yml
+          vars:
+            hf_seed_case: {name: group-writable, ok: false, error: closed to group and other}
+
+        - name: HF seed | model-a's folder 0755 again
+          ansible.builtin.file:
+            path: "{{ ai_stack_test_hf_dirs[2] }}"
+            state: directory
+            mode: "0755"
+
+        # A plain file where a folder belongs (root's and 0644 would pass the owner and mode checks): refused.
+        - name: HF seed | model-a's refs folder replaced by a file (and model-a needs a fetch)
+          ansible.builtin.command:
+            argv: [sh, -c, 'rm -f "$2" && mv "$1" "$1.real" && echo x > "$1" && chmod 0644 "$1"', sh,
+                   "{{ ai_stack_test_hf_dirs[3] }}", "{{ ai_stack_test_hf_paths.a_cfg }}"]
+          changed_when: true
+
+        - name: HF seed | a file in place of a folder is refused
+          ansible.builtin.include_tasks: hf_seed_case.yml
+          vars:
+            hf_seed_case: {name: file-for-folder, ok: false, error: Refusing to write through it}
+
+        - name: HF seed | look at the file
+          ansible.builtin.stat:
+            path: "{{ ai_stack_test_hf_dirs[3] }}"
+            get_checksum: true
+            checksum_algorithm: sha256
+          register: ai_stack_test_hf_refs_file
+
+        - name: HF seed | the file is untouched and nothing was fetched
+          ansible.builtin.assert:
+            that:
+              - ai_stack_test_hf_refs_file.stat.isreg
+              - ai_stack_test_hf_refs_file.stat.checksum == 'x\n' | hash('sha256')
+              - not hf_on_disk.a_cfg.exists
+            quiet: true
+
+        - name: HF seed | the refs folder back
+          ansible.builtin.command:
+            argv: [sh, -c, 'rm "$1" && mv "$1.real" "$1"', sh, "{{ ai_stack_test_hf_dirs[3] }}"]
+          changed_when: true
+
+        # R16-1: a symlink anywhere on the path, from the seed folder's parent down to the pinned snapshot.
+        - name: HF seed | a symlinked folder on the path is refused, and nothing is written through it
+          ansible.builtin.include_tasks: hf_seed_link_case.yml
+          loop: "{{ ai_stack_test_hf_dirs }}"
+          loop_control:
+            loop_var: hf_link_case
+
+        - name: HF seed | a clean run repairs model-a after the link cases
+          ansible.builtin.include_tasks: hf_seed_case.yml
+          vars:
+            hf_seed_case: {name: after-links, ok: true}
+
+        - name: HF seed | model-a complete again
+          ansible.builtin.assert:
+            that:
+              - hf_on_disk.a_cfg.checksum == 'config-a' | hash('sha256')
+              - hf_on_disk.a_ref.checksum == ('a' * 40) | hash('sha256')
+            fail_msg: "{{ hf_on_disk | to_json }}"
+            quiet: true
+
+        # refs/main is a folder (with something in it): refused, never removed.
+        - name: HF seed | refs/main is a folder holding a file (and model-a needs a fetch)
+          ansible.builtin.command:
+            argv: [sh, -c, 'rm -f "$1" "$2" && mkdir "$1" && echo keep > "$1/keep"', sh, "{{ ai_stack_test_hf_paths.a_ref }}",
+                   "{{ ai_stack_test_hf_paths.a_cfg }}"]
+          changed_when: true
+
+        - name: HF seed | a folder at refs/main is refused
+          ansible.builtin.include_tasks: hf_seed_case.yml
+          vars:
+            hf_seed_case: {name: refs-main-folder, ok: false, error: isn't a regular file}
+
+        - name: HF seed | look in the refs/main folder
+          ansible.builtin.stat:
+            path: "{{ ai_stack_test_hf_paths.a_ref }}/keep"
+          register: ai_stack_test_hf_keep
+
+        - name: HF seed | the folder and its file are still there
+          ansible.builtin.assert:
+            that:
+              - ai_stack_test_hf_keep.stat.exists
+              - hf_on_disk.a_ref.isdir
+              - not hf_on_disk.a_cfg.exists
+            quiet: true
+
+        - name: HF seed | remove the refs/main folder
+          ansible.builtin.file:
+            path: "{{ ai_stack_test_hf_paths.a_ref }}"
+            state: absent
+
+        # Symlinked files: refs/main pointing at a victim file, and a snapshot file pointing at a file with the
+        # pinned content (a stat that followed it would find the right hash).
+        - name: HF seed | victim files
+          ansible.builtin.copy:
+            content: "{{ item.content }}"
+            dest: "{{ ai_stack_test_tmp.path }}/{{ item.name }}"
+            mode: "0644"
+          loop:
+            - {name: victim-ref, content: victim}
+            - {name: victim-cfg, content: config-b}
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: HF seed | refs/main is a symlink (and model-a needs a fetch)
+          ansible.builtin.command:
+            argv: [sh, -c, 'rm -f "$1" "$3" && ln -s "$2" "$1"', sh, "{{ ai_stack_test_hf_paths.a_ref }}",
+                   "{{ ai_stack_test_tmp.path }}/victim-ref", "{{ ai_stack_test_hf_paths.a_cfg }}"]
+          changed_when: true
+
+        - name: HF seed | a symlinked refs/main is refused
+          ansible.builtin.include_tasks: hf_seed_case.yml
+          vars:
+            hf_seed_case: {name: link-refs-main, ok: false, error: isn't a regular file}
+
+        - name: HF seed | refs/main still the link, its target untouched, config.json not fetched
+          ansible.builtin.assert:
+            that:
+              - hf_on_disk.a_ref.islnk
+              - lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/victim-ref') == 'victim'
+              - not hf_on_disk.a_cfg.exists
+            fail_msg: "{{ hf_on_disk | to_json }}"
+            quiet: true
+
+        - name: HF seed | model-b's config.json is a symlink to a file with the pinned content
+          ansible.builtin.command:
+            argv: [sh, -c, 'rm "$1" && ln -s "$2" "$1" && rm "$3"', sh, "{{ ai_stack_test_hf_paths.b_cfg }}",
+                   "{{ ai_stack_test_tmp.path }}/victim-cfg", "{{ ai_stack_test_hf_paths.a_ref }}"]
+          changed_when: true
+
+        - name: HF seed | a symlinked snapshot file is refused
+          ansible.builtin.include_tasks: hf_seed_case.yml
+          vars:
+            hf_seed_case: {name: link-snapshot-file, ok: false, error: isn't a regular file}
+
+        - name: HF seed | the link is still there, model-a still unfetched
+          ansible.builtin.assert:
+            that:
+              - hf_on_disk.b_cfg.islnk
+              - not hf_on_disk.a_cfg.exists
+              - not hf_on_disk.a_ref.exists
+            fail_msg: "{{ hf_on_disk | to_json }}"
+            quiet: true
+
+        - name: HF seed | remove the link
+          ansible.builtin.file:
+            path: "{{ ai_stack_test_hf_paths.b_cfg }}"
+            state: absent
+
+        - name: HF seed | a clean run seeds everything again
+          ansible.builtin.include_tasks: hf_seed_case.yml
+          vars:
+            hf_seed_case: {name: final, ok: true}
+
+        - name: HF seed | complete, nothing a link
+          ansible.builtin.assert:
+            that:
+              - hf_on_disk.a_cfg.checksum == 'config-a' | hash('sha256')
+              - hf_on_disk.b_cfg.checksum == 'config-b' | hash('sha256')
+              - hf_on_disk.a_ref.checksum == ('a' * 40) | hash('sha256')
+              - hf_on_disk.b_ref.checksum == ('b' * 40) | hash('sha256')
+              - hf_on_disk.values() | map(attribute='islnk') | unique | list == [false]
+              - lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/victim-cfg') == 'config-b'
+            fail_msg: "{{ hf_on_disk | to_json }}"
+            quiet: true
+      always:
+        - name: HF seed | stop the stand-in server
+          ansible.builtin.command:
+            argv: [sh, -c, 'test ! -s "$1" || kill "$(cat "$1")" 2>/dev/null || true', sh, "{{ ai_stack_test_hf_pidfile }}"]
+          changed_when: false
+
+    - name: Pinned addresses that don't fit are refused
+      ansible.builtin.assert:
+        that:
+          - (ai_stack_network_subnet | ai_stack_pinned_ip_problems(item.pins)) | length > 0
+        fail_msg: "{{ item.name }} was accepted"
+        quiet: true
+      loop:
+        - {name: outside, pins: {gpu-broker: 172.21.0.3}}
+        - {name: gateway, pins: {gpu-broker: 172.20.0.1}}
+        - {name: webui-on-gateway, pins: {open-webui: 172.20.0.1}}
+        - {name: network, pins: {gpu-broker: 172.20.0.0}}
+        - {name: broadcast, pins: {gpu-broker: 172.20.0.255}}
+        - {name: duplicate, pins: {gpu-broker: 172.20.0.3, open-webui: 172.20.0.3}}
+        - {name: not-an-ip, pins: {gpu-broker: broker}}
+      loop_control:
+        label: "{{ item.name }}"
+
+    # ---- 2. gpu-broker.json ---------------------------------------------------------------------------
+    # inventory/group_vars/all/main.yml sets both model names, so "unset" cases undefine them per task.
+    - name: Broker config, no models set
+      ansible.builtin.copy:
+        content: "{{ ai_stack_broker_config_content }}"
+        dest: "{{ ai_stack_test_tmp.path }}/none.json"
+        mode: "0644"
+      vars:
+        ai_embed_model: "{{ undef(hint='unset in this case') }}"
+        ai_cpu_model: "{{ undef(hint='unset in this case') }}"
+        ai_gpu_model: "{{ undef(hint='unset in this case') }}"
+
+    - name: Broker config, only the CPU model set
+      ansible.builtin.copy:
+        content: "{{ ai_stack_broker_config_content }}"
+        dest: "{{ ai_stack_test_tmp.path }}/cpu-only.json"
+        mode: "0644"
+      vars:
+        ai_embed_model: "{{ undef(hint='unset in this case') }}"
+        ai_cpu_model: qwen3:1.7b
+        ai_gpu_model: "{{ undef(hint='unset in this case') }}"
+
+    - name: Broker config, only the GPU model set
+      ansible.builtin.copy:
+        content: "{{ ai_stack_broker_config_content }}"
+        dest: "{{ ai_stack_test_tmp.path }}/gpu-only.json"
+        mode: "0644"
+      vars:
+        ai_embed_model: "{{ undef(hint='unset in this case') }}"
+        ai_gpu_model: qwen3:8b
+        ai_cpu_model: "{{ undef(hint='unset in this case') }}"
+
+    - name: Broker config, both models set
+      ansible.builtin.copy:
+        content: "{{ ai_stack_broker_config_content }}"
+        dest: "{{ ai_stack_test_tmp.path }}/both.json"
+        mode: "0644"
+      vars:
+        ai_embed_model: "{{ undef(hint='unset in this case') }}"
+        ai_cpu_model: qwen3:1.7b
+        ai_gpu_model: qwen3:8b
+
+    # §12.22: the embed alias, alone and next to the chat alias (apps/gpu-broker already takes any number).
+    - name: Broker config, only the embedding model set
+      ansible.builtin.copy:
+        content: "{{ ai_stack_broker_config_content }}"
+        dest: "{{ ai_stack_test_tmp.path }}/embed-only.json"
+        mode: "0644"
+      vars:
+        ai_embed_model: nomic-embed-text:v1.5
+        ai_cpu_model: "{{ undef(hint='unset in this case') }}"
+        ai_gpu_model: "{{ undef(hint='unset in this case') }}"
+
+    - name: Broker config, chat models and the embedding model set
+      ansible.builtin.copy:
+        content: "{{ ai_stack_broker_config_content }}"
+        dest: "{{ ai_stack_test_tmp.path }}/all.json"
+        mode: "0644"
+      vars:
+        ai_embed_model: nomic-embed-text:v1.5
+        ai_cpu_model: qwen3:1.7b
+        ai_gpu_model: qwen3:8b
+
+    # The fixed GPU context (apps/gpu-broker gpu_num_ctx) follows the shared ai_gpu_num_ctx (group_vars/all sets
+    # 32768, so every config above has it); with that unset it is null.
+    - name: Broker config, both models, ai_gpu_num_ctx unset
+      ansible.builtin.copy:
+        content: "{{ ai_stack_broker_config_content }}"
+        dest: "{{ ai_stack_test_tmp.path }}/ctx-unset.json"
+        mode: "0644"
+      vars:
+        ai_embed_model: "{{ undef(hint='unset in this case') }}"
+        ai_cpu_model: qwen3:1.7b
+        ai_gpu_model: qwen3:8b
+        ai_gpu_num_ctx: "{{ undef(hint='unset in this case') }}"
+
+    - name: The broker's own --check accepts every config
+      ansible.builtin.command:
+        argv:
+          - "{{ ai_stack_test_python }}"
+          - -m
+          - gpu_broker
+          - --config
+          - "{{ ai_stack_test_tmp.path }}/{{ item }}.json"
+          - --check
+        chdir: "{{ ai_stack_test_broker_dir }}"
+      environment:
+        PYTHONDONTWRITEBYTECODE: "1"
+      register: ai_stack_test_check
+      changed_when: false
+      loop: [none, cpu-only, gpu-only, both, embed-only, all, ctx-unset]
+
+    - name: The broker's --check really rejects a bad config (the check is not a no-op)
+      ansible.builtin.copy:
+        content: '{"gate_url": "http://100.64.0.20:11500", "gpu_url": "http://100.64.0.20:11434", "cpu_url": "x", "nope": 1}'
+        dest: "{{ ai_stack_test_tmp.path }}/bad.json"
+        mode: "0644"
+
+    - name: Run --check on the bad config
+      ansible.builtin.command:
+        argv: ["{{ ai_stack_test_python }}", -m, gpu_broker, --config, "{{ ai_stack_test_tmp.path }}/bad.json", --check]
+        chdir: "{{ ai_stack_test_broker_dir }}"
+      environment:
+        PYTHONDONTWRITEBYTECODE: "1"
+      register: ai_stack_test_bad
+      changed_when: false
+      failed_when: ai_stack_test_bad.rc != 2
+
+    - name: Configs have the right URLs and aliases only when both models are set
+      vars:
+        cfg_none: "{{ lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/none.json') | from_json }}"
+        cpu_only: "{{ lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/cpu-only.json') | from_json }}"
+        gpu_only: "{{ lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/gpu-only.json') | from_json }}"
+        both: "{{ lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/both.json') | from_json }}"
+        embed_only: "{{ lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/embed-only.json') | from_json }}"
+        all_set: "{{ lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/all.json') | from_json }}"
+        both_text: "{{ lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/both.json') }}"
+        unset_text: "{{ lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/ctx-unset.json') }}"
+        ctx_unset: "{{ unset_text | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - ai_stack_test_check.results | map(attribute='stdout') | select('search', ' OK ') | list | length == 7
+          - >-
+            embed_only.aliases == {'embed': {'gpu': 'nomic-embed-text:v1.5', 'cpu': 'nomic-embed-text:v1.5'}}
+          - >-
+            all_set.aliases == {'assistant': {'gpu': 'qwen3:8b', 'cpu': 'qwen3:1.7b'},
+                                'embed': {'gpu': 'nomic-embed-text:v1.5', 'cpu': 'nomic-embed-text:v1.5'}}
+          - ai_stack_test_check.results[5].stdout is search('\(2 aliases\)')
+          - >-
+            cfg_none == {'gate_url': 'http://100.64.0.20:11500', 'gpu_url': 'http://100.64.0.20:11434',
+                         'cpu_url': 'http://ollama-cpu:11434', 'aliases': {}, 'management_clients': ['172.20.0.4'],
+                         'gpu_num_ctx': 32768}
+          # §12.23: open-webui's pinned address is the only management client, in every config.
+          - >-
+            [cpu_only, gpu_only, both, embed_only, all_set] | map(attribute='management_clients') | unique | list
+            == [['172.20.0.4']]
+          - cpu_only.aliases == {}
+          - gpu_only.aliases == {}
+          - >-
+            both.aliases == {'assistant': {'gpu': 'qwen3:8b', 'cpu': 'qwen3:1.7b'}}
+          - both.gate_url == cfg_none.gate_url and both.cpu_url == cfg_none.cpu_url
+          - ai_stack_test_check.results[3].stdout is search('\(1 aliases\)')
+          # gpu_num_ctx: the shared ai_gpu_num_ctx as a JSON number (unquoted), null when that is unset; never
+          # cpu_num_ctx.
+          - ai_gpu_num_ctx == 32768
+          - ai_stack_broker_gpu_num_ctx == 32768 and ai_stack_broker_gpu_num_ctx is integer
+          - >-
+            [cfg_none, cpu_only, gpu_only, both, embed_only, all_set] | map(attribute='gpu_num_ctx') | unique | list == [32768]
+          - both.gpu_num_ctx is integer and both.gpu_num_ctx is not boolean
+          - >-
+            both_text is search('\n  "gpu_num_ctx": 32768,\n')
+          - ctx_unset.gpu_num_ctx is none
+          - >-
+            unset_text is search('\n  "gpu_num_ctx": null,\n')
+          - >-
+            ctx_unset | combine({'gpu_num_ctx': 32768}) == both
+          - >-
+            [cfg_none, cpu_only, gpu_only, both, embed_only, all_set, ctx_unset] | selectattr('cpu_num_ctx', 'defined') | list | length == 0
+        fail_msg: "{{ [cfg_none, cpu_only, gpu_only, both, ctx_unset, ai_stack_test_check.results | map(attribute='stdout') | list] | to_json }}"
+        quiet: true
+
+    - name: The config hash follows the config content
+      vars:
+        ai_embed_model: "{{ undef(hint='unset in this case') }}"
+        ai_cpu_model: "{{ undef(hint='unset in this case') }}"
+        ai_gpu_model: "{{ undef(hint='unset in this case') }}"
+        hash_none: "{{ ai_stack_broker_config_hash }}"
+      ansible.builtin.assert:
+        that:
+          - hash_none == (lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/none.json') ~ '\n') | hash('sha256')
+          - hash_none != ((lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/both.json') ~ '\n') | hash('sha256'))
+          # Changing the GPU context changes the config, so the broker is recreated with it.
+          - >-
+            (lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/both.json') ~ '\n') | hash('sha256')
+            != (lookup('ansible.builtin.file', ai_stack_test_tmp.path ~ '/ctx-unset.json') ~ '\n') | hash('sha256')
+        quiet: true
+
+    - name: Broker GPU context, per ai_gpu_num_ctx case (the role's preflight)
+      ansible.builtin.include_tasks: num_ctx_case.yml
+      loop:
+        - {name: null-value, value: null, ok: true}
+        - {name: group-vars-32768, value: 32768, ok: true}
+        - {name: minimum, value: 2048, ok: true}
+        - {name: maximum, value: 262144, ok: true}
+        - {name: below, value: 2047, ok: false}
+        - {name: above, value: 262145, ok: false}
+        - {name: zero, value: 0, ok: false}
+        - {name: quoted, value: "32768", ok: false}
+        - {name: boolean, value: true, ok: false}
+        - {name: float, value: 32768.0, ok: false}
+        - {name: list, value: [32768], ok: false}
+      loop_control:
+        loop_var: num_ctx_case
+        label: "{{ num_ctx_case.name }}"
+
+    # ---- 3. boot helper -------------------------------------------------------------------------------
+    - name: The boot helper checks exactly the services compose publishes
+      vars:
+        compose: "{{ ai_stack_test_compose_raw.content | b64decode | from_yaml }}"
+        from_compose: >-
+          {{ compose.services | dict2items | selectattr('value.ports', 'defined')
+             | map(attribute='value') | map(attribute='ports') | flatten
+             | map('replace', tailnet_ip ~ ':', '') | list }}
+        from_compose_names: >-
+          {{ compose.services | dict2items | selectattr('value.ports', 'defined') | map(attribute='key') | list }}
+        from_vars: "{{ ai_stack_tailnet_publishes | map(attribute='spec') | list }}"
+      ansible.builtin.assert:
+        that:
+          - from_vars | length == 2
+          - from_vars | map('regex_replace', '^[^:]+:', '') | list == from_compose
+          - from_vars | map('regex_replace', ':.*$', '') | list == from_compose_names
+          # The helper addresses containers by service name.
+          - from_compose_names | map('extract', compose.services) | map(attribute='container_name') | list
+            == from_compose_names
+        fail_msg: "{{ [from_vars, from_compose, from_compose_names] | to_json }}"
+        quiet: true
+
+    - name: Fake bin directory
+      ansible.builtin.file:
+        path: "{{ ai_stack_test_tmp.path }}/bin"
+        state: directory
+        mode: "0755"
+
+    # ip: prints the tailnet address only when FAKE_IP_HAS_ADDR=1.
+    # docker: logs every call and plays the containers described in FAKE_STATE_DIR:
+    #   names              the project's containers (`docker ps`)
+    #   <name>.inspect     "<status>|<start error>" (`docker inspect`)
+    #   <name>.port        `docker port` output; absent = no binding (exit 1, like Docker)
+    #   <name>.port.fixed  what a recreate binds (`docker compose ... up`), unless FAKE_COMPOSE_NOFIX=1
+    # FAKE_COMPOSE_FAIL=1 makes `docker compose` fail. `docker compose` also logs "UNLOCKED compose" if the
+    # stack lock (FAKE_LOCK) is free while it runs.
+    - name: Fake ip and docker
+      ansible.builtin.copy:
+        dest: "{{ ai_stack_test_tmp.path }}/bin/{{ item.name }}"
+        mode: "0755"
+        content: "{{ item.content }}"
+      loop:
+        - name: ip
+          content: |
+            #!/bin/sh
+            echo "1: lo    inet 127.0.0.1/8 scope host lo"
+            echo "2: eno1    inet 192.0.2.10/24 brd 192.0.2.255 scope global eno1"
+            if [ "${FAKE_IP_HAS_ADDR:-0}" = 1 ]; then
+              echo "3: tailscale0    inet 100.64.0.10/32 scope global tailscale0"
+            fi
+        - name: docker
+          content: |
+            #!/bin/sh
+            echo "$*" >> "$FAKE_DOCKER_LOG"
+            D=$FAKE_STATE_DIR
+            case "$1" in
+              ps) cat "$D/names" ;;
+              inspect)
+                for last; do :; done
+                cat "$D/$last.inspect" ;;
+              port)
+                if [ ! -f "$D/$2.port" ]; then
+                  echo "Error: No public port '$3' published for $2" >&2
+                  exit 1
+                fi
+                cat "$D/$2.port" ;;
+              compose)
+                # The helper must hold the stack lock while it recreates.
+                if flock --nonblock "$FAKE_LOCK" true; then echo "UNLOCKED compose" >> "$FAKE_DOCKER_LOG"; fi
+                if [ "${FAKE_COMPOSE_FAIL:-0}" = 1 ]; then
+                  echo "compose: simulated failure" >&2
+                  exit 1
+                fi
+                svcs=0
+                for a; do
+                  if [ "$svcs" = 1 ] && [ "${FAKE_COMPOSE_NOFIX:-0}" != 1 ]; then
+                    cp "$D/$a.port.fixed" "$D/$a.port"
+                  fi
+                  if [ "$a" = --no-deps ]; then svcs=1; fi
+                done ;;
+              *) exit 99 ;;
+            esac
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Render the boot helper with the fake PATH
+      ansible.builtin.template:
+        src: "{{ ai_stack_test_role }}/templates/homelab-ai-stack-start.sh.j2"
+        dest: "{{ ai_stack_test_tmp.path }}/start.sh"
+        mode: "0755"
+      vars:
+        ai_stack_start_path: "{{ ai_stack_test_tmp.path }}/bin:/usr/bin:/bin"
+        ai_stack_tailnet_wait_seconds: 2
+        ai_stack_lock_file: "{{ ai_stack_test_tmp.path }}/stack.lock"
+        ai_stack_lock_wait: 1
+
+    - name: The rendered helper is valid sh
+      ansible.builtin.command:
+        argv: [sh, -n, "{{ ai_stack_test_tmp.path }}/start.sh"]
+      changed_when: false
+
+    # Each case: the containers' states, the expected exit status, the expected compose call (or none).
+    - name: Boot helper cases
+      ansible.builtin.include_tasks: boot_case.yml
+      loop:
+        - name: broker-up-without-binding
+          containers:
+            gpu-broker: { status: running, port: false }
+            open-webui: { status: running, port: true }
+          rc: 0
+          compose: [gpu-broker]
+        - name: both-up-without-binding
+          containers:
+            gpu-broker: { status: running, port: false }
+            open-webui: { status: running, port: false }
+          rc: 0
+          compose: [gpu-broker, open-webui]
+        - name: restarting-without-binding
+          containers:
+            gpu-broker: { status: running, port: true }
+            open-webui: { status: restarting, port: false }
+          rc: 0
+          compose: [open-webui]
+        - name: all-bound
+          containers:
+            gpu-broker: { status: running, port: true }
+            open-webui: { status: running, port: true }
+          rc: 0
+          compose: []
+        - name: stopped-on-purpose
+          containers:
+            gpu-broker: { status: exited, port: false }
+            open-webui: { status: exited, port: false }
+          rc: 0
+          compose: []
+        - name: one-stopped-one-unbound
+          containers:
+            gpu-broker: { status: exited, port: false }
+            open-webui: { status: running, port: false }
+          rc: 0
+          compose: [open-webui]
+        - name: refused-start
+          containers:
+            gpu-broker: { status: exited, port: false, error: "cannot assign requested address" }
+            open-webui: { status: running, port: true }
+          rc: 0
+          compose: [gpu-broker]
+        - name: removed
+          containers:
+            open-webui: { status: running, port: true }
+          rc: 0
+          compose: []
+        - name: compose-fails
+          containers:
+            gpu-broker: { status: running, port: false }
+            open-webui: { status: running, port: true }
+          env: { FAKE_COMPOSE_FAIL: "1" }
+          rc: 1
+          compose: [gpu-broker]
+          stderr: "docker compose up --force-recreate failed for: gpu-broker"
+        - name: recreate-does-not-bind
+          containers:
+            gpu-broker: { status: running, port: false }
+            open-webui: { status: running, port: true }
+          env: { FAKE_COMPOSE_NOFIX: "1" }
+          rc: 1
+          compose: [gpu-broker]
+          stderr: "gpu-broker: recreated but 100.64.0.10:11434 is still not bound"
+        - name: wrong-address-bound
+          containers:
+            gpu-broker: { status: running, port: true, port_text: "0.0.0.0:11434" }
+            open-webui: { status: running, port: true }
+          rc: 0
+          compose: [gpu-broker]
+        # --heal (the playbook's step): the same decisions, no address wait.
+        - name: heal-recreates
+          args: [--heal]
+          containers:
+            gpu-broker: { status: running, port: false }
+            open-webui: { status: running, port: true }
+          rc: 0
+          compose: [gpu-broker]
+        - name: heal-healthy-host
+          args: [--heal]
+          containers:
+            gpu-broker: { status: running, port: true }
+            open-webui: { status: running, port: true }
+          rc: 0
+          compose: []
+        - name: heal-compose-fails
+          args: [--heal]
+          containers:
+            gpu-broker: { status: running, port: true }
+            open-webui: { status: running, port: false }
+          env: { FAKE_COMPOSE_FAIL: "1" }
+          rc: 1
+          compose: [open-webui]
+          stderr: "docker compose up --force-recreate failed for: open-webui"
+        - name: heal-dry-run
+          args: [--heal, --dry-run]
+          dry: true
+          containers:
+            gpu-broker: { status: running, port: false }
+            open-webui: { status: running, port: false }
+          rc: 0
+          compose: [gpu-broker, open-webui]
+        - name: heal-no-address
+          args: [--heal]
+          env: { FAKE_IP_HAS_ADDR: "0" }
+          containers:
+            gpu-broker: { status: running, port: false }
+          rc: 1
+          compose: []
+          no_docker: true
+          stderr: "is not on this host after 0s"
+        - name: bad-option
+          args: [--dry-run]
+          containers:
+            gpu-broker: { status: running, port: false }
+          rc: 2
+          compose: []
+          no_docker: true
+          stderr: "--dry-run needs --heal"
+      loop_control:
+        loop_var: ai_stack_case
+        label: "{{ ai_stack_case.name }}"
+      vars:
+        ai_stack_case_dir: "{{ ai_stack_test_tmp.path }}/case-{{ ai_stack_case.name }}"
+        ai_stack_case_lock: "{{ ai_stack_test_tmp.path }}/stack.lock"
+        ai_stack_case_ports: { gpu-broker: 11434, open-webui: 8080 }
+
+    # The lock: while something else holds it, the helper gives up after the bounded wait (ai_stack_lock_wait,
+    # 1 s here) and calls no Docker command; a dry run doesn't need the lock.
+    - name: Lock case | state directory
+      ansible.builtin.file:
+        path: "{{ ai_stack_test_tmp.path }}/lock-case"
+        state: directory
+        mode: "0755"
+
+    - name: Lock case | containers for the lock tests
+      ansible.builtin.copy:
+        dest: "{{ ai_stack_test_tmp.path }}/lock-case/{{ item.name }}"
+        content: "{{ item.content }}"
+        mode: "0644"
+      loop:
+        - { name: names, content: "gpu-broker\nopen-webui\n" }
+        - { name: gpu-broker.inspect, content: "running|\n" }
+        - { name: open-webui.inspect, content: "running|\n" }
+        - { name: open-webui.port, content: "100.64.0.10:8080\n" }
+        - { name: gpu-broker.port.fixed, content: "100.64.0.10:11434\n" }
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Lock case | helper while another process holds the lock
+      ansible.builtin.command:
+        argv: [flock, "{{ ai_stack_test_tmp.path }}/stack.lock", "{{ ai_stack_test_tmp.path }}/start.sh", --heal]
+      environment:
+        FAKE_IP_HAS_ADDR: "1"
+        FAKE_STATE_DIR: "{{ ai_stack_test_tmp.path }}/lock-case"
+        FAKE_LOCK: "{{ ai_stack_test_tmp.path }}/stack.lock"
+        FAKE_DOCKER_LOG: "{{ ai_stack_test_tmp.path }}/lock-case/docker-heal.log"
+      register: ai_stack_test_locked
+      changed_when: false
+      failed_when: ai_stack_test_locked.rc != 1
+
+    - name: Lock case | a dry run while the lock is held
+      ansible.builtin.command:
+        argv: [flock, "{{ ai_stack_test_tmp.path }}/stack.lock", "{{ ai_stack_test_tmp.path }}/start.sh", --heal, --dry-run]
+      environment:
+        FAKE_IP_HAS_ADDR: "1"
+        FAKE_STATE_DIR: "{{ ai_stack_test_tmp.path }}/lock-case"
+        FAKE_LOCK: "{{ ai_stack_test_tmp.path }}/stack.lock"
+        FAKE_DOCKER_LOG: "{{ ai_stack_test_tmp.path }}/lock-case/docker-dry.log"
+      register: ai_stack_test_locked_dry
+      changed_when: false
+
+    - name: Lock case | look for Docker calls from the timed-out run
+      ansible.builtin.stat:
+        path: "{{ ai_stack_test_tmp.path }}/lock-case/docker-heal.log"
+      register: ai_stack_test_locked_log
+
+    - name: Lock case | a held lock times out cleanly; a dry run doesn't wait for it
+      ansible.builtin.assert:
+        that:
+          - ai_stack_test_locked.stderr is search('could not take the stack lock .* within 1s')
+          - not ai_stack_test_locked_log.stat.exists
+          - ai_stack_test_locked_dry.rc == 0
+          - ai_stack_test_locked_dry.stdout is search(ai_stack_heal_changed_re, multiline=True)
+          - ai_stack_test_locked_dry.stdout is search('^WOULD-RECREATE gpu-broker$', multiline=True)
+        fail_msg: "{{ [ai_stack_test_locked.stderr, ai_stack_test_locked_dry.stdout] | to_json }}"
+        quiet: true
+
+    - name: Boot helper, address never appears
+      ansible.builtin.command:
+        argv: ["{{ ai_stack_test_tmp.path }}/start.sh"]
+      environment:
+        FAKE_IP_HAS_ADDR: "0"
+        FAKE_STATE_DIR: "{{ ai_stack_test_tmp.path }}"
+        FAKE_DOCKER_LOG: "{{ ai_stack_test_tmp.path }}/docker-absent.log"
+      register: ai_stack_test_start_noaddr
+      changed_when: false
+      failed_when: ai_stack_test_start_noaddr.rc != 1
+
+    - name: Look for a docker log from the no-address run
+      ansible.builtin.stat:
+        path: "{{ ai_stack_test_tmp.path }}/docker-absent.log"
+      register: ai_stack_test_absent_log
+
+    - name: Without the address the helper gives up after the bounded wait and never calls Docker
+      ansible.builtin.assert:
+        that:
+          - ai_stack_test_start_noaddr.stderr is search('not on this host after 2s')
+          - not ai_stack_test_absent_log.stat.exists
+        quiet: true
+
+    - name: Remove the scratch directory
+      ansible.builtin.file:
+        path: "{{ ai_stack_test_tmp.path }}"
+        state: absent

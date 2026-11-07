@@ -1,0 +1,1293 @@
+---
+# Offline test for role ai_control (no root, nothing applied to this machine, no tailscale; synthetic
+# addresses from the CGNAT range and a dummy node name). Run it through tests/run.sh, which also
+# checks that the agent token (a synthetic canary) never reaches the -v output:
+#   roles/ai_control/tests/run.sh
+# It runs the role's own task files against a scratch dir (stub handlers):
+#   1. preflight.yml: passes; refuses a missing token, a short token, a userns sysctl of 0, a port
+#      outside module G's list, and a config extra that overrides a role-owned key;
+#   2. install.yml twice with strays planted in between (pruned), a third time changing nothing;
+#   3. config.yml: config.json (every key of S's config.example.json, validated by S's loader), the
+#      agent token file (0640, exact content), the state dir;
+#   4. helper.yml: helper.json validated by the installed helper, and by its run-time loader;
+#   5. the units: rendered with the role's real paths, systemd-analyze verify clean;
+#   6. role tailscale_serve's validate/desired/compare with the role's parameters.
+- name: Role ai_control installs S, W and X, writes the configs and token, and declares the serve config
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  vars:
+    tailnet_ip: 100.64.0.10
+    gaming_pc_tailnet_ip: 100.64.0.20
+    tailnet_fqdn: ai-box.example.ts.net
+    tailnet_ip6: fd7a:115c:a1e0::a
+    ansible_managed: Ansible managed
+    # run.sh passes its scratch dir and the canary token (synthetic, 64 hex).
+    test_tmp: ""
+    test_canary: ""
+    ai_control_agent_token: "{{ test_canary }}"
+    test_repo: "{{ playbook_dir }}/../../.."
+    test_me: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+  handlers:
+    - name: Reload systemd for ai-control
+      ansible.builtin.debug:
+        msg: reload requested
+    - name: Reload ai-control guard
+      ansible.builtin.debug:
+        msg: guard reload requested
+    - name: Restart aictl-helper socket
+      ansible.builtin.debug:
+        msg: socket restart requested
+    - name: Restart ai-control
+      ansible.builtin.debug:
+        msg: restart requested
+  tasks:
+    - name: Run.sh passed a scratch dir and a canary
+      ansible.builtin.assert:
+        that:
+          - test_tmp is abs
+          - test_canary is match('^[0-9a-f]{64}$')
+        fail_msg: Run this through roles/ai_control/tests/run.sh.
+        quiet: true
+
+    - name: Point the role at the repo's apps and the scratch dir
+      ansible.builtin.set_fact:
+        ai_control_src_dir: "{{ test_repo }}/apps/ai-control"
+        # Scratch copies of S's package and W's public/ with never-deployed junk planted (below).
+        ai_control_server_src: "{{ test_tmp }}/src/ai_control"
+        ai_control_web_src: "{{ test_tmp }}/src/public"
+        ai_control_docker_defaults_file: "{{ test_repo }}/roles/docker/defaults/main.yml"
+        ai_control_agent_defaults_file: "{{ test_repo }}/roles/ai_host_agent/defaults/main.yml"
+        ai_control_helper_src: "{{ test_repo }}/apps/ai-control/helper/aictl_helper.py"
+        ai_control_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        ai_control_root_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        ai_control_user: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        ai_control_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
+        ai_control_app_dir: "{{ test_tmp }}/opt/ai-control"
+        ai_control_server_dir: "{{ test_tmp }}/opt/ai-control/server"
+        ai_control_web_dir: "{{ test_tmp }}/opt/ai-control/web"
+        ai_control_helper_script: "{{ test_tmp }}/sbin/aictl-helper"
+        ai_control_config_dir: "{{ test_tmp }}/etc/ai-control"
+        ai_control_config_file: "{{ test_tmp }}/etc/ai-control/config.json"
+        ai_control_token_file: "{{ test_tmp }}/etc/ai-control/agent-token"
+        ai_control_helper_config_file: "{{ test_tmp }}/etc/ai-control/helper.json"
+        ai_control_state_dir: "{{ test_tmp }}/var/lib/ai-control"
+        ai_control_userns_sysctl: "{{ test_tmp }}/userns-1"
+        # The guard: the interface check stands in for `ip link show tailscale0`; the probe from the repo.
+        ai_control_iface_check_argv: [/usr/bin/true]
+        ai_control_guard_probe_src: "{{ test_repo }}/roles/ai_control/files/guard_probe.py"
+
+    - name: Scratch dirs and the synthetic sysctl files
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          mkdir -p "{{ test_tmp }}/sbin" "{{ test_tmp }}/units-helper" "{{ test_tmp }}/src"
+          cp -r "{{ test_repo }}/apps/ai-control/server/ai_control" "{{ test_tmp }}/src/ai_control"
+          cp -r "{{ test_repo }}/apps/ai-control/web/public" "{{ test_tmp }}/src/public"
+          # Junk that matches the include patterns but must never deploy (kills a removed skip filter).
+          s="{{ test_tmp }}/src/ai_control"; w="{{ test_tmp }}/src/public"
+          mkdir -p "$s/__pycache__" "$s/tests" "$s/test" "$w/test" "$w/tests" "$w/node_modules/x" "$w/js/tests"
+          echo x > "$s/__pycache__/junk.py"; echo x > "$s/tests/test_junk.py"; echo x > "$s/test/junk.py"
+          echo x > "$w/test/junk.js"; echo x > "$w/tests/junk.html"; echo x > "$w/node_modules/x/junk.js"
+          echo x > "$w/js/tests/junk.js"
+          printf 'ai_host_agent_port: 11511\n' > "{{ test_tmp }}/agent-defaults-11511.yml"
+          echo 1 > "{{ test_tmp }}/userns-1"
+          echo 0 > "{{ test_tmp }}/userns-0"
+        executable: /bin/bash
+      changed_when: true
+
+    # ---- 1. preflight -----------------------------------------------------------------------------
+    - name: Preflight passes with the synthetic inputs
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+
+    - name: Preflight refuses bad inputs
+      ansible.builtin.include_tasks: expect_preflight_refusal.yml
+      loop:
+        - name: no token
+          vars: {ai_control_agent_token: ""}
+          task: Preflight | a well-formed token was passed in, or ai-box keeps the one it has
+        - name: a short token
+          vars: {ai_control_agent_token: "abc123"}
+          task: Preflight | a well-formed token was passed in, or ai-box keeps the one it has
+        - name: a token with a space
+          vars: {ai_control_agent_token: "0123456789abcdef0123456789abcdef 0123"}
+          task: Preflight | a well-formed token was passed in, or ai-box keeps the one it has
+        - name: userns restriction off
+          vars: {ai_control_userns_sysctl: "{{ test_tmp }}/userns-0"}
+          task: Preflight | unprivileged user namespaces are restricted (sudo audit rows can't be forged)
+        - name: userns sysctl missing
+          vars: {ai_control_userns_sysctl: "{{ test_tmp }}/no-such-file"}
+          task: Preflight | unprivileged user namespaces are restricted (sudo audit rows can't be forged)
+        - name: no token and no token file on ai-box to keep
+          vars: {ai_control_agent_token: ""}
+          task: Preflight | a well-formed token was passed in, or ai-box keeps the one it has
+        - name: the agent serves another port
+          vars: {ai_control_agent_defaults_file: "{{ test_tmp }}/agent-defaults-11511.yml"}
+          task: Preflight | the agent port matches the agent and module G's firewalld policy list
+        - name: agent and S agree on a port that isn't in module G's list
+          vars: {ai_control_agent_defaults_file: "{{ test_tmp }}/agent-defaults-11511.yml", ai_control_agent_port: 11511}
+          task: Preflight | the agent port matches the agent and module G's firewalld policy list
+        - name: agent port not in module G's list
+          vars: {ai_control_agent_port: 11511}
+          task: Preflight | the agent port matches the agent and module G's firewalld policy list
+        - name: config extra overrides listen_host
+          vars: {ai_control_config_extra: {listen_host: 0.0.0.0}}
+          task: Preflight | role inputs
+        - name: helper extra overrides user
+          vars: {ai_control_helper_config_extra: {user: root}}
+          task: Preflight | role inputs
+        - name: account named docker
+          vars: {ai_control_user: docker}
+          task: Preflight | role inputs
+        # ai_control_container_allow (§12.23, R12-5): host addresses only, inside the container range.
+        - name: container allow empty list
+          vars: {ai_control_container_allow: []}
+          task: Preflight | the container allow list is IPv4 host addresses
+        - name: container allow a bare string, not a list
+          vars: {ai_control_container_allow: "172.20.0.3/32"}
+          task: Preflight | the container allow list is IPv4 host addresses
+        - name: container allow a mapping
+          vars: {ai_control_container_allow: {broker: 172.20.0.3/32}}
+          task: Preflight | the container allow list is IPv4 host addresses
+        - name: container allow 0.0.0.0/0
+          vars: {ai_control_container_allow: [0.0.0.0/0]}
+          task: Preflight | the container allow list is IPv4 host addresses
+        - name: container allow 0.0.0.0
+          vars: {ai_control_container_allow: [0.0.0.0]}
+          task: Preflight | the container allow list is IPv4 host addresses
+        - name: container allow 0.0.0.0/32
+          vars: {ai_control_container_allow: [0.0.0.0/32]}
+          task: Preflight | the container allow list is IPv4 host addresses
+        - name: container allow a /24 after a good /32
+          vars: {ai_control_container_allow: [172.20.0.3/32, 172.20.0.0/24]}
+          task: Preflight | the container allow list is IPv4 host addresses
+        - name: container allow a /31
+          vars: {ai_control_container_allow: [172.20.0.4/31]}
+          task: Preflight | the container allow list is IPv4 host addresses
+        - name: container allow the whole pool
+          vars: {ai_control_container_allow: [172.16.0.0/12]}
+          task: Preflight | the container allow list is IPv4 host addresses
+        - name: container allow a /320 (prefix starting with 32)
+          vars: {ai_control_container_allow: [172.20.0.3/320]}
+          task: Preflight | the container allow list is IPv4 host addresses
+        - name: container allow an octet over 255
+          vars: {ai_control_container_allow: [172.20.0.256/32]}
+          task: Preflight | the container allow list is IPv4 host addresses
+        - name: container allow two addresses in one entry
+          vars: {ai_control_container_allow: ["172.20.0.3 172.20.0.2"]}
+          task: Preflight | the container allow list is IPv4 host addresses
+        - name: container allow a name
+          vars: {ai_control_container_allow: [localhost]}
+          task: Preflight | the container allow list is IPv4 host addresses
+        - name: container allow IPv6
+          vars: {ai_control_container_allow: ["::1/128"]}
+          task: Preflight | the container allow list is IPv4 host addresses
+        - name: container allow a number
+          vars: {ai_control_container_allow: [2886991875]}
+          task: Preflight | the container allow list is IPv4 host addresses
+        - name: container allow a nested list
+          vars: {ai_control_container_allow: [[172.20.0.3/32]]}
+          task: Preflight | the container allow list is IPv4 host addresses
+        - name: container allow a LAN host outside the container range
+          vars: {ai_control_container_allow: [172.20.0.3/32, 192.168.1.10/32]}
+          task: Preflight | each container allow entry is inside Docker's container range
+        - name: container allow just past the container range
+          vars: {ai_control_container_allow: [172.32.0.1]}
+          task: Preflight | each container allow entry is inside Docker's container range
+        - name: container allow just before the container range
+          vars: {ai_control_container_allow: [172.15.255.255/32]}
+          task: Preflight | each container allow entry is inside Docker's container range
+        # Reviewer N A-1: `$` would match before a final newline and split the IPAddressAllow line.
+        - name: container allow a /32 with a trailing newline
+          vars: {ai_control_container_allow: ["172.20.0.3/32\n"]}
+          task: Preflight | the container allow list is IPv4 host addresses
+        - name: container allow a bare address with a trailing newline
+          vars: {ai_control_container_allow: ["172.20.0.4\n"]}
+          task: Preflight | the container allow list is IPv4 host addresses
+        # Reviewer N A-2: ollama-cpu's pinned address (the refusal include sets ai_stack_ollama_cpu_ip 172.20.0.2).
+        - name: container allow ollama-cpu bare
+          vars: {ai_control_container_allow: [172.20.0.2]}
+          task: Preflight | the container allow list leaves out ollama-cpu
+        - name: container allow ollama-cpu /32 after the broker
+          vars: {ai_control_container_allow: [172.20.0.3/32, 172.20.0.2/32]}
+          task: Preflight | the container allow list leaves out ollama-cpu
+        # §12.29: other roles' serve handlers (ai_control_serve_extra_handlers).
+        - name: an extra on AI Control's 443
+          vars: {ai_control_serve_extra_handlers: [{port: 443, mount: /, backend: "http://127.0.0.1:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: AI Control's own handler repeated as an extra
+          vars: {ai_control_serve_extra_handlers: [{port: 443, mount: /, backend: "http://127.0.0.1:8095"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: Mission Control's, then a second extra on 443
+          vars:
+            ai_control_serve_extra_handlers:
+              - {port: 8443, mount: /, backend: "http://127.0.0.1:8097"}
+              - {port: 443, mount: /api, backend: "http://127.0.0.1:8098"}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: two extras on one port (two mounts)
+          vars:
+            ai_control_serve_extra_handlers:
+              - {port: 8443, mount: /, backend: "http://127.0.0.1:8097"}
+              - {port: 8443, mount: /webui, backend: "http://127.0.0.1:8080"}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: the same extra twice
+          vars:
+            ai_control_serve_extra_handlers:
+              - {port: 8443, mount: /, backend: "http://127.0.0.1:8097"}
+              - {port: 8443, mount: /, backend: "http://127.0.0.1:8097"}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra without a port
+          vars: {ai_control_serve_extra_handlers: [{mount: /, backend: "http://127.0.0.1:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra without a mount
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, backend: "http://127.0.0.1:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra without a backend
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: /}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra with another key (funnel)
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: /, backend: "http://127.0.0.1:8097", funnel: true}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: extras null
+          vars: {ai_control_serve_extra_handlers: null}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: extras a mapping
+          vars: {ai_control_serve_extra_handlers: {port: 8443, mount: /, backend: "http://127.0.0.1:8097"}}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: extras a string
+          vars: {ai_control_serve_extra_handlers: "8443 / http://127.0.0.1:8097"}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra that is a string
+          vars: {ai_control_serve_extra_handlers: ["https:8443 -> http://127.0.0.1:8097"]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's port a string
+          vars: {ai_control_serve_extra_handlers: [{port: "8443", mount: /, backend: "http://127.0.0.1:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's port a boolean
+          vars: {ai_control_serve_extra_handlers: [{port: true, mount: /, backend: "http://127.0.0.1:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's port 0
+          vars: {ai_control_serve_extra_handlers: [{port: 0, mount: /, backend: "http://127.0.0.1:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's port 65536
+          vars: {ai_control_serve_extra_handlers: [{port: 65536, mount: /, backend: "http://127.0.0.1:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's mount without a slash
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: api, backend: "http://127.0.0.1:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's mount with a trailing newline
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: "/\n", backend: "http://127.0.0.1:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's mount /..
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: "/..", backend: "http://127.0.0.1:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's mount /.
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: "/.", backend: "http://127.0.0.1:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's mount /api/..
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: "/api/..", backend: "http://127.0.0.1:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's mount /../etc
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: "/../etc", backend: "http://127.0.0.1:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's mount /api/./v1
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: "/api/./v1", backend: "http://127.0.0.1:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's mount /api/../x
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: "/api/../x", backend: "http://127.0.0.1:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's mount //
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: "//", backend: "http://127.0.0.1:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's mount /api//v1
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: "/api//v1", backend: "http://127.0.0.1:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's mount /api/
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: "/api/", backend: "http://127.0.0.1:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's mount a number
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: 1, backend: "http://127.0.0.1:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's backend on a tailnet address
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: /, backend: "http://100.64.0.10:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's backend on a name
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: /, backend: "http://localhost:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's backend over https
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: /, backend: "https://127.0.0.1:8097"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's backend with a path
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: /, backend: "http://127.0.0.1:8097/app"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's backend with a trailing slash
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: /, backend: "http://127.0.0.1:8097/"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's backend with a trailing newline
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: /, backend: "http://127.0.0.1:8097\n"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's backend without a port
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: /, backend: "http://127.0.0.1"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's backend on port 0
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: /, backend: "http://127.0.0.1:0"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's backend on port 65536
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: /, backend: "http://127.0.0.1:65536"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's backend a bare port
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: /, backend: 8097}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: an extra's backend AI Control's own
+          vars: {ai_control_serve_extra_handlers: [{port: 8443, mount: /, backend: "http://127.0.0.1:8095"}]}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        - name: Mission Control's, then an extra with a bad backend
+          vars:
+            ai_control_serve_extra_handlers:
+              - {port: 8443, mount: /, backend: "http://127.0.0.1:8097"}
+              - {port: 8444, mount: /, backend: "http://192.168.1.10:80"}
+          task: "Preflight | the extra serve handlers keep off AI Control's origin and proxy to loopback ports"
+        # Reviewer Q: the local-access guard's inputs.
+        - name: guard users without root
+          vars: {ai_control_guard_allow_users: [mc]}
+          task: "Preflight | the guard's allowed users are account names and include root"
+        - name: guard users empty
+          vars: {ai_control_guard_allow_users: []}
+          task: "Preflight | the guard's allowed users are account names and include root"
+        - name: guard users a string
+          vars: {ai_control_guard_allow_users: root}
+          task: "Preflight | the guard's allowed users are account names and include root"
+        - name: guard users a mapping
+          vars: {ai_control_guard_allow_users: {root: 0}}
+          task: "Preflight | the guard's allowed users are account names and include root"
+        - name: guard users root twice
+          vars: {ai_control_guard_allow_users: [root, mc, root]}
+          task: "Preflight | the guard's allowed users are account names and include root"
+        - name: guard users a uid number
+          vars: {ai_control_guard_allow_users: [root, 998]}
+          task: "Preflight | the guard's allowed users are account names and include root"
+        - name: guard users a name with a space
+          vars: {ai_control_guard_allow_users: [root, "m c"]}
+          task: "Preflight | the guard's allowed users are account names and include root"
+        - name: guard users a name with a trailing newline
+          vars: {ai_control_guard_allow_users: [root, "mc\n"]}
+          task: "Preflight | the guard's allowed users are account names and include root"
+        - name: guard users a name with a brace (nft injection)
+          vars: {ai_control_guard_allow_users: [root, "mc}"]}
+          task: "Preflight | the guard's allowed users are account names and include root"
+        - name: guard users an upper-case name
+          vars: {ai_control_guard_allow_users: [root, Mc]}
+          task: "Preflight | the guard's allowed users are account names and include root"
+        - name: tailscale interface missing
+          vars: {ai_control_iface_check_argv: [/usr/bin/false]}
+          task: "Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface"
+        - name: tailscale interface name breaking the nft string
+          vars: {ai_control_tailscale_iface: 'tailscale0" accept'}
+          task: "Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface"
+        - name: tailscale interface name over 15 characters
+          vars: {ai_control_tailscale_iface: tailscale0123456}
+          task: "Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface"
+        - name: tailscale interface name with a trailing newline
+          vars: {ai_control_tailscale_iface: "tailscale0\n"}
+          task: "Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface"
+        - name: guard IPv6 off the tailnet
+          vars: {ai_control_tailnet_ip6: "fd00::a"}
+          task: "Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface"
+        - name: guard IPv6 with a prefix length
+          vars: {ai_control_tailnet_ip6: "fd7a:115c:a1e0::a/128"}
+          task: "Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface"
+        - name: guard IPv6 with a trailing newline
+          vars: {ai_control_tailnet_ip6: "fd7a:115c:a1e0::a\n"}
+          task: "Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface"
+        - name: guard IPv6 upper case
+          vars: {ai_control_tailnet_ip6: "FD7A:115C:A1E0::A"}
+          task: "Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface"
+        - name: guard IPv6 with two double colons
+          vars: {ai_control_tailnet_ip6: "fd7a:115c:a1e0::a::b"}
+          task: "Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface"
+        - name: guard IPv6 with a triple colon
+          vars: {ai_control_tailnet_ip6: "fd7a:115c:a1e0:::a"}
+          task: "Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface"
+        - name: guard IPv6 with a 5-digit group
+          vars: {ai_control_tailnet_ip6: "fd7a:115c:a1e0::1a2b3"}
+          task: "Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface"
+        - name: guard IPv6 two addresses
+          vars: {ai_control_tailnet_ip6: "fd7a:115c:a1e0::a fd7a:115c:a1e0::b"}
+          task: "Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface"
+        - name: guard IPv6 ending in a colon
+          vars: {ai_control_tailnet_ip6: "fd7a:115c:a1e0::"}
+          task: "Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface"
+        - name: tailnet IPv4 off the tailnet (100.128/10)
+          vars: {tailnet_ip: 100.128.0.10}
+          task: "Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface"
+        - name: tailnet IPv4 below the tailnet (100.63/16)
+          vars: {tailnet_ip: 100.63.0.10}
+          task: "Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface"
+        - name: tailnet IPv4 a LAN address
+          vars: {tailnet_ip: 192.168.1.10}
+          task: "Preflight | the guard's addresses are ai-box's tailnet IPv4 and IPv6, on an existing tailscale interface"
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+
+    # The value the README gives the Lead for ai-box, written the inventory's way (templated from the
+    # pinned addresses), plus the container range's first and last addresses (bare): preflight passes and
+    # it replaces the range in the allowlist, exactly.
+    - name: Preflight passes with a container allow list
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+      vars:
+        ai_stack_ollama_cpu_ip: 172.20.0.2
+        ai_stack_broker_ip: 172.20.0.3
+        ai_stack_webui_ip: 172.20.0.4
+        ai_control_container_allow:
+          - "{{ ai_stack_broker_ip }}/32"
+          - "{{ ai_stack_webui_ip }}/32"
+          - 172.16.0.0
+          - 172.31.255.255
+
+    - name: The container allow list replaces the container range in the allowlist
+      vars:
+        ai_stack_broker_ip: 172.20.0.3
+        ai_stack_webui_ip: 172.20.0.4
+        ai_control_container_allow: ["{{ ai_stack_broker_ip }}/32", "{{ ai_stack_webui_ip }}/32"]
+      ansible.builtin.assert:
+        that:
+          - ai_control_ip_allow == ['localhost', '100.64.0.10', '100.64.0.20', '172.20.0.3/32', '172.20.0.4/32']
+        fail_msg: "ai_control_ip_allow is {{ ai_control_ip_allow }}"
+        quiet: true
+
+    - name: Unset, the allowlist keeps the container range
+      ansible.builtin.assert:
+        that:
+          - ai_control_container_allow is none
+          - ai_control_ip_allow == ['localhost', '100.64.0.10', '100.64.0.20', '172.16.0.0/12']
+        fail_msg: "ai_control_ip_allow is {{ ai_control_ip_allow }}"
+        quiet: true
+
+    # Reviewer Q (Low): only a whole `.` or `..` segment is refused; dots inside a segment are fine.
+    - name: Preflight passes with extra mounts whose segments contain dots
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+      vars:
+        ai_control_serve_extra_handlers:
+          - {port: 8443, mount: /, backend: "http://127.0.0.1:8097"}
+          - {port: 8444, mount: /.well-known, backend: "http://127.0.0.1:8098"}
+          - {port: 8445, mount: /a..b/v1.2/..x, backend: "http://127.0.0.1:8099"}
+
+    # ---- 2. code ----------------------------------------------------------------------------------
+    - name: Install 1
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Plant strays (stale module, bytecode, tests, README, a web file type W doesn't ship)
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          s="{{ ai_control_server_dir }}"; w="{{ ai_control_web_dir }}"
+          echo old > "$s/ai_control/removed.py"
+          mkdir -p "$s/ai_control/__pycache__" "$s/tests" "$w/js/old" "$w/test"
+          echo x > "$s/ai_control/__pycache__/app.cpython-314.pyc"
+          echo x > "$s/tests/test_server.py"
+          echo x > "$s/README.md"
+          echo x > "$s/config.example.json"
+          echo x > "$w/js/old/gone.js"
+          echo x > "$w/test/smoke.test.mjs"
+          echo x > "$w/notes.md"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Install 2
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: List the installed trees
+      ansible.builtin.find:
+        paths: "{{ ai_control_app_dir }}"
+        recurse: true
+        hidden: true
+        file_type: any
+      register: ctl_test_find
+
+    - name: Exactly S's package and W's public/ files, with the right modes, strays removed
+      vars:
+        tree: >-
+          {{ ctl_test_find.files | map(attribute='path')
+             | map('regex_replace', '^' ~ (ai_control_app_dir | regex_escape) ~ '/', '') | sort }}
+        modes: "{{ dict(ctl_test_find.files | map(attribute='path') | zip(ctl_test_find.files | map(attribute='mode'))) }}"
+        src_py: "{{ query('ansible.builtin.fileglob', test_repo ~ '/apps/ai-control/server/ai_control/*.py') | map('basename') | sort }}"
+        web_src: >-
+          {{ query('community.general.filetree', test_repo ~ '/apps/ai-control/web/public') | map(attribute='path') | sort }}
+      ansible.builtin.assert:
+        that:
+          - >-
+            tree == ((['server', 'server/ai_control', 'web']
+                      + (src_py | map('regex_replace', '^', 'server/ai_control/') | list)
+                      + (web_src | map('regex_replace', '^', 'web/') | list)) | sort)
+          - "'web/index.html' in tree and 'web/sw.js' in tree and 'web/js/tabs/audit.js' in tree"
+          - tree | select('search', 'test|pycache|README|removed|example|old|notes|junk|node_modules') | list == []
+          - modes[ai_control_server_dir ~ '/ai_control/app.py'] == '0644'
+          - modes[ai_control_web_dir ~ '/js/tabs'] == '0755'
+          - modes[ai_control_web_dir ~ '/index.html'] == '0644'
+        fail_msg: "{{ tree }}"
+        quiet: true
+
+    - name: Stat the installed helper
+      ansible.builtin.stat:
+        path: "{{ ai_control_helper_script }}"
+        checksum_algorithm: sha256
+      register: ctl_test_helper
+
+    - name: Stat the helper source
+      ansible.builtin.stat:
+        path: "{{ ai_control_helper_src }}"
+        checksum_algorithm: sha256
+      register: ctl_test_helper_src
+
+    - name: The helper is X's script, 0755
+      ansible.builtin.assert:
+        that:
+          - ctl_test_helper.stat.mode == '0755'
+          - ctl_test_helper.stat.checksum == ctl_test_helper_src.stat.checksum
+        quiet: true
+
+    - name: Install 3
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Install 3 changed nothing (last tree is W)
+      ansible.builtin.assert:
+        that:
+          - ai_control_tree_mkdirs is not changed
+          - ai_control_tree_copied is not changed
+          - ai_control_tree_pruned is skipped
+          - ai_control_server_pruned is skipped
+        quiet: true
+
+    - name: A tree aimed at a directory with the wrong name is refused before anything is written
+      block:
+        - name: Install the web tree into a shared-looking directory
+          ansible.builtin.include_tasks: ../tasks/tree.yml
+          vars:
+            ai_control_tree_src: "{{ ai_control_web_src }}"
+            ai_control_tree_dest: "{{ test_tmp }}/opt"
+            ai_control_tree_name: web
+            ai_control_tree_include: '[.]html$'
+
+        - name: Not reached
+          ansible.builtin.set_fact:
+            ctl_test_wrong_dir_failed: false
+      rescue:
+        - name: Note the refusal
+          ansible.builtin.set_fact:
+            ctl_test_wrong_dir_failed: "{{ ansible_failed_task.name is search('is a dedicated directory') }}"
+
+    - name: The tree refused it
+      ansible.builtin.stat:
+        path: "{{ test_tmp }}/opt/index.html"
+      register: ctl_test_wrong_dir
+      failed_when: not ctl_test_wrong_dir_failed or ctl_test_wrong_dir.stat.exists
+
+    # ---- 3. config, token, state ------------------------------------------------------------------
+    - name: Config
+      ansible.builtin.include_tasks: ../tasks/config.yml
+
+    - name: Read the config and S's example
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - "{{ ai_control_config_file }}"
+        - "{{ ai_control_src_dir }}/server/config.example.json"
+      register: ctl_test_configs
+
+    - name: The config has exactly the example's keys, with the inventory's values
+      vars:
+        got: "{{ ctl_test_configs.results[0].content | b64decode | from_json }}"
+        example: "{{ ctl_test_configs.results[1].content | b64decode | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - got.keys() | sort == example.keys() | sort
+          - >-
+            got == {
+              'listen_host': '127.0.0.1', 'listen_port': 8095,
+              'gate_url': 'http://100.64.0.20:11500', 'broker_url': 'http://100.64.0.10:11434',
+              'webui_url': 'http://100.64.0.10:8080', 'helper_socket': '/run/aictl-helper.sock',
+              'agent_url': 'http://100.64.0.20:11510', 'agent_token_file': ai_control_token_file,
+              'static_dir': ai_control_web_dir, 'gate_samples_path': ai_control_state_dir ~ '/gate-samples.jsonl',
+              'disk_mounts': ['/'], 'gate_threshold': 50, 'gate_window': 1800, 'timezone': none}
+        fail_msg: "{{ got | to_json }}"
+        quiet: true
+
+    - name: Stat the config, token and dirs
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - "{{ ai_control_config_dir }}"
+        - "{{ ai_control_config_file }}"
+        - "{{ ai_control_token_file }}"
+        - "{{ ai_control_state_dir }}"
+      register: ctl_test_modes
+
+    - name: Modes are 0750 dir, 0640 config, 0640 token, 0750 state
+      ansible.builtin.assert:
+        that:
+          - ctl_test_modes.results | map(attribute='stat.mode') | list == ['0750', '0640', '0640', '0750']
+        fail_msg: "{{ ctl_test_modes.results | map(attribute='stat.mode') | list }}"
+        quiet: true
+
+    - name: Read the token file (no_log)
+      ansible.builtin.slurp:
+        src: "{{ ai_control_token_file }}"
+      register: ctl_test_token
+      no_log: true
+
+    - name: The token file holds exactly the token and a newline (no_log)
+      ansible.builtin.assert:
+        that:
+          - (ctl_test_token.content | b64decode) == test_canary ~ '\n'
+        quiet: true
+      no_log: true
+
+    - name: Config again (token unchanged)
+      ansible.builtin.include_tasks: ../tasks/config.yml
+
+    - name: Read the token file again (no_log)
+      ansible.builtin.slurp:
+        src: "{{ ai_control_token_file }}"
+      register: ctl_test_token2
+      no_log: true
+
+    - name: A rerun keeps it byte for byte (no_log)
+      ansible.builtin.assert:
+        that:
+          - ctl_test_token2.content == ctl_test_token.content
+        quiet: true
+      no_log: true
+
+    - name: Preflight without a token (PC off, play 1 skipped) while ai-box has one
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+      vars:
+        ai_control_agent_token: ""
+
+    - name: Without a token the checks don't require the agent
+      ansible.builtin.assert:
+        that:
+          - not ai_control_token_given | bool
+          - not ai_control_verify_agent | bool
+        quiet: true
+
+    - name: Config without a token
+      ansible.builtin.include_tasks: ../tasks/config.yml
+      vars:
+        ai_control_agent_token: ""
+
+    - name: Read the token file after the tokenless converge (no_log)
+      ansible.builtin.slurp:
+        src: "{{ ai_control_token_file }}"
+      register: ctl_test_token3
+      no_log: true
+
+    - name: The existing token file was kept byte for byte (no_log)
+      ansible.builtin.assert:
+        that:
+          - ctl_test_token3.content == ctl_test_token.content
+        quiet: true
+      no_log: true
+
+    - name: Preflight with the token again (later tasks see it given)
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+
+    - name: With a token the checks require the agent
+      ansible.builtin.assert:
+        that:
+          - ai_control_token_given | bool
+          - ai_control_verify_agent | bool
+        quiet: true
+
+    # ---- W's service-worker precache list = what the role deploys ------------------------------
+    - name: The SW shell list equals the deployed web files (index.html as "/", sw.js itself excluded)
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - -c
+          - |
+            import os, re, sys
+            root = sys.argv[1]
+            sw = open(os.path.join(root, "sw.js"), encoding="utf-8").read()
+            shell = set(re.findall(r"'([^']+)'", re.search(r"const SHELL = \[(.*?)\];", sw, re.S).group(1)))
+            deployed = set()
+            for d, _, files in os.walk(root):
+                for f in files:
+                    rel = "/" + os.path.relpath(os.path.join(d, f), root)
+                    deployed.add("/" if rel == "/index.html" else rel)
+            deployed.discard("/sw.js")
+            if shell != deployed:
+                sys.exit("SW shell list != deployed files: only in SW %s, only deployed %s"
+                         % (sorted(shell - deployed), sorted(deployed - shell)))
+          - "{{ ai_control_web_dir }}"
+      changed_when: false
+
+    # ---- symlinked code dirs ---------------------------------------------------------------------
+    - name: Symlinked code dirs are refused before anything is written or pruned
+      ansible.builtin.include_tasks: expect_guard_refusal.yml
+      loop:
+        - {name: app-dir, root: "{{ test_tmp }}/g1/ai-control", link: "{{ test_tmp }}/g1/ai-control"}
+        - {name: server-dir, root: "{{ test_tmp }}/g2/ai-control", link: "{{ test_tmp }}/g2/ai-control/server"}
+        - {name: server-package, root: "{{ test_tmp }}/g3/ai-control", link: "{{ test_tmp }}/g3/ai-control/server/ai_control"}
+        - {name: web-dir, root: "{{ test_tmp }}/g4/ai-control", link: "{{ test_tmp }}/g4/ai-control/web"}
+        - {name: web-subdir, root: "{{ test_tmp }}/g5/ai-control", link: "{{ test_tmp }}/g5/ai-control/web/js"}
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+
+    # ---- verify_summary.yml against a fake S --------------------------------------------------------
+    - name: Start the fake S (exits by itself after 300 s)
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, -I, -B, "{{ playbook_dir }}/fake_summary.py", "{{ test_tmp }}/summary.json",
+               "{{ test_tmp }}/fake-port", "300"]
+      async: 310
+      poll: 0
+      changed_when: false
+
+    - name: Wait for the fake S's port
+      ansible.builtin.wait_for:
+        path: "{{ test_tmp }}/fake-port"
+        timeout: 20
+
+    - name: Read the fake S's port
+      ansible.builtin.set_fact:
+        ctl_test_fake_port: "{{ lookup('ansible.builtin.file', test_tmp ~ '/fake-port') | int }}"
+
+    - name: The summary check passes and fails exactly when it should
+      ansible.builtin.include_tasks: summary_case.yml
+      vars:
+        ok: &ok_rows
+          - {id: helper, status: ok, detail: docker active}
+          - {id: broker, status: ok, detail: routing gpu}
+          - {id: webui, status: ok, detail: healthy}
+          - {id: agent, status: ok, detail: answering}
+      loop:
+        - {name: all ok with a token, token: true, want: pass, services: *ok_rows}
+        - name: broker down
+          token: true
+          want: fail
+          # Reviewer N A-3: the message names the container allow list as a cause.
+          msg: ai_control_container_allow
+          services:
+            - {id: helper, status: ok, detail: docker active}
+            - {id: broker, status: down, detail: timeout}
+            - {id: webui, status: ok, detail: healthy}
+            - {id: agent, status: ok, detail: answering}
+        - name: webui down
+          token: true
+          want: fail
+          # Reviewer N A-3: the message names the container allow list as a cause.
+          msg: ai_control_container_allow
+          services:
+            - {id: helper, status: ok, detail: docker active}
+            - {id: broker, status: ok, detail: routing gpu}
+            - {id: webui, status: down, detail: timeout}
+            - {id: agent, status: ok, detail: answering}
+        - name: helper down
+          token: true
+          want: fail
+          services:
+            - {id: helper, status: down, detail: helper misconfigured}
+            - {id: broker, status: ok, detail: routing gpu}
+            - {id: webui, status: ok, detail: healthy}
+            - {id: agent, status: ok, detail: answering}
+        - name: agent unreachable with a token
+          token: true
+          want: fail
+          services:
+            - {id: helper, status: ok, detail: docker active}
+            - {id: broker, status: ok, detail: routing gpu}
+            - {id: webui, status: ok, detail: healthy}
+            - {id: agent, status: down, detail: timeout}
+        - name: tokenless, PC off (agent unreachable)
+          token: false
+          want: pass
+          services:
+            - {id: helper, status: ok, detail: docker active}
+            - {id: broker, status: ok, detail: routing gpu}
+            - {id: webui, status: ok, detail: healthy}
+            - {id: agent, status: down, detail: timeout}
+        - name: tokenless, agent rejects the kept token
+          token: false
+          want: fail
+          services:
+            - {id: helper, status: ok, detail: docker active}
+            - {id: broker, status: ok, detail: routing gpu}
+            - {id: webui, status: ok, detail: healthy}
+            - {id: agent, status: down, detail: agent rejected the token (401)}
+        - name: tokenless, kept token file unreadable
+          token: false
+          want: fail
+          services:
+            - {id: helper, status: ok, detail: docker active}
+            - {id: broker, status: ok, detail: routing gpu}
+            - {id: webui, status: ok, detail: healthy}
+            - {id: agent, status: down, detail: agent token file unreadable}
+        - name: tokenless, broker down
+          token: false
+          want: fail
+          services:
+            - {id: helper, status: ok, detail: docker active}
+            - {id: broker, status: down, detail: timeout}
+            - {id: webui, status: ok, detail: healthy}
+            - {id: agent, status: down, detail: timeout}
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+
+    # ---- 4. helper --------------------------------------------------------------------------------
+    - name: Helper config and units
+      ansible.builtin.include_tasks: ../tasks/helper.yml
+      vars:
+        ai_control_unit_dir: "{{ test_tmp }}/units-helper"
+
+    - name: The helper's run-time loader accepts helper.json (owner = this user in the test)
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - -c
+          - |
+            import os, runpy, sys
+            helper = runpy.run_path(sys.argv[1], run_name="aictl_helper")
+            cfg = helper["load_config"](sys.argv[2], os.geteuid())
+            assert cfg.sudo_exes == ("/usr/bin/sudo.ws", "/usr/lib/cargo/bin/sudo"), cfg.sudo_exes
+            assert cfg.containers == ("ollama-cpu", "gpu-broker", "open-webui"), cfg.containers
+            assert cfg.user == sys.argv[3], cfg.user
+          - "{{ ai_control_helper_script }}"
+          - "{{ ai_control_helper_config_file }}"
+          - "{{ ai_control_user }}"
+      changed_when: false
+
+    - name: A helper.json the helper would refuse is refused at deploy
+      block:
+        - name: Helper config with an unknown key
+          ansible.builtin.include_tasks: ../tasks/helper.yml
+          vars:
+            ai_control_unit_dir: "{{ test_tmp }}/units-helper"
+            ai_control_helper_config_extra: {no_such_key: 1}
+
+        - name: Not reached
+          ansible.builtin.set_fact:
+            ctl_test_helper_refused: false
+      rescue:
+        - name: Note the refusal
+          ansible.builtin.set_fact:
+            ctl_test_helper_refused: "{{ ansible_failed_task.name == 'Helper | helper.json (root 0644; allowlists and sudo_exes)' }}"
+
+    - name: The bad helper.json was refused
+      ansible.builtin.assert:
+        that: ctl_test_helper_refused
+        quiet: true
+
+    # ---- 5. units (the role's real paths) --------------------------------------------------------
+    - name: Render the units with the role's real paths
+      ansible.builtin.include_tasks: units_case.yml
+      vars:
+        ai_control_server_dir: /opt/ai-control/server
+        ai_control_config_file: /etc/ai-control/config.json
+        ai_control_config_dir: /etc/ai-control
+        ai_control_state_dir: /var/lib/ai-control
+        ai_control_helper_script: /usr/local/sbin/aictl-helper
+        ai_control_user: aictl
+      loop: [true, false]
+      loop_control:
+        loop_var: allowlist
+
+    # §12.23, R12-5: a container allow list (one /32, one bare address) replaces the range, rendered as given.
+    - name: Render the units with a container allow list
+      ansible.builtin.include_tasks: units_case.yml
+      vars:
+        ai_control_server_dir: /opt/ai-control/server
+        ai_control_config_file: /etc/ai-control/config.json
+        ai_control_config_dir: /etc/ai-control
+        ai_control_state_dir: /var/lib/ai-control
+        ai_control_helper_script: /usr/local/sbin/aictl-helper
+        ai_control_user: aictl
+        ai_stack_broker_ip: 172.20.0.3
+        ai_control_container_allow: ["{{ ai_stack_broker_ip }}/32", 172.20.0.4]
+        units_tag: "container-allow-{{ allowlist }}"
+        units_allow: localhost 100.64.0.10 100.64.0.20 172.20.0.3/32 172.20.0.4
+      loop: [true, false]
+      loop_control:
+        loop_var: allowlist
+
+    # ---- 7. the local-access guard (Reviewer Q) --------------------------------------------------
+    - name: Guard | preflight took the IPv6 from the inventory and never asked this machine's tailscale
+      ansible.builtin.assert:
+        that:
+          - ai_control_ip6_read is skipped
+          - ai_control_guard_ip6 == 'fd7a:115c:a1e0::a'
+        quiet: true
+
+    # nft -c needs CAP_NET_ADMIN: the test's nft runs in a private user+network namespace.
+    - name: Guard | an nft that runs in a private namespace, and a unit dir
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          mkdir -p "{{ test_tmp }}/bin" "{{ test_tmp }}/units-guard"
+          printf '#!/bin/sh\nexec unshare --map-auto --map-root-user --net %s "$@"\n' "$(command -v nft)" > "{{ test_tmp }}/bin/nft"
+          chmod 0755 "{{ test_tmp }}/bin/nft"
+        executable: /bin/bash
+      changed_when: true
+
+    # root and this user exist; the third doesn't (mc before mission-control.yml's first run): skipped, not opened.
+    - name: Guard | guard.yml with an allowed user that doesn't exist yet
+      ansible.builtin.include_tasks: ../tasks/guard.yml
+      vars:
+        ai_control_nft: "{{ test_tmp }}/bin/nft"
+        ai_control_unit_dir: "{{ test_tmp }}/units-guard"
+        ai_control_guard_allow_users: [root, "{{ test_me }}", ai-control-no-such-user]
+
+    - name: Guard | the rules file and the unit as written
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - "{{ ai_control_guard_file }}"
+        - "{{ test_tmp }}/units-guard/ai-control-guard.service"
+      register: ctl_test_guard_files
+
+    - name: Guard | names resolved to uids; the missing user skipped; exactly the contract's rules
+      vars:
+        nft: "{{ ctl_test_guard_files.results[0].content | b64decode }}"
+        unit: "{{ ctl_test_guard_files.results[1].content | b64decode }}"
+        my_uid: "{{ lookup('ansible.builtin.pipe', 'id -u') | int }}"
+      ansible.builtin.assert:
+        that:
+          - ai_control_guard_present_users == ['root', test_me]
+          - ai_control_guard_missing_users == ['ai-control-no-such-user']
+          - ai_control_guard_uids == [0, my_uid | int]
+          - >-
+            nft | regex_findall('(?m)^\t\t(?:ip|ip6) .*$') == [
+              '\t\tip daddr 100.64.0.10 tcp dport 443 iifname != "tailscale0" counter reject with tcp reset',
+              '\t\tip6 daddr fd7a:115c:a1e0::a tcp dport 443 iifname != "tailscale0" counter reject with tcp reset',
+              '\t\tip daddr 127.0.0.0/8 tcp dport 8095 meta skuid != { 0, ' ~ my_uid ~ ' } counter reject with tcp reset']
+          - nft | regex_findall('(?m)^\t\ttype filter hook (\w+) priority filter; policy accept;$') == ['input', 'output']
+          # Only its own table: declared, deleted, re-added. Never a flush, never another table.
+          - nft | regex_findall('(?m)^(table|delete table) .*$') == ['table', 'delete table', 'table']
+          - nft | regex_findall('(?m)^table inet ai_control_guard( [{])?$') | length == 2
+          - nft is search('(?m)^delete table inet ai_control_guard$')
+          - nft is not search('(?m)^\s*flush')
+          - unit is search('(?m)^ExecStart=' ~ (test_tmp ~ '/bin/nft -f ' ~ ai_control_guard_file) | regex_escape ~ '$')
+          - unit is search('(?m)^ExecReload=' ~ (test_tmp ~ '/bin/nft -f ' ~ ai_control_guard_file) | regex_escape ~ '$')
+        fail_msg: "{{ nft }}"
+        quiet: true
+
+    - name: Guard | checksum of the rules file
+      ansible.builtin.stat:
+        path: "{{ ai_control_guard_file }}"
+      register: ctl_test_guard_sum1
+
+    - name: Guard | guard.yml again, same users
+      ansible.builtin.include_tasks: ../tasks/guard.yml
+      vars:
+        ai_control_nft: "{{ test_tmp }}/bin/nft"
+        ai_control_unit_dir: "{{ test_tmp }}/units-guard"
+        ai_control_guard_allow_users: [root, "{{ test_me }}", ai-control-no-such-user]
+
+    - name: Guard | checksum again
+      ansible.builtin.stat:
+        path: "{{ ai_control_guard_file }}"
+      register: ctl_test_guard_sum2
+
+    # The default [root]: uid 0 alone, and nothing is skipped.
+    - name: Guard | guard.yml with the default users
+      ansible.builtin.include_tasks: ../tasks/guard.yml
+      vars:
+        ai_control_nft: "{{ test_tmp }}/bin/nft"
+        ai_control_unit_dir: "{{ test_tmp }}/units-guard"
+        ai_control_guard_allow_users: [root]
+
+    - name: Guard | the rules file with the default users
+      ansible.builtin.slurp:
+        src: "{{ ai_control_guard_file }}"
+      register: ctl_test_guard_default
+
+    - name: Guard | idempotent; the default allows uid 0 only; the file is root's 0644
+      ansible.builtin.assert:
+        that:
+          - ctl_test_guard_sum1.stat.checksum == ctl_test_guard_sum2.stat.checksum
+          - ctl_test_guard_sum1.stat.mode == '0644'
+          - ai_control_guard_missing_users == []
+          - ai_control_guard_uids == [0]
+          - >-
+            (ctl_test_guard_default.content | b64decode)
+            is search('(?m)^\t\tip daddr 127[.]0[.]0[.]0/8 tcp dport 8095 meta skuid != [{] 0 [}] counter reject with tcp reset$')
+        quiet: true
+
+    # A rules file nft rejects is never written (the template's validate).
+    - name: Guard | an interface name nft can't parse is refused at write time
+      block:
+        - name: Guard | guard.yml with a broken interface name
+          ansible.builtin.include_tasks: ../tasks/guard.yml
+          vars:
+            ai_control_nft: "{{ test_tmp }}/bin/nft"
+            ai_control_unit_dir: "{{ test_tmp }}/units-guard"
+            ai_control_guard_file: "{{ test_tmp }}/etc/ai-control/guard-bad.nft"
+            ai_control_tailscale_iface: 'bad"name'
+        - name: Not reached
+          ansible.builtin.set_fact:
+            ctl_test_guard_bad: written
+      rescue:
+        - name: Note the refusal
+          ansible.builtin.set_fact:
+            ctl_test_guard_bad: "{{ ansible_failed_task.name }}"
+
+    - name: Guard | the broken file was refused by nft -c and not written
+      ansible.builtin.stat:
+        path: "{{ test_tmp }}/etc/ai-control/guard-bad.nft"
+      register: ctl_test_guard_bad_stat
+
+    - name: Guard | refused
+      ansible.builtin.assert:
+        that:
+          - ctl_test_guard_bad == 'Guard | the rules file (validated with `nft -c`)'
+          - not ctl_test_guard_bad_stat.stat.exists
+        fail_msg: "{{ ctl_test_guard_bad }}"
+        quiet: true
+
+    # The guard as it would be on ai-box with mc allowed (uids 0 and 1000), loaded for real in private network
+    # namespaces: serve's 443 refused from the box for every uid and from a non-tailscale interface, open from the
+    # tailscale interface; S's port open for 0 and 1000 only; other ports and tables untouched; a reload is clean.
+    # As guard.yml would resolve [root, mc] on ai-box (set_fact: guard.yml's own facts outrank task vars).
+    - name: Guard | uids 0 and 1000 allowed
+      ansible.builtin.set_fact:
+        ai_control_guard_uids: [0, 1000]
+        ai_control_guard_present_users: [root, mc]
+
+    - name: Guard | render the guard with uids 0 and 1000
+      ansible.builtin.template:
+        src: guard.nft.j2
+        dest: "{{ test_tmp }}/guard-netns.nft"
+        mode: "0644"
+
+    - name: Guard | load it in private network namespaces and connect from the box, a tailnet peer and a LAN peer
+      ansible.builtin.command:
+        argv:
+          - unshare
+          - --map-auto
+          - --map-root-user
+          - --net
+          - --fork
+          - python3
+          - -I
+          - -B
+          - "{{ playbook_dir }}/guard_netns.py"
+          - "{{ test_tmp }}/guard-netns.nft"
+          - "{{ ai_control_guard_probe_src }}"
+          - "{{ tailnet_ip }}"
+          - "{{ ai_control_guard_ip6 }}"
+          - "443"
+          - "8095"
+          - tailscale0
+      register: ctl_test_netns
+      changed_when: false
+
+    - name: Guard | what the guard did
+      vars:
+        out: "{{ ctl_test_netns.stdout | from_json }}"
+        refused: [ECONNREFUSED, ECONNRESET]
+      ansible.builtin.assert:
+        that:
+          # Without the guard every path is open (so the refusals below are the guard's).
+          - out.unguarded.box_1001 | dict2items | map(attribute='value') | unique == ['ok']
+          - out.unguarded.lan_root | dict2items | map(attribute='value') | unique == ['ok']
+          - out.loads == [0, 0]
+          # From ai-box itself: serve's 443 refused on both addresses for root, the allowed uid and any other.
+          - out.box_root.serve4 in refused and out.box_root.serve6 in refused
+          - out.box_1000.serve4 in refused and out.box_1000.serve6 in refused
+          - out.box_1001.serve4 in refused and out.box_1001.serve6 in refused
+          # S's loopback port: root and the allowed uid through, any other refused.
+          - out.box_root.server == 'ok' and out.box_1000.server == 'ok'
+          - out.box_1001.server in refused
+          # Untouched: another serve port on the tailnet address, another loopback port.
+          - >-
+            [out.box_1001.other_serve4, out.box_1001.control, out.box_root.other_serve4] == ['ok', 'ok', 'ok']
+          # From the tailnet (the tailscale interface): open for any uid. From a LAN interface: refused.
+          - out.tailnet_root | dict2items | map(attribute='value') | unique == ['ok']
+          - out.tailnet_1001 | dict2items | map(attribute='value') | unique == ['ok']
+          - out.lan_root.serve4 in refused and out.lan_root.serve6 in refused
+          - out.lan_root.other_serve4 == 'ok'
+          # Only its own table replaced, once.
+          - out.other_table_kept
+          - out.guard_tables == 1
+          - out.guard_rules == 3
+        fail_msg: "{{ ctl_test_netns.stdout }}"
+        quiet: true
+
+    # The local-API dial probe against a stand-in for tailscaled (tests/fake_localapi.py): what it sends, and how it
+    # reads each answer.
+    - name: Guard | a self-signed certificate for the stand-in's TLS
+      ansible.builtin.command:
+        argv: [openssl, req, -x509, -newkey, ec, -pkeyopt, "ec_paramgen_curve:prime256v1", -nodes, -subj, /CN=ai-box.example.ts.net,
+               -days, "1", -keyout, "{{ test_tmp }}/la-key.pem", -out, "{{ test_tmp }}/la-cert.pem"]
+        creates: "{{ test_tmp }}/la-cert.pem"
+
+    - name: Guard | the dial probe against the stand-in
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          sock="{{ test_tmp }}/la-{{ item.mode }}.sock"
+          python3 -I -B "{{ playbook_dir }}/fake_localapi.py" "$sock" "{{ item.mode }}" "{{ test_tmp }}/la-cert.pem" \
+            "{{ test_tmp }}/la-key.pem" "{{ test_tmp }}/la-{{ item.mode }}.log" &
+          pid=$!
+          for _ in $(seq 100); do [ -S "$sock" ] && break; sleep 0.1; done
+          python3 -I -B -c "$(cat "{{ ai_control_guard_probe_src }}")" dial "$sock" fd7a:115c:a1e0::a 443 ai-box.example.ts.net
+          wait "$pid"
+        executable: /bin/bash
+      loop:
+        - {mode: refuse, want: {dial: 403, upstream: null, exposed: false}}
+        - {mode: reset, want: {dial: 101, upstream: reset, exposed: false}}
+        - {mode: noah, want: {dial: 101, upstream: http 200, exposed: true}}
+        - {mode: json403, want: {dial: 101, upstream: http 403, exposed: true}}
+        - {mode: bad502, want: {dial: 101, upstream: http 502, exposed: false}}
+      loop_control:
+        label: "{{ item.mode }}"
+      register: ctl_test_dial
+      changed_when: false
+
+    - name: Guard | the dial probe's request and its reading of each answer
+      vars:
+        head: "{{ lookup('ansible.builtin.file', test_tmp ~ '/la-noah.log') }}"
+      ansible.builtin.assert:
+        that:
+          - ctl_test_dial.results | map(attribute='stdout') | map('from_json') | list == ctl_test_dial.results | map(attribute='item.want') | list
+          - >-
+            head is search('^POST /localapi/v0/dial HTTP/1.1\r\n')
+          - >-
+            head is search('(?m)^Host: local-tailscaled[.]sock\r$')
+          - >-
+            head is search('(?m)^Upgrade: ts-dial\r$') and head is search('(?m)^Connection: upgrade\r$')
+          - >-
+            head is search('(?m)^Dial-Host: fd7a:115c:a1e0::a\r$') and head is search('(?m)^Dial-Port: 443\r$')
+        fail_msg: "{{ ctl_test_dial.results | map(attribute='stdout') | list }}"
+        quiet: true
+
+    - name: Guard | no local API at all (the socket is missing) is reported, not crashed
+      ansible.builtin.command:
+        argv: [python3, -I, -B, "{{ ai_control_guard_probe_src }}", dial, "{{ test_tmp }}/no-such.sock", fd7a:115c:a1e0::a, "443", x]
+      register: ctl_test_dial_none
+      changed_when: false
+      failed_when: >-
+        (ctl_test_dial_none.stdout | from_json) != {'dial': 'ENOENT', 'upstream': none, 'exposed': false}
+
+    # verify_guard_assert.yml against canned answers.
+    - name: Guard | verify_guard_assert.yml against canned answers
+      ansible.builtin.include_tasks: verify_guard_case.yml
+      loop:
+        - {name: the guard holds, want: pass}
+        - {name: the guard holds with a refused dial and no mc, want: pass, dial4: '{"dial": 502, "upstream": null, "exposed": false}', users: {}}
+        - {name: the guard holds when the local API is unreachable, want: pass, dial6: '{"dial": "ENOENT", "upstream": null, "exposed": false}'}
+        - {name: table not loaded, want: fail, list_rc: 1}
+        - {name: root reaches serve on IPv4, want: fail, root: '{"serve4": "ok", "serve6": "ECONNRESET", "server": "ok"}'}
+        - {name: root reaches serve on IPv6, want: fail, root: '{"serve4": "ECONNREFUSED", "serve6": "ok", "server": "ok"}'}
+        - {name: root refused by S, want: fail, root: '{"serve4": "ECONNREFUSED", "serve6": "ECONNREFUSED", "server": "ECONNREFUSED"}'}
+        - {name: nobody reaches S, want: fail, nobody: '{"serve4": "ECONNREFUSED", "serve6": "ECONNREFUSED", "server": "ok"}'}
+        - {name: nobody reaches serve on IPv6, want: fail, nobody: '{"serve4": "ECONNREFUSED", "serve6": "ok", "server": "ECONNREFUSED"}'}
+        - {name: nobody times out instead of a reset, want: fail, nobody: '{"serve4": "timeout", "serve6": "ECONNREFUSED", "server": "ECONNREFUSED"}'}
+        - {name: the nobody probe crashed, want: fail, nobody: 'Traceback (most recent call last):'}
+        - {name: the root probe printed nothing, want: fail, root: ''}
+        - {name: mc refused by S, want: fail, users: {mc: '{"server": "ECONNREFUSED"}'}}
+        - {name: mc's probe crashed, want: fail, users: {mc: ''}}
+        - {name: the IPv6 dial answered as Noah, want: fail, dial6: '{"dial": 101, "upstream": "http 200", "exposed": true}'}
+        - {name: the IPv4 dial got JSON, want: fail, dial4: '{"dial": 101, "upstream": "http 403", "exposed": true}'}
+        - {name: the dial reached serve (an HTTP answer, even a 502), want: fail, dial6: '{"dial": 101, "upstream": "http 502", "exposed": false}'}
+        - {name: the dial probe crashed, want: fail, dial6: ''}
+        # The probe's own verdict counts on its own, whatever the upstream label says.
+        - {name: the probe flags exposure, want: fail, dial4: '{"dial": 101, "upstream": "closed", "exposed": true}'}
+        - {name: only one dial ran, want: fail, dials: one}
+        - {name: S sees tailscaled.sock, want: fail, ns_tailscaled: true}
+        - {name: S doesn't see the helper socket, want: fail, ns_helper: false}
+        - {name: S not running, want: fail, pid: "0"}
+      loop_control:
+        loop_var: guard_case
+        label: "{{ guard_case.name }}"
+
+    # What the task-file tests can't see because they include the files one by one: the role's wiring.
+    - name: Guard | wiring (include order, handler order, the guard enabled before S, verify covers it)
+      vars:
+        main: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../tasks/main.yml') | from_yaml }}"
+        handler_list: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../handlers/main.yml') | from_yaml }}"
+        service: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../tasks/service.yml') | from_yaml }}"
+        verify: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../tasks/verify.yml') | from_yaml }}"
+        # (selectattr/map split attribute names on dots, so the module keys go through dict2items.)
+        imports: "{{ main | map('dict2items') | flatten | selectattr('key', 'equalto', 'ansible.builtin.import_tasks') | map(attribute='value') | list }}"
+        includes: "{{ verify | map('dict2items') | flatten | selectattr('key', 'equalto', 'ansible.builtin.include_tasks') | map(attribute='value') | list }}"
+        started: >-
+          {{ service | map('dict2items') | flatten | selectattr('key', 'equalto', 'ansible.builtin.systemd_service')
+             | map(attribute='value.name') | list }}
+        names: "{{ handler_list | map(attribute='name') | list }}"
+      ansible.builtin.assert:
+        that:
+          - imports == ['preflight.yml', 'base.yml', 'install.yml', 'config.yml', 'helper.yml', 'guard.yml', 'service.yml', 'serve.yml']
+          - >-
+            started == ['{{ "{{" }} ai_control_guard_unit {{ "}}" }}', '{{ "{{" }} ai_control_helper_socket_unit {{ "}}" }}',
+                        '{{ "{{" }} ai_control_service {{ "}}" }}']
+          - names[0] == 'Reload systemd for ai-control'
+          - names.index('Reload ai-control guard') < names.index('Restart aictl-helper socket') < names.index('Restart ai-control')
+          - includes == ['verify_summary.yml', 'verify_guard.yml']
+          - verify[0]['ansible.builtin.command'].argv[2] == '{{ "{{" }} ai_control_guard_unit {{ "}}" }}'
+          - "'nftables' in ai_control_packages"
+        quiet: true
+
+    # ---- 6. tailscale serve (role tailscale_serve, parameterised) ---------------------------------
+    - name: Tailscale serve declaration
+      ansible.builtin.include_tasks: serve_case.yml
+
+    # §12.29: Mission Control's :8443 as host_vars/ai-box.yml sets it (an include param outranks the play's default []).
+    - name: Tailscale serve declaration with an extra handler
+      ansible.builtin.include_tasks: serve_extra_case.yml
+      vars:
+        ai_control_serve_extra_handlers:
+          - {port: 8443, mount: /, backend: "http://127.0.0.1:8097"}
+
+# §12.29: role mission_control declares ai-box's whole serve set too. For the same inventory both roles must declare
+# the identical set, or each converge resets the other's handler. This reads role mission_control's own vars and
+# defaults (its definition, not a copy; its include_vars of role ai_control's defaults is done the same way here).
+- name: Role ai_control and role mission_control declare the identical serve set
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+    - ../../mission_control/defaults/main.yml
+    - ../../mission_control/vars/main.yml
+  vars:
+    tailnet_ip: 100.64.0.10
+    gaming_pc_tailnet_ip: 100.64.0.20
+    tailnet_fqdn: ai-box.example.ts.net
+  tasks:
+    - name: Role ai_control's defaults, as role mission_control's preflight loads them
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../defaults/main.yml"
+        name: mission_control_aictl_defaults
+
+    - name: Same set for the same inventory
+      ansible.builtin.include_tasks: serve_shared_case.yml
+      loop:
+        - name: no extras (the default)
+          vars: {}
+          want: [{port: 443, mount: /, backend: "http://127.0.0.1:8095"}]
+        - name: Mission Control's :8443 (host_vars/ai-box.yml)
+          vars:
+            ai_control_serve_extra_handlers: [{port: 8443, mount: /, backend: "http://127.0.0.1:8097"}]
+          want:
+            - {port: 443, mount: /, backend: "http://127.0.0.1:8095"}
+            - {port: 8443, mount: /, backend: "http://127.0.0.1:8097"}
+        - name: Mission Control's :8443 with AI Control's ports moved in inventory
+          vars:
+            ai_control_serve_extra_handlers: [{port: 8443, mount: /, backend: "http://127.0.0.1:8097"}]
+            ai_control_serve_port: 9443
+            ai_control_listen_port: 8096
+          want:
+            - {port: 9443, mount: /, backend: "http://127.0.0.1:8096"}
+            - {port: 8443, mount: /, backend: "http://127.0.0.1:8097"}
+      loop_control:
+        loop_var: shared_case
+        label: "{{ shared_case.name }}"

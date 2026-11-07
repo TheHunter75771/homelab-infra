@@ -1,0 +1,23 @@
+---
+# /etc/ai-host-agent: root:aictl-agent 0750 (Y's README), so only the agent and root can look inside.
+- name: Config | directory
+  ansible.builtin.file:
+    path: "{{ ai_host_agent_config_dir }}"
+    state: directory
+    owner: "{{ ai_host_agent_token_owner }}"
+    group: "{{ ai_host_agent_token_group }}"
+    mode: "0750"
+
+# Validated with the installed code's own loader (unknown keys, bad binds and bounds are errors).
+# -B: no bytecode cache appears in the root-owned install.
+- name: Config | config.json (binds 127.0.0.1 + the tailnet IPv4, port 11510, sudo_exes)
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ ai_host_agent_config_file }}"
+    owner: "{{ ai_host_agent_owner }}"
+    group: "{{ ai_host_agent_owner }}"
+    mode: "0644"
+    validate: >-
+      {{ ai_host_agent_python }} -I -B -c "import sys; sys.path.insert(0, '{{ ai_host_agent_install_dir }}');
+      from ai_host_agent.config import load; load(sys.argv[1])" %s
+  notify: Restart ai-host-agent

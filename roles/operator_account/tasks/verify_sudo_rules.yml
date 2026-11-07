@@ -1,0 +1,32 @@
+---
+# Pure assertions on `sudo -n -l -U <account>` results (no host access; the offline test feeds it the
+# real text). Input: operator_account_sudo_rules, a list of {item: <resolved account>, rc, stdout, stderr}.
+# Regexes live in vars/main.yml as plain strings: a Jinja string literal in a conditional turns '\b'
+# into a backspace, so none are written inline here.
+- name: Accounts without sudo get nothing from classic sudo
+  ansible.builtin.assert:
+    that:
+      - "'may run the following commands' not in item.stdout"
+      - "'is not allowed to run sudo' in (item.stdout ~ item.stderr)"
+    fail_msg: "{{ item.item.name }} has sudo rights it must not have: {{ item.stdout }} {{ item.stderr }}"
+    quiet: true
+  loop: "{{ operator_account_sudo_rules | selectattr('item.sudo', 'equalto', 'none') }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Full sudo accounts are I/O-logged to their own directory
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+      - item.stdout is search(operator_account_sudo_rule_re)
+      - item.stdout is search(operator_account_log_input_re)
+      - item.stdout is search(operator_account_log_output_re)
+      # ...and nothing later turns it off again (a "!log_*" Default or a NOLOG_* tag on another rule).
+      - item.stdout is not search(operator_account_log_negated_re)
+      - item.stdout is not search(operator_account_nolog_tag_re)
+      - item.stdout is search(operator_account_iolog_dir_re_prefix ~ (item.item.iolog_dir | regex_escape) ~ operator_account_list_end_re)
+    fail_msg: "classic sudo's view of {{ item.item.name }} is missing the rule or its I/O logging: {{ item.stdout }} {{ item.stderr }}"
+    quiet: true
+  loop: "{{ operator_account_sudo_rules | selectattr('item.sudo', 'equalto', 'full_logged') }}"
+  loop_control:
+    label: "{{ item.item.name }}"

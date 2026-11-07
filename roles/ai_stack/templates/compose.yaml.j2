@@ -1,0 +1,267 @@
+# {{ ansible_managed }}
+# AI stack on ai-box (docs/CONTRACTS.md §12.10, §12.18b). Three services on the project's own bridge network:
+#   ollama-cpu  CPU Ollama, not published; reached only as http://ollama-cpu:11434 on this network.
+#   gpu-broker  Ollama-compatible front door (apps/gpu-broker): the gaming PC's GPU when gpu-gate says it
+#               is free, else ollama-cpu. Published on {{ tailnet_ip }}:{{ ai_stack_broker_port }} (tailnet only).
+#   open-webui  Chat UI, talks only to the broker. Published on {{ tailnet_ip }}:{{ ai_stack_webui_port }} (tailnet only).
+# and a fourth on an internal network (no gateway, no egress) that only open-webui shares:
+#   tika        Apache Tika + Tesseract: document text and OCR for uploads. Not published; reached only as
+#               {{ ai_stack_tika_url }} from open-webui.
+# Nothing is published on the LAN address or 0.0.0.0. Published ports are DNAT rules (userland-proxy off),
+# so UFW's INPUT rules don't see them; see roles/ai_stack/README.md, "Exposure".
+name: {{ ai_stack_name }}
+
+# Each service names its own `ai` address (§12.23: pinned, so the broker can tell open-webui's management
+# calls from everyone else's by the TCP peer address, and the host units' egress filters can allow the
+# broker's /32).
+x-common: &common
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  ollama-cpu:
+    <<: *common
+    networks:
+      ai:
+        ipv4_address: {{ ai_stack_ollama_cpu_ip }}
+    image: "{{ images.ollama }}"
+    container_name: ollama-cpu
+    # §12.25 (Reviewer S, S-8): no raw sockets, so a compromised container can't ARP-spoof the `ai` gateway or
+    # its neighbours. Its healthcheck is `ollama list` (HTTP), nothing needs NET_RAW.
+    cap_drop: [NET_RAW]
+    mem_limit: {{ ai_stack_mem_limits.ollama_cpu }}
+    # Same as mem_limit: no swap, so it is OOM-killed instead of thrashing the HDD.
+    memswap_limit: {{ ai_stack_mem_limits.ollama_cpu }}
+    environment:
+{% for key, value in ai_stack_ollama_env.items() %}
+      {{ key }}: {{ value | string | to_json }}
+{% endfor %}
+      # §12.23 (Reviewer N, N-1): no cloud passthrough. Ollama 0.40.11 otherwise sends `*:cloud` chat, show and
+      # /v1 requests to ollama.com, signed with this server's key. Fixed here, not in ai_stack_ollama_env, so no
+      # ai_stack_ollama_env override can drop it (the preflight refuses the key there). The role runs this file
+      # alone (no compose.override.yaml is merged, and one in the stack dir is refused).
+      OLLAMA_NO_CLOUD: "1"
+    volumes:
+      - ollama-models:/root/.ollama
+    labels:
+      homelab.watch: "true"
+    healthcheck:
+      # The ollama CLI asks the server in this container; it fails until the API answers.
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  gpu-broker:
+    <<: *common
+    networks:
+      ai:
+        ipv4_address: {{ ai_stack_broker_ip }}
+    image: "{{ local_images.gpu_broker }}"
+    # Built on the host by role ai_stack (tasks/broker_image.yml); never resolved against a registry.
+    pull_policy: never
+    container_name: gpu-broker
+    mem_limit: {{ ai_stack_mem_limits.gpu_broker }}
+    # Same as mem_limit: no swap, so it is OOM-killed instead of thrashing the HDD.
+    memswap_limit: {{ ai_stack_mem_limits.gpu_broker }}
+    read_only: true
+    cap_drop: [ALL]
+    environment:
+      GPU_BROKER_CONFIG: /etc/gpu-broker/config.json
+    volumes:
+      - type: bind
+        source: "{{ ai_stack_broker_config_file }}"
+        target: /etc/gpu-broker/config.json
+        read_only: true
+        bind:
+          create_host_path: false
+    ports:
+      - "{{ tailnet_ip }}:{{ ai_stack_broker_port }}:11434"
+    # The image's HEALTHCHECK (python -m gpu_broker --healthcheck, reads GPU_BROKER_CONFIG) applies.
+    labels:
+      homelab.watch: "true"
+      # A config change recreates the container (the broker reads its config only at start).
+      homelab.config-hash: "{{ ai_stack_broker_config_hash }}"
+
+  open-webui:
+    # Not <<: *common: its `networks` differ (two networks), and a key that overrides a merge reads as a
+    # duplicate to some YAML loaders. Same restart policy and no-new-privileges as *common.
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    image: "{{ images.open_webui }}"
+    container_name: open-webui
+    # §12.25 (S-8): no raw sockets (no ARP spoofing on `ai`). The healthcheck is curl over HTTP.
+    cap_drop: [NET_RAW]
+    mem_limit: {{ ai_stack_mem_limits.open_webui }}
+    # Same as mem_limit: no swap, so it is OOM-killed instead of thrashing the HDD.
+    memswap_limit: {{ ai_stack_mem_limits.open_webui }}
+    # WEBUI_SECRET_KEY only: generated once on the host, root 0600 (tasks/main.yml).
+    env_file:
+      - .env
+    environment:
+      OLLAMA_BASE_URL: http://gpu-broker:11434
+      # Login always required. The role never creates accounts: the admin creates the first (admin) one.
+      WEBUI_AUTH: "true"
+      ENABLE_SIGNUP: "{{ 'true' if ai_webui_enable_signup | bool else 'false' }}"
+      # Anyone who signs up after the admin waits for approval and can't use anything until then.
+      DEFAULT_USER_ROLE: pending
+      # No OpenAI connection: the broker is the only backend, so nothing calls api.openai.com.
+      ENABLE_OPENAI_API: "false"
+      # Telemetry and analytics off.
+      SCARF_NO_ANALYTICS: "true"
+      DO_NOT_TRACK: "true"
+      ANONYMIZED_TELEMETRY: "false"
+      # Document extraction (§12.18b): every non-text upload goes to Tika (OCR for images and scanned
+      # PDFs), 25 MB upload cap. Open WebUI copies these into its database on first start and the database
+      # wins after that; tasks/verify_extraction.yml checks the effective values (README).
+      CONTENT_EXTRACTION_ENGINE: tika
+      TIKA_SERVER_URL: "{{ ai_stack_tika_url }}"
+      TIKA_SERVER_VERSION: "{{ ai_stack_tika_server_version }}"
+      RAG_FILE_MAX_SIZE: "{{ ai_webui_rag_file_max_size_mb | int }}"
+      # Without this, image uploads are refused before any engine sees them.
+      CONTENT_EXTRACTION_SUPPORTED_MEDIA_MIME_TYPES: "{{ ai_webui_extraction_media_types | join(',') }}"
+      # Document search (§12.22). PersistentConfig in 0.12.4: these seed a fresh database only; the admin sets them
+      # in the Admin UI and tasks/verify_search.yml reads the effective values (README, "Search settings").
+      RAG_TOP_K: "{{ ai_stack_rag_top_k | int }}"
+      # Only used with hybrid search on (then Open WebUI keeps min(top_k, top_k_reranker) passages).
+      RAG_TOP_K_RERANKER: "{{ ai_stack_rag_top_k_reranker | int }}"
+      # Off: with Chroma and no reranker it only repeats the vector top-k at a high cost (README).
+      ENABLE_RAG_HYBRID_SEARCH: "{{ 'true' if ai_stack_rag_hybrid_search | bool else 'false' }}"
+      # §12.30: the reranker (empty = none). Only a pre-seeded model (ai_stack_hf_models) can be named.
+      RAG_RERANKING_MODEL: {{ ai_stack_expect_reranker_model | to_json }}
+      # §12.30: never reach Hugging Face. Rerankers are pre-seeded from the host (tasks/hf_models.yml); the
+      # embedding, auxiliary and Whisper models already in the cache keep loading from it. Plain getenv
+      # (huggingface_hub, transformers, Open WebUI's AUTO_UPDATE switches), so they apply on every start.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      RAG_EMBEDDING_MODEL_AUTO_UPDATE: "false"
+      RAG_RERANKING_MODEL_AUTO_UPDATE: "false"
+      TITLE_GENERATION_PROMPT_TEMPLATE: {{ ai_stack_title_prompt | to_json }}
+{% if ai_gpu_model is defined and ai_cpu_model is defined %}
+      TASK_MODEL: "{{ ai_stack_alias_name }}"
+{% endif %}
+{% if ai_embed_model is defined %}
+      # Embeddings through the broker's alias (same model on GPU and CPU).
+      RAG_EMBEDDING_ENGINE: ollama
+      RAG_EMBEDDING_MODEL: "{{ ai_stack_embed_alias }}"
+      RAG_OLLAMA_BASE_URL: http://gpu-broker:11434
+      RAG_EMBEDDING_BATCH_SIZE: "{{ ai_stack_rag_embedding_batch_size | int }}"
+      RAG_EMBEDDING_CONCURRENT_REQUESTS: "{{ ai_stack_rag_embedding_concurrent_requests | int }}"
+      # Plain os.getenv in 0.12.4: these apply on every start, whatever the database says.
+      RAG_EMBEDDING_QUERY_PREFIX: {{ ai_stack_embed_query_prefix | to_json }}
+      RAG_EMBEDDING_CONTENT_PREFIX: {{ ai_stack_embed_content_prefix | to_json }}
+{% endif %}
+    volumes:
+      - open-webui-data:/app/backend/data
+      # Read-only AI Library shares (§12.19 skills, §12.21 writing). Each is a LOCAL directory, so container
+      # start never waits on the gaming PC: its read-only CIFS mount (ro,nosuid,nodev,noexec) appears on it
+      # when the PC is reachable, and rslave carries it into the running container. Without it, the target
+      # holds only the share's marker file.
+{% for share in ai_stack_ro_shares %}
+      # {{ share.target }}: {{ share.mount_unit }}; marker {{ share.marker }}.
+      - type: bind
+        source: "{{ share.view }}"
+        target: "{{ share.target }}"
+{% if share.mode == 'rw' %}
+        # §12.27: read-write while the CIFS mount is up; while it isn't, the local directory underneath is
+        # immutable (chattr +i), so the bind can stay rw without letting anything write to ai-box's disk.
+        read_only: false
+{% else %}
+        read_only: true
+{% endif %}
+        bind:
+          create_host_path: false
+          propagation: rslave
+{% endfor %}
+      # §12.30: each pre-seeded Hugging Face model, READ-ONLY from root's seed folder on the host (outside the
+      # data volume; tasks/hf_models.yml fills it before compose up) onto its folder in the HF cache.
+{% for dir in ai_stack_hf_model_dirs %}
+      - type: bind
+        source: "{{ ai_stack_hf_seed_dir }}/{{ dir }}"
+        target: "{{ ai_stack_hf_container_cache }}/{{ dir }}"
+        read_only: true
+        bind:
+          create_host_path: false
+{% endfor %}
+    labels:
+      homelab.watch: "true"
+    networks:
+      ai:
+        # The published port and all egress use `ai`; `extract` is internal (no gateway).
+        gw_priority: 1
+        # The broker's only management client (gpu-broker.json management_clients, §12.23).
+        ipv4_address: {{ ai_stack_webui_ip }}
+      extract: {}
+    # No depends_on tika: chat must not wait on (or fail with) the extractor; uploads fail until it's up.
+    ports:
+      - "{{ tailnet_ip }}:{{ ai_stack_webui_port }}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # First start: migrations and a first-run model download, on an HDD.
+      start_period: 300s
+
+  tika:
+    image: "{{ images.tika }}"
+    container_name: tika
+    restart: unless-stopped
+    # The image's own unprivileged user (35002), no capabilities, read-only root: Tika, its forked worker
+    # JVM and Tesseract write only to /tmp (a tmpfs, counted in mem_limit).
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: {{ ai_stack_mem_limits.tika }}
+    # Same as mem_limit: no swap, so it is OOM-killed instead of thrashing the HDD.
+    memswap_limit: {{ ai_stack_mem_limits.tika }}
+    pids_limit: {{ ai_stack_tika_pids_limit }}
+    # Appended to the image's entrypoint (TikaServerCli -h 0.0.0.0 ...).
+    command: ["-c", "/tika-config.xml"]
+    environment:
+      # One OpenMP thread per Tesseract run (it otherwise takes every core per image), so a batch upload
+      # queues on the CPU instead of oversubscribing it. Tika 3.2.3's server has no cap on concurrent
+      # parses (TikaServerConfig has none); pids_limit and mem_limit bound a burst.
+      OMP_THREAD_LIMIT: "1"
+    volumes:
+      - type: bind
+        source: "{{ ai_stack_tika_config_file }}"
+        target: /tika-config.xml
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:size={{ ai_stack_tika_tmpfs_size }},uid={{ ai_stack_tika_uid }},gid={{ ai_stack_tika_uid }},mode=0700
+    # Only open-webui shares this network; it has no gateway, so Tika (which parses untrusted files) can't
+    # reach the internet, the LAN or the tailnet. No ports: published.
+    networks: [extract]
+    labels:
+      homelab.watch: "true"
+      # A config change recreates the container (Tika reads its config only at start).
+      homelab.config-hash: "{{ ai_stack_tika_config_hash }}"
+    healthcheck:
+      # GET /tika answers once the forked worker is up. The image has wget, not curl.
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://127.0.0.1:9998/tika"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+networks:
+  # Created and owned by role ai_stack (tasks/networks.yml) with its pinned subnet: compose would recreate
+  # the network, stopping every container on it, if its definition changed here.
+  ai:
+    external: true
+    name: {{ ai_stack_network_name }}
+  # No gateway: Tika can't reach anything but open-webui. Pinned, created by compose.
+  extract:
+    name: {{ ai_stack_extract_network_name }}
+    internal: true
+    ipam:
+      config:
+        - subnet: {{ ai_stack_extract_subnet }}
+
+volumes:
+  ollama-models: {}
+  open-webui-data: {}

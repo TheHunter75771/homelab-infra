@@ -1,0 +1,12 @@
+---
+- name: Units | stage service and timer
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ ai_backup_unit_dir }}/{{ item }}"
+    owner: "{{ ai_backup_owner }}"
+    group: "{{ ai_backup_owner }}"
+    mode: "0644"
+  loop:
+    - "{{ ai_backup_stage_service }}"
+    - "{{ ai_backup_stage_timer }}"
+  notify: Reload systemd for ai-backup

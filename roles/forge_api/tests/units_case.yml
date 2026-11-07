@@ -1,0 +1,143 @@
+---
+# Render forge-api.socket and forge-api.service and verify them. Any systemd-analyze warning fails, except one about the machine's own unit files. Params:
+# fa_case (name), fa_expect_listen (the exact ListenStream value) and fa_expect_ip_allow (the exact IPAddressAllow
+# value), both literals in the caller.
+- name: Unit dir ({{ fa_case }})
+  ansible.builtin.file:
+    path: "{{ test_tmp }}/units-{{ fa_case }}"
+    state: directory
+    mode: "0755"
+
+- name: Render the units ({{ fa_case }})
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ test_tmp }}/units-{{ fa_case }}/{{ item }}"
+    mode: "0644"
+  loop: [forge-api.socket, forge-api.service]
+
+- name: Systemd-analyze verify ({{ fa_case }})
+  ansible.builtin.command:
+    argv: [systemd-analyze, verify, "{{ test_tmp }}/units-{{ fa_case }}/forge-api.socket", "{{ test_tmp }}/units-{{ fa_case }}/forge-api.service"]
+  register: fa_test_verify
+  changed_when: false
+  # Any stderr line fails, except systemd's warnings about the machine's own unit files (ubuntu-latest's newer systemd:
+  # "<host unit dir>/x.service:26: Support for option CPUAccounting= has been removed") that name no unit verified here.
+  # Not caught: a host drop-in for a template or prefix of ours (foo@.service.d, foo-.service.d); a CI runner has none.
+  failed_when: >-
+    fa_test_verify.rc != 0
+    or fa_test_verify.stderr_lines | reject('match', '(/usr/lib|/lib|/etc|/run)/systemd/[^:]+:[0-9]+: ') | list | length > 0
+    or fa_test_verify.stderr_lines | select('search', fa_test_verify.cmd[2:] | map('basename') | map('regex_escape') | join('|'))
+    | list | length > 0
+
+# Reviewer M (M-1, role voice_profile): the expected unit is spelled out here, every line in order, NOT derived
+# from the role's vars, so deleting, adding, reordering or widening any line of either unit fails this test. Only
+# two values vary per case, themselves literals in the caller.
+- name: The whole socket unit is exactly the agreed text, in order ({{ fa_case }})
+  vars:
+    unit: "{{ lookup('ansible.builtin.file', test_tmp ~ '/units-' ~ fa_case ~ '/forge-api.socket') }}"
+    got: "{{ unit.splitlines() | reject('match', '^(#|$)') | list }}"
+    want:
+      - "[Unit]"
+      - Description=Skill Forge API socket (open-webui only)
+      - Documentation=file:///opt/forge-api/forge-api
+      - "[Socket]"
+      - ListenStream={{ fa_expect_listen }}
+      - FreeBind=yes
+      - Accept=no
+      - TriggerLimitIntervalSec=0
+      - IPAddressDeny=any
+      - IPAddressAllow={{ fa_expect_ip_allow }}
+      - "[Install]"
+      - WantedBy=sockets.target
+  ansible.builtin.assert:
+    that:
+      - got == want
+    fail_msg: >-
+      extra {{ got | difference(want) }} missing {{ want | difference(got) }}; got: {{ got | join(' | ') }}
+    quiet: true
+
+- name: The whole service unit is exactly the agreed text, in order ({{ fa_case }})
+  vars:
+    unit: "{{ lookup('ansible.builtin.file', test_tmp ~ '/units-' ~ fa_case ~ '/forge-api.service') }}"
+    got: "{{ unit.splitlines() | reject('match', '^(#|$)') | list }}"
+    want:
+      - "[Unit]"
+      - Description=Skill Forge API for Open WebUI (chat-approved research requests)
+      - Documentation=file:///opt/forge-api/forge-api
+      - Requires=forge-api.socket
+      - After=forge-api.socket
+      - After=docker.service
+      - StartLimitIntervalSec=0
+      - RequiresMountsFor=/srv/ai-library
+      - AssertPathExists=/srv/ai-library/.ai-library-sentinel
+      - AssertPathIsDirectory=/srv/ai-library/35-forge
+      - AssertPathIsSymbolicLink=!/srv/ai-library/35-forge
+      - "[Service]"
+      - Type=exec
+      - ExecStart=/usr/bin/python3 -I -B /opt/forge-api/forge-api --config /etc/forge-api/config.json serve
+      - Restart=on-failure
+      - RestartSec=30s
+      - SyslogIdentifier=forge-api
+      - User=rgate
+      - Group=rgate
+      - WorkingDirectory=/opt/forge-api
+      - UMask=0027
+      - MemoryMax=256M
+      - TasksMax=64
+      - LimitNOFILE=256
+      - NoNewPrivileges=yes
+      - ProtectSystem=strict
+      - ProtectHome=yes
+      - PrivateTmp=yes
+      - ReadOnlyPaths=/run
+      - ReadWritePaths=/srv/ai-library/35-forge
+      - InaccessiblePaths=/dev/shm
+      - RestrictAddressFamilies=AF_INET AF_UNIX
+      - SocketBindDeny=any
+      - CapabilityBoundingSet=
+      - AmbientCapabilities=
+      - SystemCallFilter=@system-service
+      - SystemCallFilter=~@privileged
+      - SystemCallErrorNumber=EPERM
+      - SystemCallArchitectures=native
+      - PrivateDevices=yes
+      - PrivateIPC=yes
+      - ProtectKernelTunables=yes
+      - ProtectKernelModules=yes
+      - ProtectKernelLogs=yes
+      - ProtectControlGroups=yes
+      - ProtectClock=yes
+      - ProtectHostname=yes
+      - ProtectProc=invisible
+      - ProcSubset=pid
+      - RestrictNamespaces=yes
+      - RestrictRealtime=yes
+      - RestrictSUIDSGID=yes
+      - LockPersonality=yes
+      - MemoryDenyWriteExecute=yes
+      - RemoveIPC=yes
+      - IPAddressDeny=any
+      - IPAddressAllow={{ fa_expect_ip_allow }}
+  ansible.builtin.assert:
+    that:
+      - got == want
+    fail_msg: >-
+      extra {{ got | difference(want) }} missing {{ want | difference(got) }}; got: {{ got | join(' | ') }}
+    quiet: true
+
+- name: The rendered [Service] lines are the role's sandbox list (the verify's systemd-run uses that list) ({{ fa_case }})
+  vars:
+    unit: "{{ lookup('ansible.builtin.file', test_tmp ~ '/units-' ~ fa_case ~ '/forge-api.service') }}"
+    service: "{{ unit | regex_search('(?ms)^\\[Service\\]$(.*)\\Z', '\\1') | first }}"
+    got: "{{ service.splitlines() | reject('match', '^(#|$)') | list }}"
+  ansible.builtin.assert:
+    that:
+      - got[5:] == forge_api_sandbox
+      - unit is not search('(?m)^(Environment|EnvironmentFile|PassEnvironment|SupplementaryGroups|DynamicUser|ExecStartPre|ExecStartPost)=')
+      - unit is not search('AF_INET6|AF_NETLINK|AF_PACKET')
+      - unit is not search('(?m)^IPAddressAllow=.*(any|localhost|127[.]|/0|/24|/16|/8)')
+      # Static: no [Install] (only the socket is enabled), and the service binds nothing itself.
+      - unit | regex_findall('(?m)^\\[[A-Za-z]+\\]$') == ['[Unit]', '[Service]']
+      - unit is not search('(?m)^SocketBindAllow=')
+    fail_msg: "{{ got | join(' | ') }}"
+    quiet: true

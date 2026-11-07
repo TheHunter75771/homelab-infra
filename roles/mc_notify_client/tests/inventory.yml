@@ -1,0 +1,14 @@
+---
+# Synthetic inventory for tests/test_mc_notify_client.yml. Every host runs locally and is never "real":
+#   sys     system scope into a scratch dir (owner overridden to the test user);
+#   usr     user scope with a scratch home (owner and group omitted, as on a workstation);
+#   render  renders both units with the role's REAL paths (set_fact is per host, so the others' overrides never
+#           reach it).
+all:
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  hosts:
+    sys:
+    usr:
+    render:

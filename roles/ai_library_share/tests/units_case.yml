@@ -1,0 +1,143 @@
+---
+# Render the server and client units through the role's own task files, with the production paths
+# (include params outrank the test's scratch paths), then systemd-analyze verify them (any warning
+# fails, except one about the machine's own unit files) and check the contract's lines.
+- name: Units | scratch unit dirs
+  ansible.builtin.file:
+    path: "{{ test_tmp }}/{{ item }}"
+    state: directory
+    mode: "0755"
+  loop: [units-server, units-client]
+
+- name: Units | render the server units
+  ansible.builtin.include_tasks: "{{ item }}"
+  loop: [../tasks/units_server_samba.yml, ../tasks/units_backup.yml]
+  vars:
+    ai_library_share_unit_dir: "{{ test_tmp }}/units-server"
+    ai_library_share_smb_dropin_dir: "{{ test_tmp }}/units-server/smb.service.d"
+    ai_library_share_smb_dropin: "{{ test_tmp }}/units-server/smb.service.d/ai-library.conf"
+    ai_library_share_lib_dir: /usr/local/lib/ai-library-share
+    ai_library_share_dir: /mnt/share/ai-library
+    ai_library_share_share_mount: /mnt/share
+    ai_library_share_share_fstypes: [ntfs3]
+    ai_library_share_backup_dir: /mnt/backup/ai-library
+    ai_library_share_backup_mount: /mnt/backup
+    ai_library_share_backup_fstypes: [ext4]
+
+- name: Units | a stand-in smb.service, so the drop-in is loaded and verified with it
+  ansible.builtin.copy:
+    dest: "{{ test_tmp }}/units-server/smb.service"
+    content: |
+      [Unit]
+      Description=stand-in for Fedora's smb.service
+      [Service]
+      Type=notify
+      ExecStart=/bin/true
+    mode: "0644"
+
+- name: Units | render the client units
+  ansible.builtin.include_tasks: ../tasks/units_client.yml
+  vars:
+    ai_library_share_unit_dir: "{{ test_tmp }}/units-client"
+    ai_library_share_lib_dir: /usr/local/lib/ai-library-share
+    ai_library_share_mount_point: /srv/ai-library
+    ai_library_share_mount_unit: 'srv-ai\x2dlibrary.mount'
+    ai_library_share_automount_unit: 'srv-ai\x2dlibrary.automount'
+    ai_library_share_credentials_file: /etc/ai-library/credentials
+    ai_library_share_wait_ips: ["{{ tailnet_ip }}"]
+
+- name: Units | systemd-analyze verify (server)
+  ansible.builtin.command:
+    argv:
+      - systemd-analyze
+      - verify
+      - "{{ test_tmp }}/units-server/smb.service"
+      - "{{ test_tmp }}/units-server/ai-library-backup.service"
+      - "{{ test_tmp }}/units-server/ai-library-backup.timer"
+  register: test_verify_server
+  changed_when: false
+  # Any stderr line fails, except systemd's warnings about the machine's own unit files (ubuntu-latest's newer systemd:
+  # "<host unit dir>/x.service:26: Support for option CPUAccounting= has been removed") that name no unit verified here.
+  # Not caught: a host drop-in for a template or prefix of ours (foo@.service.d, foo-.service.d); a CI runner has none.
+  failed_when: >-
+    test_verify_server.rc != 0
+    or test_verify_server.stderr_lines | reject('match', '(/usr/lib|/lib|/etc|/run)/systemd/[^:]+:[0-9]+: ') | list | length > 0
+    or test_verify_server.stderr_lines | select('search', test_verify_server.cmd[2:] | map('basename') | map('regex_escape') | join('|'))
+    | list | length > 0
+
+- name: Units | systemd-analyze verify (client)
+  ansible.builtin.command:
+    argv:
+      - systemd-analyze
+      - verify
+      - "{{ test_tmp }}/units-client/ai-library-tailnet-wait.service"
+      - "{{ test_tmp }}/units-client/srv-ai\\x2dlibrary.mount"
+      - "{{ test_tmp }}/units-client/srv-ai\\x2dlibrary.automount"
+  register: test_verify_client
+  changed_when: false
+  # Any stderr line fails, except systemd's warnings about the machine's own unit files (ubuntu-latest's newer systemd:
+  # "<host unit dir>/x.service:26: Support for option CPUAccounting= has been removed") that name no unit verified here.
+  # Not caught: a host drop-in for a template or prefix of ours (foo@.service.d, foo-.service.d); a CI runner has none.
+  failed_when: >-
+    test_verify_client.rc != 0
+    or test_verify_client.stderr_lines | reject('match', '(/usr/lib|/lib|/etc|/run)/systemd/[^:]+:[0-9]+: ') | list | length > 0
+    or test_verify_client.stderr_lines | select('search', test_verify_client.cmd[2:] | map('basename') | map('regex_escape') | join('|'))
+    | list | length > 0
+
+- name: Units | read them
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop:
+    - "{{ test_tmp }}/units-server/smb.service.d/ai-library.conf"
+    - "{{ test_tmp }}/units-server/smb.service"
+    - "{{ test_tmp }}/units-server/ai-library-backup.service"
+    - "{{ test_tmp }}/units-server/ai-library-backup.timer"
+    - "{{ test_tmp }}/units-client/ai-library-tailnet-wait.service"
+    - "{{ test_tmp }}/units-client/srv-ai\\x2dlibrary.mount"
+    - "{{ test_tmp }}/units-client/srv-ai\\x2dlibrary.automount"
+  register: test_units
+
+- name: Units | the contract's lines
+  vars:
+    dropin: "{{ test_units.results[0].content | b64decode }}"
+    backup: "{{ test_units.results[2].content | b64decode }}"
+    timer: "{{ test_units.results[3].content | b64decode }}"
+    wait_c: "{{ test_units.results[4].content | b64decode }}"
+    mount: "{{ test_units.results[5].content | b64decode }}"
+    automount: "{{ test_units.results[6].content | b64decode }}"
+    test_want_options: >-
+      credentials=/etc/ai-library/credentials,vers=3.1.1,seal,nounix,serverino,uid=rgate,gid=rgate,file_mode=0660,dir_mode=0770,
+      nosuid,nodev,noexec,soft,echo_interval=15,_netdev,symlink=none
+  ansible.builtin.assert:
+    that:
+      # smb waits for the real share drive (§12.11); systemd's IP filter admits only loopback and ai-box.
+      - dropin is search('(?m)^RequiresMountsFor=/mnt/share/ai-library$')
+      - dropin is search('(?m)^IPAddressDeny=any$')
+      - dropin is search('(?m)^IPAddressAllow=localhost 100.64.0.10 2001:db8::10$')
+      - dropin | regex_findall('(?m)^[A-Za-z]+=') | sort == ['IPAddressAllow=', 'IPAddressDeny=', 'RequiresMountsFor=']
+      - wait_c is search('(?m)^ExecStart=/bin/sh /usr/local/lib/ai-library-share/tailnet-wait.sh 120 100.64.0.10$')
+      - wait_c is search('(?m)^After=tailscaled.service$')
+      # Backup: root, the script with both mounts and fs types, writes only the backup folder.
+      - backup is search('(?m)^Type=oneshot$')
+      - backup is not search('(?m)^User=')
+      - >-
+        backup is search('(?m)^ExecStart=/usr/bin/python3 -I -B /usr/local/lib/ai-library-share/ai-library-backup.py
+        --source /mnt/share/ai-library --source-mount /mnt/share --source-fstype ntfs3 --dest /mnt/backup/ai-library
+        --dest-mount /mnt/backup --dest-fstype ext4 --lib /usr/local/lib/ai-library-share --sentinel .ai-library-sentinel$')
+      - backup is search('(?m)^RequiresMountsFor=/mnt/share/ai-library /mnt/backup/ai-library$')
+      - backup is search('(?m)^ReadWritePaths=/mnt/backup/ai-library$')
+      - backup is search('(?m)^ProtectSystem=strict$') and backup is search('(?m)^PrivateNetwork=yes$')
+      - timer is search('(?m)^Persistent=true$') and timer is search('(?m)^RandomizedDelaySec=45min$')
+      - timer is search('(?m)^OnCalendar=\*-\*-\* 03:30:00$') and timer is search('(?m)^WantedBy=timers.target$')
+      # Client mount: the contract's options, serverino kept, never enabled itself.
+      - mount is search('(?m)^What=//100.64.0.20/ai-library$')
+      - mount is search('(?m)^Where=/srv/ai-library$')
+      - mount is search('(?m)^Type=cifs$')
+      - mount is search('(?m)^Options=' ~ (test_want_options | replace(' ', '') | regex_escape) ~ '$')
+      - mount is not search('noserverino')
+      - mount is search('(?m)^Requires=ai-library-tailnet-wait.service$')
+      - mount is search('(?m)^After=ai-library-tailnet-wait.service tailscaled.service network-online.target$')
+      - mount is not search('(?m)^\[Install\]')
+      - automount is search('(?m)^Where=/srv/ai-library$') and automount is search('(?m)^TimeoutIdleSec=0$')
+      - automount is search('(?m)^WantedBy=remote-fs.target$')
+    quiet: true

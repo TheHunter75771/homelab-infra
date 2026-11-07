@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  author: homelab-infra
+  description: Mission Control on ai-box (Noah's PWA hub server, pinned push venv, VAPID keys, briefing timer, tailscale serve :8443)
+  license: MIT
+  min_ansible_version: "2.17"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - all
+dependencies: []

@@ -1,0 +1,26 @@
+---
+# One resolved account (operator_acct). Exact supplementary groups: the entry's list, plus the sudo-rs
+# deny group for full_logged accounts on hosts with sudo-rs. Nothing else (e.g. never docker).
+- name: "Account exists with a locked password ({{ operator_acct.name }})"
+  ansible.builtin.user:
+    name: "{{ operator_acct.name }}"
+    comment: "{{ operator_acct.comment }}"
+    system: true
+    shell: "{{ operator_acct.shell }}"
+    home: "{{ operator_acct.home }}"
+    create_home: true
+    password: "!"
+    groups: >-
+      {{ operator_acct.groups + ([operator_sudo_rs_deny_group]
+         if (operator_acct.sudo == 'full_logged' and operator_account_sudo_rs | length > 0
+             and (operator_account_deny_group_exists or not ansible_check_mode)) else []) }}
+    append: false
+
+- name: "Home is private ({{ operator_acct.name }})"
+  ansible.builtin.file:
+    path: "{{ operator_acct.home }}"
+    state: directory
+    owner: "{{ operator_acct.name }}"
+    group: "{{ operator_acct.name }}"
+    mode: "0700"
+  when: not (ansible_check_mode and operator_acct.name in operator_account_created)

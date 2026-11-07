@@ -1,0 +1,51 @@
+---
+# The deployable files only: S's package (no tests, README or example config), W's public/ (only
+# the web file types W ships), X's script. Each tree is root-owned (0755 dirs, 0644 files) and pruned
+# of anything else, so a file removed from the repo disappears from the host.
+- name: Install | the code directories are real directories (before any write)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    ai_control_guard_dirs:
+      - "{{ ai_control_app_dir }}"
+      - "{{ ai_control_server_dir }}"
+      - "{{ ai_control_server_dir }}/ai_control"
+      - "{{ ai_control_web_dir }}"
+
+- name: Install | code directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ ai_control_owner }}"
+    group: "{{ ai_control_owner }}"
+    mode: "0755"
+  loop:
+    - "{{ ai_control_app_dir }}"
+    - "{{ ai_control_server_dir }}"
+
+- name: Install | server S (the ai_control package)
+  ansible.builtin.include_tasks: tree.yml
+  vars:
+    ai_control_tree_src: "{{ ai_control_server_src }}"
+    ai_control_tree_dest: "{{ ai_control_server_dir }}/ai_control"
+    ai_control_tree_name: ai_control
+    ai_control_tree_include: '[.]py$'
+
+- name: Install | server dir holds only the package
+  ansible.builtin.include_tasks: prune_server.yml
+
+- name: Install | web W (public/)
+  ansible.builtin.include_tasks: tree.yml
+  vars:
+    ai_control_tree_src: "{{ ai_control_web_src }}"
+    ai_control_tree_dest: "{{ ai_control_web_dir }}"
+    ai_control_tree_name: web
+    ai_control_tree_include: '[.]({{ ai_control_web_extensions | join("|") }})$'
+
+# One root process per connection (Accept=yes): the next request runs the new script, no restart.
+- name: Install | helper X
+  ansible.builtin.copy:
+    src: "{{ ai_control_helper_src }}"
+    dest: "{{ ai_control_helper_script }}"
+    owner: "{{ ai_control_owner }}"
+    group: "{{ ai_control_owner }}"
+    mode: "0755"

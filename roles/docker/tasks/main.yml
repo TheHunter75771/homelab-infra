@@ -1,7 +1,14 @@
 ---
-# Docker itself is already installed on the host (docs/CONTRACTS.md §0). This role only checks it
-# and owns daemon.json. The systemd drop-in that makes docker wait for the boot gate
-# (docker.service.d/10-bootgate.conf) belongs to role bootgate and is never touched here.
+# On the mediaserver Docker is already installed (docs/CONTRACTS.md §0) and this role only checks it
+# and owns daemon.json. With docker_install: true (ai_servers, §12.8) it first installs Docker from Docker's
+# apt repo (install.yml); everything after that include is the same for both. The systemd drop-in that makes
+# docker wait for the boot gate (docker.service.d/10-bootgate.conf) belongs to role bootgate and is never
+# touched here.
+
+- name: Docker Engine and the compose plugin are installed from Docker's apt repo (docker_install only)
+  ansible.builtin.include_tasks:
+    file: install.yml
+  when: docker_install | bool
 
 - name: Docker CLI and the compose plugin are installed
   ansible.builtin.command:

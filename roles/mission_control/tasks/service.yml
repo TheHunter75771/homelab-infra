@@ -1,0 +1,42 @@
+---
+# The server unit (enabled), the briefing oneshot (static: only its timer starts it) and the timer (enabled).
+- name: Service | units
+  ansible.builtin.template:
+    src: "{{ mission_control_role_dir }}/templates/{{ item }}.j2"
+    dest: "{{ mission_control_unit_dir }}/{{ item }}"
+    owner: "{{ mission_control_root_owner }}"
+    group: "{{ mission_control_root_owner }}"
+    mode: "0644"
+    follow: false
+  loop:
+    - "{{ mission_control_service }}"
+    - "{{ mission_control_briefing_service }}"
+    - "{{ mission_control_briefing_timer }}"
+  notify:
+    - Reload systemd for mission-control
+    - Restart mission-control
+
+# Reload units, then restart the server if anything it uses changed.
+- name: Service | apply pending reloads and restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Service | the local-access guard is loaded on every boot (before the server)
+  ansible.builtin.systemd_service:
+    name: "{{ mission_control_guard_unit }}"
+    enabled: true
+    state: started
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Service | the server runs on every boot
+  ansible.builtin.systemd_service:
+    name: "{{ mission_control_service }}"
+    enabled: true
+    state: started
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Service | the briefing timer runs on every boot
+  ansible.builtin.systemd_service:
+    name: "{{ mission_control_briefing_timer }}"
+    enabled: true
+    state: started
+  ignore_errors: "{{ ansible_check_mode }}"

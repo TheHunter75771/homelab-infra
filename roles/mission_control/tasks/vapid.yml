@@ -1,0 +1,126 @@
+---
+# §12.29: Mission Control's own VAPID keys, generated ONCE on ai-box by the role and never rotated by a converge (a
+# new pair would orphan every subscribed phone). The key never passes through Ansible: files/vapid_keygen.py
+# writes it on the host (root:mc 0640, atomically, never over an existing path; MC1's layout with the subject) and
+# files/vapid_check.py reports only "ok" or a reason. The subject is written once with the keys: to change it later,
+# edit the file's "subject" by hand (the keys stay). Every task that touches the file is no_log (tests/check_no_log.py enforces it).
+- name: VAPID | the key file, if there is one
+  ansible.builtin.stat:
+    path: "{{ mission_control_vapid_file }}"
+    follow: false
+    get_checksum: false
+  register: mission_control_vapid_stat
+  no_log: true
+
+- name: VAPID | an existing key path is a regular file (never a symlink)
+  ansible.builtin.assert:
+    that: >-
+      not mission_control_vapid_stat.stat.exists
+      or (mission_control_vapid_stat.stat.isreg and not mission_control_vapid_stat.stat.islnk)
+    fail_msg: The VAPID key path in /etc/mission-control exists but isn't a regular file. Fix it by hand; it is never replaced.
+    quiet: true
+
+- name: VAPID | generate the key pair (only when there is none)
+  ansible.builtin.command:
+    argv:
+      - "{{ mission_control_venv_python }}"
+      - -I
+      - -B
+      - "{{ mission_control_lib_dir }}/vapid_keygen.py"
+      - "{{ mission_control_vapid_file }}"
+      - "{{ mission_control_root_owner }}"
+      - "{{ mission_control_group }}"
+      - "{{ mission_control_vapid_subject }}"
+  register: mission_control_vapid_gen
+  changed_when: mission_control_vapid_gen.stdout == 'created'
+  failed_when: mission_control_vapid_gen.rc != 0 or mission_control_vapid_gen.stdout not in ['created', 'exists']
+  no_log: true
+  notify: Restart mission-control
+  when:
+    - not mission_control_vapid_stat.stat.exists
+    - not ansible_check_mode
+
+- name: VAPID | the generator's verdict (never the key)
+  ansible.builtin.debug:
+    msg: "VAPID keys {{ mission_control_vapid_gen.stdout | default('kept') }} at {{ mission_control_vapid_file }}"
+  when: mission_control_vapid_gen is not skipped
+
+- name: VAPID | check the keys (format, and the public key belongs to the private key)
+  ansible.builtin.command:
+    argv:
+      - "{{ mission_control_venv_python }}"
+      - -I
+      - -B
+      - "{{ mission_control_lib_dir }}/vapid_check.py"
+      - "{{ mission_control_vapid_file }}"
+      - --keys-only
+  register: mission_control_vapid_verdict
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: not ansible_check_mode
+
+- name: VAPID | the key file is good
+  ansible.builtin.assert:
+    that: mission_control_vapid_verdict.stdout | default('') == 'ok'
+    fail_msg: >-
+      The VAPID key file is {{ mission_control_vapid_verdict.stdout | default('unreadable') | regex_replace('^bad: ', '') }}.
+      The role never replaces a key file: move it aside by hand only if no phone is subscribed yet (a new pair
+      orphans every subscription), then converge again.
+    quiet: true
+  when: not ansible_check_mode
+
+# Live bug 2026-10-28: the old default subject had a port, which py_vapid won't sign with. Only the subject is
+# rewritten (atomically, same owner and mode); the key strings are kept exactly, so every subscription stays valid.
+- name: VAPID | set the subject (the keys are never touched)
+  ansible.builtin.command:
+    argv:
+      - "{{ mission_control_venv_python }}"
+      - -I
+      - -B
+      - "{{ mission_control_lib_dir }}/vapid_subject.py"
+      - "{{ mission_control_vapid_file }}"
+      - "{{ mission_control_vapid_subject }}"
+  register: mission_control_vapid_subject_set
+  changed_when: mission_control_vapid_subject_set.stdout == 'updated'
+  failed_when: mission_control_vapid_subject_set.rc != 0 or mission_control_vapid_subject_set.stdout not in ['updated', 'unchanged']
+  no_log: true
+  notify: Restart mission-control
+  when: not ansible_check_mode
+
+- name: VAPID | the subject's verdict (never the keys)
+  ansible.builtin.debug:
+    msg: "VAPID subject {{ mission_control_vapid_subject_set.stdout }}: {{ mission_control_vapid_subject }}"
+  when: mission_control_vapid_subject_set is not skipped
+
+- name: VAPID | check the whole file (keys and subject)
+  ansible.builtin.command:
+    argv:
+      - "{{ mission_control_venv_python }}"
+      - -I
+      - -B
+      - "{{ mission_control_lib_dir }}/vapid_check.py"
+      - "{{ mission_control_vapid_file }}"
+  register: mission_control_vapid_full
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: not ansible_check_mode
+
+- name: VAPID | the key file and its subject are good
+  ansible.builtin.assert:
+    that: mission_control_vapid_full.stdout | default('') == 'ok'
+    fail_msg: "The VAPID file is {{ mission_control_vapid_full.stdout | default('unreadable') | regex_replace('^bad: ', '') }}."
+    quiet: true
+  when: not ansible_check_mode
+
+- name: VAPID | owner and mode (root:mc 0640)
+  ansible.builtin.file:
+    path: "{{ mission_control_vapid_file }}"
+    state: file
+    owner: "{{ mission_control_root_owner }}"
+    group: "{{ mission_control_group }}"
+    mode: "0640"
+    follow: false
+  no_log: true
+  when: not ansible_check_mode

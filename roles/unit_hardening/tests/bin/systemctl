@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""Fake systemctl for role unit_hardening's offline test. State: $UH_TEST_STATE (JSON); every call is appended to
+$UH_TEST_LOG. It models what the role relies on:
+  - cat --no-pager U: the fragment text plus every drop-in ON DISK under <root><unit_dir>/U.d/*.conf, each headed
+    "# <path>" and separated by a blank line (as systemd prints them); unknown -> rc 1;
+  - show --property=P... [--value] U: the unit's base properties, with DropInPaths, InaccessiblePaths and
+    RuntimeDirectoryPreserve taken from the drop-ins LOADED at the last daemon-reload (not from disk);
+    unknown -> LoadState=not-found;
+  - daemon-reload: loads the drop-ins on disk;
+  - try-restart U: only an active unit restarts: a new MainPID whose fake /proc entry shows /run/tailscale hidden
+    (a mount there, no socket) iff the LOADED InaccessiblePaths has -/run/tailscale, in its own PID namespace iff
+    the LOADED drop-ins say PrivatePIDs=yes; a unit marked fails_when_hardened goes to failed instead when it would
+    be hidden.
+The fake /proc lives at state["proc"]: <pid>/root/run/tailscale[/tailscaled.sock], <pid>/mountinfo, <pid>/status
+(Uid from the unit's User= through state["uids"]; root when empty), <pid>/comm, <pid>/cgroup, <pid>/ns/pid.
+"""
+import json
+import os
+import shutil
+import sys
+
+STATE = os.environ.get("UH_TEST_STATE", "")
+LOG = os.environ.get("UH_TEST_LOG", "")
+
+
+def load():
+    with open(STATE) as fh:
+        return json.load(fh)
+
+
+def save(st):
+    with open(STATE + ".new", "w") as fh:
+        json.dump(st, fh, indent=1, sort_keys=True)
+    os.replace(STATE + ".new", STATE)
+
+
+def dropins_on_disk(st, unit):
+    d = st["root"] + st["unit_dir"] + "/" + unit + ".d"
+    out = {}
+    if os.path.isdir(d):
+        for name in sorted(os.listdir(d)):
+            if name.endswith(".conf"):
+                with open(os.path.join(d, name)) as fh:
+                    out[st["unit_dir"] + "/" + unit + ".d/" + name] = fh.read()
+    return out
+
+
+def directive(texts, key):
+    vals = []
+    for text in texts:
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith(key + "="):
+                vals.append(line.split("=", 1)[1])
+    return vals
+
+
+def props(st, unit):
+    u = st["units"].get(unit)
+    if u is None:
+        return {"LoadState": "not-found", "ActiveState": "inactive", "SubState": "dead", "Type": "", "MainPID": "0",
+                "NRestarts": "0", "DropInPaths": "", "InaccessiblePaths": "", "RuntimeDirectoryPreserve": "no",
+                "User": "", "DynamicUser": "no", "PrivatePIDs": "no", "Environment": "", "TemporaryFileSystem": "",
+                "BindPaths": "", "BindReadOnlyPaths": ""}
+    p = {"User": "", "DynamicUser": "no", "PrivatePIDs": "no", "Environment": "", "TemporaryFileSystem": "",
+         "BindPaths": "", "BindReadOnlyPaths": ""}
+    p.update(u["props"])
+    loaded = st["loaded"].get(unit, {})
+    p["DropInPaths"] = " ".join([x for x in p.get("DropInPaths", "").split() if x] + sorted(loaded))
+    hidden = [x for x in p.get("InaccessiblePaths", "").split() if x]
+    for v in directive(loaded.values(), "InaccessiblePaths"):
+        hidden += v.split()
+    p["InaccessiblePaths"] = " ".join(hidden)
+    for key in ("RuntimeDirectoryPreserve", "PrivatePIDs"):
+        vals = directive(loaded.values(), key)
+        if vals:
+            p[key] = vals[-1]
+    env = [x for x in p.get("Environment", "").split() if x]
+    for v in directive(loaded.values(), "Environment"):
+        env += v.split()
+    p["Environment"] = " ".join(env)
+    tmpfs = [x for x in p.get("TemporaryFileSystem", "").split() if x]
+    for v in directive(loaded.values(), "TemporaryFileSystem"):
+        tmpfs += v.split()
+    p["TemporaryFileSystem"] = " ".join(tmpfs)
+    binds = [x for x in p.get("BindReadOnlyPaths", "").split() if x]
+    for v in directive(loaded.values(), "BindReadOnlyPaths"):
+        binds += [f"{b}:{b}:rbind" for b in v.split()]  # as systemctl show prints them
+    p["BindReadOnlyPaths"] = " ".join(binds)
+    return p
+
+
+def run_binds(p):
+    """None: the host's /run; a list: a /run tmpfs holding only these (TemporaryFileSystem=/run:ro + binds)."""
+    if "/run:ro" not in p["TemporaryFileSystem"].split():
+        return None
+    return [b.lstrip("-").split(":", 1)[0] for b in p["BindReadOnlyPaths"].split()]
+
+
+HOST_PIDNS = "pid:[4026531836]"
+
+
+def make_proc(st, pid, hidden, unit="", user="", private_pids=False, binds=None):
+    """A fake /proc/<pid>: what the unit's process sees under /run, its uids, comm, cgroup and PID ns. binds=None:
+    the host's /run (tailscale/ hidden or with the socket, plus docker.sock); a list: a tmpfs with only those."""
+    base = os.path.join(st["proc"], str(pid))
+    os.makedirs(os.path.join(base, "ns"), exist_ok=True)
+    uid = 0 if user in ("", "root", "0") else st["uids"][user]
+    with open(os.path.join(base, "status"), "w") as fh:
+        fh.write(f"Name:\tfake\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t{uid}\t{uid}\t{uid}\t{uid}\n")
+    with open(os.path.join(base, "comm"), "w") as fh:
+        fh.write((unit.split(".")[0] or "proc") + "\n")
+    with open(os.path.join(base, "cgroup"), "w") as fh:
+        fh.write(f"0::/system.slice/{unit}\n" if unit else "0::/user.slice/user-4242.slice/session-1.scope\n")
+    link = os.path.join(base, "ns", "pid")
+    if os.path.lexists(link):
+        os.remove(link)
+    os.symlink(f"pid:[{4026600000 + pid}]" if private_pids else HOST_PIDNS, link)
+    os.makedirs(os.path.join(base, "root", "etc"), exist_ok=True)
+    lines = ["21 1 0:20 / / rw,relatime - ext4 /dev/sda1 rw\n",
+             "22 21 0:21 / /run rw,nosuid,nodev - tmpfs tmpfs rw\n"]
+    if binds is not None:
+        os.makedirs(os.path.join(base, "root", "run"), exist_ok=True)
+        for b in binds:
+            target = os.path.join(base, "root", b.lstrip("/"))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w"):
+                pass
+        with open(os.path.join(base, "mountinfo"), "w") as fh:
+            fh.writelines(lines)
+        return
+    tsdir = os.path.join(base, "root", "run", "tailscale")
+    os.makedirs(tsdir, exist_ok=True)
+    with open(os.path.join(base, "root", "run", "docker.sock"), "w"):
+        pass
+    if hidden:
+        lines.append("40 22 0:21 /systemd/inaccessible/dir /run/tailscale ro,nosuid,nodev,noexec - tmpfs tmpfs rw\n")
+    else:
+        with open(os.path.join(tsdir, "tailscaled.sock"), "w"):
+            pass
+    with open(os.path.join(base, "mountinfo"), "w") as fh:
+        fh.writelines(lines)
+
+
+def main(argv):
+    with open(LOG, "a") as fh:
+        fh.write(" ".join(argv) + "\n")
+    st = load()
+    args = [a for a in argv if a != "--no-pager"]
+    if not args:
+        return 1
+    cmd, rest = args[0], args[1:]
+    if cmd == "cat":
+        unit = rest[-1]
+        u = st["units"].get(unit)
+        if u is None or u["props"].get("LoadState") == "not-found":
+            sys.stderr.write(f"No files found for {unit}.\n")
+            return 1
+        chunks = [f"# {u['fragment']}\n{u['text'].rstrip(chr(10))}\n"]
+        for path, text in dropins_on_disk(st, unit).items():
+            chunks.append(f"# {path}\n{text.rstrip(chr(10))}\n")
+        sys.stdout.write("\n".join(chunks))
+        return 0
+    if cmd == "show":
+        unit = rest[-1]
+        want = [a.split("=", 1)[1] for a in rest if a.startswith("--property=")]
+        value_only = "--value" in rest
+        p = props(st, unit)
+        for k in want:
+            sys.stdout.write((p.get(k, "") if value_only else f"{k}={p.get(k, '')}") + "\n")
+        return 0
+    if cmd == "daemon-reload":
+        st["loaded"] = {unit: dropins_on_disk(st, unit) for unit in st["units"]}
+        save(st)
+        return 0
+    if cmd == "try-restart":
+        unit = rest[-1]
+        u = st["units"].get(unit)
+        if u is None:
+            sys.stderr.write(f"Failed to try-restart {unit}: Unit {unit} not loaded.\n")
+            return 5
+        if u["props"].get("ActiveState") != "active":
+            return 0
+        p = props(st, unit)
+        old = int(u["props"].get("MainPID", "0"))
+        if old:
+            shutil.rmtree(os.path.join(st["proc"], str(old)), ignore_errors=True)  # the old process is gone
+        hidden = "-/run/tailscale" in p["InaccessiblePaths"].split()
+        if hidden and u.get("fails_when_hardened"):
+            u["props"].update({"ActiveState": "failed", "SubState": "failed", "MainPID": "0"})
+        else:
+            pid = st["next_pid"]
+            st["next_pid"] = pid + 1
+            make_proc(st, pid, hidden, unit, p["User"], p["PrivatePIDs"] == "yes", run_binds(p))
+            u["props"]["MainPID"] = str(pid)
+        save(st)
+        return 0
+    sys.stderr.write(f"fake systemctl: unsupported: {' '.join(argv)}\n")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

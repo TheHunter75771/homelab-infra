@@ -1,0 +1,15 @@
+# {{ ansible_managed }}
+# Role ai_library_share (docs/CONTRACTS.md §12.17.3): the AI Library share on ai-box, mounted on first
+# access by {{ ai_library_share_automount_unit }} and never idled out. Owned by {{ ai_library_share_mount_user }} (0660/0770).
+[Unit]
+Description=AI Library share (CIFS from the gaming PC)
+Requires={{ ai_library_share_wait_unit }}
+After={{ ai_library_share_wait_unit }} tailscaled.service network-online.target
+Wants=network-online.target
+
+[Mount]
+What=//{{ gaming_pc_tailnet_ip }}/{{ ai_library_share_share_name }}
+Where={{ ai_library_share_mount_point }}
+Type=cifs
+Options=credentials={{ ai_library_share_credentials_file }},{{ ai_library_share_mount_options | join(',') }}
+TimeoutSec=60

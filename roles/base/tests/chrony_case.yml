@@ -1,0 +1,16 @@
+---
+# One case of tests/test_chrony_selectdata.yml: run the role's real check on the fixture output.
+- name: Run the check (case {{ chrony_case.name }})
+  vars:
+    base_chrony_selectdata: {stdout_lines: "{{ chrony_case.lines }}"}
+  block:
+    - name: The role's selectdata check (case {{ chrony_case.name }})
+      ansible.builtin.include_tasks: ../tasks/chrony_selectdata.yml
+
+    - name: Record a pass (case {{ chrony_case.name }})
+      ansible.builtin.set_fact:
+        chrony_test_verdicts: "{{ chrony_test_verdicts | default({}) | combine({chrony_case.name: chrony_case.expect == 'pass'}) }}"
+  rescue:
+    - name: Record a failure (case {{ chrony_case.name }})
+      ansible.builtin.set_fact:
+        chrony_test_verdicts: "{{ chrony_test_verdicts | default({}) | combine({chrony_case.name: chrony_case.expect == 'fail'}) }}"

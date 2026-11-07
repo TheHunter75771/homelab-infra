@@ -1,0 +1,10 @@
+{
+  "library_root": "/srv/ai-library",
+  "broker_url": "http://broker.invalid:11434",
+  "model": "assistant",
+  "poll_interval": 120,
+  "max_source_chars": 16000,
+  "num_ctx": 16384,
+  "timeout": 1200,
+  "max_attempts": 3
+}

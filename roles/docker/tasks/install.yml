@@ -1,0 +1,179 @@
+---
+# Opt-in install path (docker_install: true, docs/CONTRACTS.md §12.8). Docker Engine + the compose plugin from
+# Docker's official apt repo, the same source as the mediaserver, pinned to versions.yml -> apt_packages and held.
+# The package starts and enables docker.service; main.yml then writes daemon.json and its handler restarts
+# dockerd once. Meant for hosts without the boot gate (ai_servers); the mediaserver keeps docker_install false.
+
+- name: Install inputs are complete (exact pinned versions for every package, a codename, a matching arch)
+  ansible.builtin.assert:
+    that:
+      - apt_packages is defined
+      - docker_install_packages | difference(apt_packages.keys() | list) | length == 0
+      - docker_install_packages | map('extract', apt_packages) | select('search', '[][*?]') | list | length == 0
+      - docker_apt_codename | default('', true) | length > 0
+      - docker_apt_arch != 'amd64' or ansible_facts['architecture'] == 'x86_64'
+    fail_msg: >-
+      docker_install needs versions.yml apt_packages entries with exact versions (no globs) for
+      {{ docker_install_packages | join(', ') }}, a docker_apt_codename (got '{{ docker_apt_codename | default('') }}')
+      and docker_apt_arch {{ docker_apt_arch }} matching the host ({{ ansible_facts['architecture'] | default('unknown') }}).
+    quiet: true
+
+# Same spec as role users (system group, no fixed GID), so either role can create it; the package accepts an
+# existing group. users only adds the admin once the group exists (§12.7), so the install path does it here.
+- name: Docker group exists
+  ansible.builtin.group:
+    name: docker
+    system: true
+    state: present
+
+- name: Admin user is in the docker group
+  ansible.builtin.user:
+    name: "{{ admin_user }}"
+    groups:
+      - docker
+    append: true
+
+- name: Apt keyring directory exists
+  ansible.builtin.file:
+    path: "{{ docker_apt_keyring | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Look for Docker's apt key
+  ansible.builtin.stat:
+    path: "{{ docker_apt_keyring }}"
+  register: docker_apt_key_stat
+
+# First install only: the key is downloaded to a temp file and moves into the keyring path only after its
+# fingerprint matched. Nothing references the keyring until the apt source below is written.
+# Skipped in check mode: tempfile and get_url don't run there, so the verify step would have nothing to read
+# (a check-mode run on a host without Docker can't get past the package install anyway; no Docker lists yet).
+- name: Docker's apt key is downloaded and verified before it is trusted
+  when:
+    - not docker_apt_key_stat.stat.exists
+    - not ansible_check_mode
+  block:
+    - name: Temp file for the downloaded key
+      ansible.builtin.tempfile:
+        state: file
+        suffix: .asc
+      register: docker_apt_key_tmp
+
+    - name: Download Docker's apt key
+      ansible.builtin.get_url:
+        url: "{{ docker_apt_key_url }}"
+        dest: "{{ docker_apt_key_tmp.path }}"
+        mode: "0600"
+        force: true
+
+    - name: Read the downloaded key
+      ansible.builtin.slurp:
+        src: "{{ docker_apt_key_tmp.path }}"
+      register: docker_apt_key_download
+
+    - name: The downloaded key is exactly Docker's signing key
+      vars:
+        docker_apt_key_problem: >-
+          {{ docker_apt_key_download.content | docker_openpgp_problem(docker_apt_key_fingerprint, base64_input=true) }}
+      ansible.builtin.assert:
+        that:
+          - docker_apt_key_problem | length == 0
+        fail_msg: "Not trusting the key from {{ docker_apt_key_url }}: {{ docker_apt_key_problem }}."
+        quiet: true
+
+    - name: Verified key is in the apt keyring path
+      ansible.builtin.copy:
+        src: "{{ docker_apt_key_tmp.path }}"
+        dest: "{{ docker_apt_keyring }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+  always:
+    - name: Temp key file is removed
+      ansible.builtin.file:
+        path: "{{ docker_apt_key_tmp.path }}"
+        state: absent
+      when: docker_apt_key_tmp.path is defined
+
+# Every run: the key apt trusts for this source is still Docker's, alone in the file (catches a replaced,
+# appended-to or corrupted keyring). Skipped only in check mode on a host that has no keyring yet.
+- name: Read the keyring
+  ansible.builtin.slurp:
+    src: "{{ docker_apt_keyring }}"
+  register: docker_apt_keyring_content
+  when: docker_apt_key_stat.stat.exists or not ansible_check_mode
+
+- name: The keyring holds exactly Docker's signing key
+  vars:
+    docker_apt_keyring_problem: >-
+      {{ docker_apt_keyring_content.content | docker_openpgp_problem(docker_apt_key_fingerprint, base64_input=true) }}
+  ansible.builtin.assert:
+    that:
+      - docker_apt_keyring_problem | length == 0
+    fail_msg: >-
+      {{ docker_apt_keyring }} is not trusted: {{ docker_apt_keyring_problem }}.
+      Remove it and re-run to fetch a fresh copy.
+    quiet: true
+  when: docker_apt_keyring_content is not skipped
+
+# A one-line source left by Docker's older install docs would clash with docker.sources (apt refuses
+# conflicting Signed-By values for the same repo). Removed before the apt cache is refreshed.
+- name: No legacy one-line Docker apt source
+  ansible.builtin.file:
+    path: /etc/apt/sources.list.d/docker.list
+    state: absent
+
+- name: Docker's apt source is configured (deb822, signed by the verified key only)
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/docker.sources
+    content: |
+      # Managed by Ansible (homelab-infra role docker, docs/CONTRACTS.md §12.8).
+      Types: deb
+      URIs: {{ docker_apt_repo_url }}
+      Suites: {{ docker_apt_codename }}
+      Components: stable
+      Architectures: {{ docker_apt_arch }}
+      Signed-By: {{ docker_apt_keyring }}
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Read installed package versions
+  ansible.builtin.package_facts:
+    manager: apt
+
+# Refresh the apt lists only when something is about to be installed or changed (first install, a version change in
+# versions.yml), so a converged host stays changed=0 and a failed first run recovers on the next one.
+# lock_timeout: unattended-upgrades or apt-daily may hold the dpkg lock on a freshly booted host.
+- name: Refresh the apt cache before installing or changing Docker packages
+  vars:
+    docker_packages_pending: >-
+      {{ docker_install_packages | docker_apt_pending(ansible_facts.packages, apt_packages) }}
+  ansible.builtin.apt:
+    update_cache: true
+    lock_timeout: 600
+  when: docker_packages_pending | length > 0
+
+# The versions.yml pin is authoritative in both directions: held packages may change and may go down.
+- name: Docker Engine, CLI, containerd, rootless extras and the buildx/compose plugins are at the pinned versions
+  ansible.builtin.apt:
+    name: "{{ docker_install_packages | zip(docker_install_packages | map('extract', apt_packages)) | map('join', '=') | list }}"
+    state: present
+    install_recommends: false
+    allow_change_held_packages: true
+    allow_downgrade: true
+    lock_timeout: 600
+
+# dpkg_selections has no lock wait of its own, so it retries while apt-daily/unattended-upgrades hold the lock.
+- name: Docker packages are held (unattended-upgrades and apt upgrade leave them alone)
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop: "{{ docker_install_packages }}"
+  register: docker_hold
+  until: docker_hold is succeeded
+  retries: 10
+  delay: 15

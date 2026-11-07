@@ -1,0 +1,47 @@
+---
+# /etc/ai-control: root:aictl 0750. aictl reads config.json and agent-token (root:aictl 0640);
+# helper.json (root 0644) is read by the root helper only.
+- name: Config | directory
+  ansible.builtin.file:
+    path: "{{ ai_control_config_dir }}"
+    state: directory
+    owner: "{{ ai_control_root_owner }}"
+    group: "{{ ai_control_group }}"
+    mode: "0750"
+
+# Validated with the installed server's own loader (unknown keys and bad values are errors; it
+# imports no aiohttp). -B: no bytecode cache appears in the root-owned install.
+- name: Config | config.json (S's every key, values from inventory)
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ ai_control_config_file }}"
+    owner: "{{ ai_control_root_owner }}"
+    group: "{{ ai_control_group }}"
+    mode: "0640"
+    validate: >-
+      {{ ai_control_python }} -I -B -c "import sys; sys.path.insert(0, '{{ ai_control_server_dir }}');
+      from ai_control.config import load; load(sys.argv[1])" %s
+  notify: Restart ai-control
+
+# §12.15.7: the host agent's token, from play 1 (never inventory, never output). S re-reads the file
+# on every call, so a new token needs no restart. diff: false and no_log: the value never prints.
+# Without a token this run (play 1 skipped or failed) the existing file is kept (preflight.yml).
+- name: Config | agent token (root:aictl 0640)
+  ansible.builtin.copy:
+    dest: "{{ ai_control_token_file }}"
+    content: "{{ ai_control_agent_token }}\n"
+    owner: "{{ ai_control_root_owner }}"
+    group: "{{ ai_control_group }}"
+    mode: "0640"
+    follow: false
+  diff: false
+  no_log: true
+  when: ai_control_token_given | bool
+
+- name: Config | state directory (gate-samples.jsonl)
+  ansible.builtin.file:
+    path: "{{ ai_control_state_dir }}"
+    state: directory
+    owner: "{{ ai_control_user }}"
+    group: "{{ ai_control_group }}"
+    mode: "0750"

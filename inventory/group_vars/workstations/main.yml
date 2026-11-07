@@ -1,0 +1,4 @@
+---
+# §12.13: on the gaming PC the operator is reached as claude@localhost only.
+operator_key_from: ["127.0.0.1", "::1"]
+operator_manage_sshd_match: true

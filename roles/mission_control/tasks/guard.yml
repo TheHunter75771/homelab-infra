@@ -1,0 +1,28 @@
+---
+# Reviewer Q, Q-1: the local-access guard. A dedicated nftables table (inet mission_control_guard, output hook) lets
+# only root (tailscaled, the role's own checks) open TCP to the server on 127.0.0.1:8097 and to serve's :8443 on
+# ai-box's own tailnet addresses; every other local user gets a reset. Loaded by mission-control-guard.service (a
+# oneshot, RemainAfterExit), which the server unit requires. The file replaces only its own table: never
+# `flush ruleset`, never /etc/nftables.conf, never UFW's or Docker's tables.
+- name: Guard | the rules file (validated with `nft -c`)
+  ansible.builtin.template:
+    src: "{{ mission_control_role_dir }}/templates/guard.nft.j2"
+    dest: "{{ mission_control_guard_file }}"
+    owner: "{{ mission_control_root_owner }}"
+    group: "{{ mission_control_root_owner }}"
+    mode: "0644"
+    follow: false
+    validate: "{{ mission_control_nft }} -c -f %s"
+  notify: Reload mission-control guard
+
+- name: Guard | the unit that loads it
+  ansible.builtin.template:
+    src: "{{ mission_control_role_dir }}/templates/mission-control-guard.service.j2"
+    dest: "{{ mission_control_unit_dir }}/{{ mission_control_guard_unit }}"
+    owner: "{{ mission_control_root_owner }}"
+    group: "{{ mission_control_root_owner }}"
+    mode: "0644"
+    follow: false
+  notify:
+    - Reload systemd for mission-control
+    - Reload mission-control guard

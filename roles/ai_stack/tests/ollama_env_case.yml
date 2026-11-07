@@ -1,0 +1,25 @@
+---
+# One case for test_render.yml: runs the role's tasks/ollama_env_check.yml with a sample ai_stack_ollama_env
+# and checks it passes or fails as expected.
+- name: Ollama env case | the role's check
+  block:
+    - name: Ollama env case | tasks/ollama_env_check.yml
+      ansible.builtin.include_tasks: "{{ ai_stack_test_role }}/tasks/ollama_env_check.yml"
+      vars:
+        ai_stack_ollama_env: "{{ env_case.env }}"
+
+    - name: Ollama env case | it passed
+      ansible.builtin.set_fact:
+        env_case_failed: false
+  rescue:
+    - name: Ollama env case | it failed
+      ansible.builtin.set_fact:
+        env_case_failed: true
+  always:
+    - name: Ollama env case | outcome is as expected
+      ansible.builtin.assert:
+        that:
+          - env_case_failed is defined
+          - (not env_case_failed) == (env_case.ok | bool)
+        fail_msg: "{{ env_case.name }}: expected {{ 'pass' if env_case.ok | bool else 'fail' }}."
+        quiet: true

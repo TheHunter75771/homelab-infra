@@ -1,0 +1,414 @@
+---
+# Offline test for role ai_backup (no root, nothing applied to this machine; documentation addresses only: the
+# CGNAT range and RFC 3849). Run it through tests/run.sh, which also runs the script's unit tests and checks that
+# the generated private key never reaches the -vvv --diff output. It runs the role's own task files into a
+# scratch dir, as the current user; /tmp (a tmpfs) stands in for the backup drive and a plain directory for an
+# unmounted one:
+#   1. preflight_stage.yml passes, and refuses: a missing volume, a symlinked volume, a missing uploads/, a missing
+#      .env, no PC address, an address that would break out of from="...", keep 0, rrsync missing;
+#   2. install.yml: the script, a second run changes nothing, a symlinked script dir refused;
+#   3. key.yml: ssh-keygen once (0600/0644), a second run changes nothing, half a key pair refused;
+#   4. authorized_key.yml into a scratch authorized_keys: exactly one line, restrict + from="<PC>" +
+#      command="<rrsync> -ro <staging dir>", a planted extra key removed, a second run changes nothing;
+#   5. export_key.yml: the fact equals the key file (no_log asserts), the host key fact is "type base64";
+#   6. preflight_pull.yml passes, and refuses: an unmounted drive, a wrong fs type, a host that isn't an IPv4
+#      literal, a subdir with '..', no key handed over and none installed;
+#   7. pull_key.yml: key 0600 equal to ai-box's, known_hosts pinned, a second run changes nothing, kept as they
+#      are when no key comes (the ai-box play skipped);
+#   8. the destination chain under the stand-in drive (root-only folders), a symlinked one refused;
+#   9. the units: rendered by the role's task files, systemd-analyze verify clean, the [Service] sections exactly
+#      the sandbox lists plus the fixed keys, timers at 03:45 / 06:30 with Persistent=true.
+- name: Role ai_backup (stage and pull halves, offline)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  vars:
+    gaming_pc_tailnet_ip: 100.64.0.20
+    gaming_pc_tailnet_ip6: "2001:db8::20"
+    ai_box_tailnet_ip: 100.64.0.10
+    ansible_managed: Ansible managed
+    homelab_stacks_dir: /srv/homelab/stacks
+    test_tmp: ""
+    test_name: "{{ test_tmp | basename }}"
+    test_user: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+    test_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
+    test_vol_task: Preflight | the open-webui volume and its uploads/ and vector_db/ are real directories
+  handlers:
+    - name: Reload systemd for ai-backup
+      ansible.builtin.debug:
+        msg: reload requested
+  tasks:
+    - name: Run.sh passed a scratch dir under /tmp
+      ansible.builtin.assert:
+        that:
+          - test_tmp is abs and test_tmp is match('^/tmp/[^/]+$')
+        fail_msg: Run this through roles/ai_backup/tests/run.sh.
+        quiet: true
+
+    - name: Point the role at the scratch dir, this user and the stubs
+      ansible.builtin.set_fact:
+        ai_backup_owner: "{{ test_user }}"
+        ai_backup_group: "{{ test_group }}"
+        ai_backup_account: "{{ test_user }}"
+        ai_backup_files_dir: "{{ playbook_dir }}/../files"
+        ai_backup_lib_dir: "{{ test_tmp }}/lib/ai-backup"
+        ai_backup_unit_dir: "{{ test_tmp }}/units"
+        ai_backup_volume_dir: "{{ test_tmp }}/vol/_data"
+        ai_backup_env_file: "{{ test_tmp }}/stacks/ai/.env"
+        ai_backup_stage_dir: "{{ test_tmp }}/backups/ai-box"
+        ai_backup_rrsync: "{{ test_tmp }}/bin/rrsync"
+        ai_backup_key_dir: "{{ test_tmp }}/etc/ai-backup"
+        ai_backup_host_key_file: "{{ test_tmp }}/etc/ssh/ssh_host_ed25519_key.pub"
+        ai_backup_authorized_keys_path: "{{ test_tmp }}/home/authorized_keys"
+        ai_backup_pull_key_dir: "{{ test_tmp }}/etc/ai-backup-pull"
+        ai_backup_pull_dest_mount: /tmp
+        ai_backup_pull_dest_fstypes: [tmpfs]
+        ai_backup_pull_subdir: "{{ test_name }}/openwebui"
+
+    - name: Scratch dirs, a fake volume, a .env, a stub rrsync and a test host key
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          t="{{ test_tmp }}"
+          mkdir -p "$t/vol/_data/uploads" "$t/vol/_data/vector_db" "$t/stacks/ai" "$t/bin" "$t/etc/ssh" "$t/home" \
+                   "$t/units" "$t/plain/{{ test_name }}"
+          ( umask 077; printf 'WEBUI_SECRET_KEY=offline-test\n' > "$t/stacks/ai/.env" )
+          printf '#!/bin/sh\nexit 0\n' > "$t/bin/rrsync"; chmod 0755 "$t/bin/rrsync"
+          ln -s "$t/vol/_data" "$t/vol-link"
+          ssh-keygen -q -t ed25519 -N '' -C 'root@test-host' -f "$t/etc/ssh/ssh_host_ed25519_key"
+          printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPLANTEDPLANTEDPLANTEDPLANTEDPLANTEDPLANTED planted\n' > "$t/home/authorized_keys"
+        executable: /bin/bash
+      changed_when: true
+
+    # ---- 1. stage preflight -------------------------------------------------------------------------------
+    - name: Preflight (stage) passes with the synthetic inputs
+      ansible.builtin.include_tasks: ../tasks/preflight_stage.yml
+
+    - name: Preflight (stage) refusals
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: "{{ item.name }}"
+        refusal_file: ../tasks/preflight_stage.yml
+        refusal_task: "{{ item.task }}"
+        ai_backup_volume_dir: "{{ item.vol | default(test_tmp ~ '/vol/_data') }}"
+        ai_backup_env_file: "{{ item.env | default(test_tmp ~ '/stacks/ai/.env') }}"
+        ai_backup_pull_from: "{{ item.from | default(['100.64.0.20']) }}"
+        ai_backup_stage_keep: "{{ item.keep | default(3) }}"
+        ai_backup_rrsync: "{{ item.rrsync | default(test_tmp ~ '/bin/rrsync') }}"
+      loop:
+        - {name: missing volume, vol: "{{ test_tmp }}/vol/nope", task: "{{ test_vol_task }}"}
+        - {name: symlinked volume, vol: "{{ test_tmp }}/vol-link", task: "{{ test_vol_task }}"}
+        - {name: no uploads, vol: "{{ test_tmp }}/vol", task: "{{ test_vol_task }}"}
+        - {name: missing env, env: "{{ test_tmp }}/stacks/ai/nope", task: "Preflight | the ai stack's .env is a regular file"}
+        - {name: no PC address, from: [], task: "Preflight | stage inputs"}
+        - {name: quote in from, from: ['100.64.0.20",command="/bin/sh'], task: "Preflight | stage inputs"}
+        - {name: keep 0, keep: 0, task: "Preflight | stage inputs"}
+        - {name: dotdot volume, vol: "{{ test_tmp }}/vol/../vol/_data", task: "Preflight | stage inputs"}
+        - {name: no rrsync, rrsync: "{{ test_tmp }}/bin/nope", task: "Preflight | rrsync is installed (the forced command would refuse every pull)"}
+      loop_control:
+        label: "{{ item.name }}"
+
+    # ---- 2. install --------------------------------------------------------------------------------------
+    - name: Install, first run
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Install | stat after the first run
+      ansible.builtin.stat:
+        path: "{{ ai_backup_script }}"
+      register: test_script1
+
+    - name: Install, second run
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Install | stat after the second run
+      ansible.builtin.stat:
+        path: "{{ ai_backup_script }}"
+      register: test_script_stat
+
+    - name: Install | the role's file, 0644, not rewritten by the second run
+      ansible.builtin.assert:
+        that:
+          - test_script_stat.stat.mode == '0644'
+          - test_script_stat.stat.checksum == lookup('ansible.builtin.pipe', 'sha1sum ' ~ playbook_dir ~ '/../files/ai_backup.py').split()[0]
+          - test_script_stat.stat.mtime == test_script1.stat.mtime
+        quiet: true
+
+    - name: Install | a symlinked script dir is refused
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: symlinked lib dir
+        refusal_file: ../tasks/install.yml
+        refusal_task: Guard | each directory is absent or a real directory (never a symlink)
+        ai_backup_lib_dir: "{{ test_tmp }}/vol-link"
+
+    # ---- 3. key ------------------------------------------------------------------------------------------
+    - name: Key, first run
+      ansible.builtin.include_tasks: ../tasks/key.yml
+
+    - name: Key | stat after the first run
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: ["{{ ai_backup_key_file }}", "{{ ai_backup_key_file }}.pub"]
+      register: test_key1
+
+    - name: Key, second run
+      ansible.builtin.include_tasks: ../tasks/key.yml
+
+    - name: Key | stat after the second run
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: ["{{ ai_backup_key_file }}", "{{ ai_backup_key_file }}.pub"]
+      register: test_key2
+
+    - name: Key | generated once, private 0600, public 0644, ed25519, not regenerated
+      ansible.builtin.assert:
+        that:
+          - test_key1.results[0].stat.mode == '0600'
+          - test_key1.results[1].stat.mode == '0644'
+          - test_key1.results | map(attribute='stat.checksum') | list == test_key2.results | map(attribute='stat.checksum') | list
+          - lookup('ansible.builtin.file', ai_backup_key_file ~ '.pub') is match('^ssh-ed25519 [A-Za-z0-9+/=]+ ai-openwebui-pull$')
+        quiet: true
+
+    - name: Key | half a key pair is refused (never overwritten)
+      block:
+        - name: Key | hide the public half
+          ansible.builtin.command:
+            argv: [mv, "{{ ai_backup_key_file }}.pub", "{{ test_tmp }}/pub.hidden"]
+          changed_when: true
+        - name: Key | refusal
+          ansible.builtin.include_tasks: expect_refusal.yml
+          vars:
+            refusal_name: half a key pair
+            refusal_file: ../tasks/key.yml
+            refusal_task: Key | both key files are absent or regular files (never symlinks)
+      always:
+        - name: Key | put the public half back
+          ansible.builtin.command:
+            argv: [mv, "{{ test_tmp }}/pub.hidden", "{{ ai_backup_key_file }}.pub"]
+          changed_when: true
+
+    # ---- 4. authorized key ---------------------------------------------------------------------------------
+    - name: Authorized key, twice
+      ansible.builtin.include_tasks: ../tasks/authorized_key.yml
+      loop: [1, 2]
+      loop_control:
+        loop_var: test_round
+
+    - name: Authorized key | exactly one line, restricted
+      vars:
+        lines: "{{ lookup('ansible.builtin.file', ai_backup_authorized_keys_path).splitlines() }}"
+        pub: "{{ lookup('ansible.builtin.file', ai_backup_key_file ~ '.pub') }}"
+      ansible.builtin.assert:
+        that:
+          - lines | length == 1
+          - lines[0] == 'restrict,from="100.64.0.20,2001:db8::20",command="' ~ test_tmp ~ '/bin/rrsync -ro ' ~ test_tmp ~ '/backups/ai-box" ' ~ pub
+          - lines[0] is not search('PLANTED')
+        fail_msg: "authorized_keys is {{ lines }}"
+        quiet: true
+
+    - name: Authorized key | a second run changed nothing
+      ansible.builtin.stat:
+        path: "{{ ai_backup_authorized_keys_path }}"
+      register: test_ak
+
+    - name: Authorized key | checksum steady across a third run
+      ansible.builtin.include_tasks: ../tasks/authorized_key.yml
+
+    - name: Authorized key | stat after the third run
+      ansible.builtin.stat:
+        path: "{{ ai_backup_authorized_keys_path }}"
+      register: test_ak2
+
+    - name: Authorized key | unchanged
+      ansible.builtin.assert:
+        that: test_ak.stat.checksum == test_ak2.stat.checksum and test_ak.stat.mtime == test_ak2.stat.mtime
+        quiet: true
+
+    # ---- 5. export --------------------------------------------------------------------------------------
+    - name: Export key
+      ansible.builtin.include_tasks: ../tasks/export_key.yml
+
+    - name: Export key | the facts match the files (no_log)
+      ansible.builtin.assert:
+        that:
+          - ai_backup_pull_private_key == lookup('ansible.builtin.file', ai_backup_key_file, rstrip=false)
+          - ai_backup_host_pubkey == lookup('ansible.builtin.file', ai_backup_host_key_file).split()[:2] | join(' ')
+          - ai_backup_host_pubkey is not search('test-host')
+          - ai_backup_export_slurp == {}
+        quiet: true
+      no_log: true
+
+    - name: Hand the facts over as the PC play does
+      ansible.builtin.set_fact:
+        ai_backup_pull_private_key: "{{ ai_backup_pull_private_key }}"
+        ai_backup_pull_host_pubkey: "{{ ai_backup_host_pubkey }}"
+      no_log: true
+
+    # ---- 6. pull preflight ------------------------------------------------------------------------------
+    - name: Preflight (pull) passes with the synthetic inputs
+      ansible.builtin.include_tasks: ../tasks/preflight_pull.yml
+
+    - name: Preflight (pull) refusals
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: "{{ item.name }}"
+        refusal_file: ../tasks/preflight_pull.yml
+        refusal_task: "{{ item.task }}"
+        ai_backup_pull_dest_mount: "{{ item.mount | default('/tmp') }}"
+        ai_backup_pull_dest_fstypes: "{{ item.fstypes | default(['tmpfs']) }}"
+        ai_backup_pull_host: "{{ item.host | default('100.64.0.10') }}"
+        ai_backup_pull_subdir: "{{ item.subdir | default(test_name ~ '/openwebui') }}"
+      loop:
+        - {name: unmounted drive, mount: "{{ test_tmp }}/plain", task: "Preflight | refuse unless the backup drive is a mountpoint of the expected type"}
+        - {name: wrong fs type, fstypes: [ext4], task: "Preflight | refuse unless the backup drive is a mountpoint of the expected type"}
+        - {name: host name not an address, host: ai-box, task: "Preflight | pull inputs"}
+        - {name: no host, host: "", task: "Preflight | pull inputs"}
+        - {name: subdir with dotdot, subdir: "{{ test_name }}/../restic", task: "Preflight | pull inputs"}
+        - {name: absolute subdir, subdir: /etc, task: "Preflight | pull inputs"}
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Preflight (pull) refuses when no key came and none is installed
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: no key anywhere
+        refusal_file: ../tasks/preflight_pull.yml
+        refusal_task: Preflight | a key and a host key are given, or both files are already here
+        ai_backup_pull_private_key: ""
+        ai_backup_pull_host_pubkey: ""
+
+    # ---- 7. pull key ------------------------------------------------------------------------------------
+    - name: Pull key, twice (the boolean comes from preflight)
+      ansible.builtin.include_tasks: ../tasks/pull_key.yml
+      loop: [1, 2]
+      loop_control:
+        loop_var: test_round
+
+    - name: Pull key | stat
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: ["{{ ai_backup_pull_key_file }}", "{{ ai_backup_pull_known_hosts }}", "{{ ai_backup_key_file }}"]
+      register: test_pk
+
+    - name: Pull key | the key dirs on both hosts
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: ["{{ ai_backup_pull_key_dir }}", "{{ ai_backup_key_dir }}"]
+      register: test_keydirs
+
+    - name: Pull key | the PC holds ai-box's key (0600) and a pinned known_hosts
+      ansible.builtin.assert:
+        that:
+          - test_keydirs.results | map(attribute='stat.mode') | list == ['0700', '0700']
+          - test_pk.results[0].stat.mode == '0600'
+          - test_pk.results[0].stat.checksum == test_pk.results[2].stat.checksum
+          - test_pk.results[1].stat.mode == '0644'
+          - lookup('ansible.builtin.file', ai_backup_pull_known_hosts)
+            == '100.64.0.10 ' ~ lookup('ansible.builtin.file', ai_backup_host_key_file).split()[:2] | join(' ')
+        quiet: true
+
+    - name: Pull key | with nothing handed over, the files stay as they are
+      block:
+        - name: Pull key | preflight with no key (the files exist)
+          ansible.builtin.include_tasks: ../tasks/preflight_pull.yml
+          vars:
+            ai_backup_pull_private_key: ""
+            ai_backup_pull_host_pubkey: ""
+        - name: Pull key | run with no key
+          ansible.builtin.include_tasks: ../tasks/pull_key.yml
+          vars:
+            ai_backup_pull_private_key: ""
+            ai_backup_pull_host_pubkey: ""
+        - name: Pull key | stat again
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop: ["{{ ai_backup_pull_key_file }}", "{{ ai_backup_pull_known_hosts }}"]
+          register: test_pk2
+        - name: Pull key | unchanged
+          ansible.builtin.assert:
+            that:
+              - test_pk2.results | map(attribute='stat.checksum') | list == test_pk.results[:2] | map(attribute='stat.checksum') | list
+            quiet: true
+        - name: Pull key | restore the boolean for the rest of the test
+          ansible.builtin.include_tasks: ../tasks/preflight_pull.yml
+
+    # ---- 8. destination chain ----------------------------------------------------------------------------
+    - name: Destination chain is the subdir's folders under the drive
+      ansible.builtin.assert:
+        that:
+          - ai_backup_pull_dest_chain == ['/tmp/' ~ test_name, '/tmp/' ~ test_name ~ '/openwebui']
+          - ai_backup_pull_dest == '/tmp/' ~ test_name ~ '/openwebui'
+        quiet: true
+
+    - name: Destination folders, twice (created 0700 the first time)
+      ansible.builtin.include_tasks: ../tasks/dest_dirs.yml
+      loop: [1, 2]
+      loop_control:
+        loop_var: test_round
+
+    - name: Destination folders | stat
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ ai_backup_pull_dest_chain }}"
+      register: test_chain
+
+    - name: Destination folders | both 0700, ours
+      ansible.builtin.assert:
+        that:
+          - test_chain.results | map(attribute='stat.mode') | list == ['0700', '0700']
+          - test_chain.results | map(attribute='stat.pw_name') | unique | list == [test_user]
+        quiet: true
+
+    - name: Destination folders | a group-writable folder is refused, not adopted
+      block:
+        - name: Make the first folder group-writable
+          ansible.builtin.file:
+            path: "{{ ai_backup_pull_dest_chain[0] }}"
+            mode: "0770"
+        - name: Refusal
+          ansible.builtin.include_tasks: expect_refusal.yml
+          vars:
+            refusal_name: group-writable chain
+            refusal_file: ../tasks/dest_dirs.yml
+            refusal_task: Dest | existing folders are owned by root and not group/other-writable
+      always:
+        - name: Put the mode back
+          ansible.builtin.file:
+            path: "{{ ai_backup_pull_dest_chain[0] }}"
+            mode: "0700"
+
+    - name: Destination folders | a folder owned by someone else is refused
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: chain owned by another user
+        refusal_file: ../tasks/dest_dirs.yml
+        refusal_task: Dest | existing folders are owned by root and not group/other-writable
+        ai_backup_owner: root
+
+    - name: A symlinked destination folder is refused by the guard
+      block:
+        - name: Plant a symlink where the destination goes
+          ansible.builtin.file:
+            path: "{{ test_tmp }}/linked"
+            src: "{{ test_tmp }}/plain"
+            state: link
+        - name: Guard refusal
+          ansible.builtin.include_tasks: expect_refusal.yml
+          vars:
+            refusal_name: symlinked dest
+            refusal_file: ../tasks/guard_dirs.yml
+            refusal_task: Guard | each directory is absent or a real directory (never a symlink)
+            ai_backup_guard_dirs: ["{{ test_tmp }}/linked"]
+
+    # ---- 9. units ---------------------------------------------------------------------------------------
+    - name: Units (stage)
+      ansible.builtin.include_tasks: ../tasks/units_stage.yml
+
+    - name: Units (pull)
+      ansible.builtin.include_tasks: ../tasks/units_pull.yml
+
+    - name: Units | checks
+      ansible.builtin.include_tasks: units_case.yml

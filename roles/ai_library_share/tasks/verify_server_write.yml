@@ -1,0 +1,29 @@
+---
+# On the PC itself, as Samba's force user (what smbd writes as): the library opens, carries its
+# sentinel, and a probe file in 00-inbox/ can be written, read back and deleted (Integrator, first
+# live run: root-owned folders denied every write). Runs before the client half.
+- name: Verify | probe the library as the force user
+  ansible.builtin.command:
+    argv: >-
+      {{ ai_library_share_server_runas
+         + [ai_library_share_python, '-I', '-B', ai_library_share_lib_dir ~ '/probe.py',
+            '--lib', ai_library_share_lib_dir, '--root', ai_library_share_dir,
+            '--sentinel', ai_library_share_sentinel, '--write'] }}
+  register: ai_library_share_server_probe
+  changed_when: false
+  failed_when: ai_library_share_server_probe.rc != 0
+
+- name: Verify | the force user can write the library
+  vars:
+    ai_library_share_probe: "{{ ai_library_share_server_probe.stdout | from_json }}"
+  ansible.builtin.assert:
+    that:
+      - ai_library_share_probe.sentinel
+      - ai_library_share_probe.open
+      - ai_library_share_probe.write
+      - ai_library_share_probe.errors | length == 0
+    fail_msg: >-
+      As {{ ai_library_share_force_user }} on {{ ai_library_share_dir }}: sentinel {{ ai_library_share_probe.sentinel }},
+      Library.open {{ ai_library_share_probe.open }}, write/read/delete in 00-inbox {{ ai_library_share_probe.write }},
+      errors {{ ai_library_share_probe.errors | to_json }}. Check ownership (tasks/ownership.yml).
+    quiet: true

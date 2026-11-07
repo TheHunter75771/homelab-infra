@@ -1,0 +1,84 @@
+---
+# Role tailscale_serve, parameterised exactly as tasks/serve.yml does it, against status --json shaped
+# inputs (no tailscale). Its validate.yml must pass, the declared config must be the one handler, and
+# its compare.yml must see drift for anything else on the node. This is the default (no
+# ai_control_serve_extra_handlers): exactly what the role declared before the extras existed (§12.29).
+- name: Serve | by default the handler set is AI Control's 443 alone, exactly as before the extras
+  ansible.builtin.assert:
+    that:
+      - ai_control_serve_extra_handlers == []
+      - >-
+        ai_control_serve_handlers == [{'port': 443, 'mount': '/', 'backend': 'http://127.0.0.1:8095'}]
+      - ai_control_serve_handlers[0].port is integer
+    fail_msg: "{{ ai_control_serve_handlers | to_json }}"
+    quiet: true
+
+- name: Serve | the role's preconditions pass with AI Control's handler
+  ansible.builtin.include_role:
+    name: tailscale_serve
+    tasks_from: validate
+  vars:
+    tailscale_serve_handlers: "{{ ai_control_serve_handlers }}"
+    tailscale_serve_dashboard_port: "{{ ai_control_serve_port | int }}"
+    tailscale_serve_dashboard_backend: "{{ ai_control_serve_backend }}"
+    tailscale_serve_node_name: "{{ tailnet_fqdn }}"
+    tailscale_serve_backend_state: Running
+
+- name: Serve | the declared config
+  ansible.builtin.include_role:
+    name: tailscale_serve
+    tasks_from: desired
+  vars:
+    tailscale_serve_handlers: "{{ ai_control_serve_handlers }}"
+    tailscale_serve_node_name: "{{ tailnet_fqdn }}"
+
+- name: Serve | exactly 443 -> 127.0.0.1:8095, HTTPS, no funnel
+  ansible.builtin.assert:
+    that:
+      - >-
+        tailscale_serve_desired == {'TCP': {'443': {'HTTPS': true}},
+          'Web': {'ai-box.example.ts.net:443': {'Handlers': {'/': {'Proxy': 'http://127.0.0.1:8095'}}}}}
+    fail_msg: "{{ tailscale_serve_desired | to_json }}"
+    quiet: true
+
+- name: Serve | drift compare
+  ansible.builtin.include_tasks: serve_drift.yml
+  loop:
+    - name: exact match, Go key order
+      json: >-
+        {"TCP":{"443":{"HTTPS":true}},"Web":{"ai-box.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8095"}}}}}
+      want: false
+    - name: exact match, scrambled order
+      json: >-
+        {"Web":{"ai-box.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8095"}}}},"TCP":{"443":{"HTTPS":true}}}
+      want: false
+    - {name: nothing served yet, json: "{}", want: true}
+    - name: funnel on
+      json: >-
+        {"TCP":{"443":{"HTTPS":true}},"Web":{"ai-box.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8095"}}}},
+        "AllowFunnel":{"ai-box.example.ts.net:443":true}}
+      want: true
+    - name: Open WebUI also served on 8443
+      json: >-
+        {"TCP":{"443":{"HTTPS":true},"8443":{"HTTPS":true}},"Web":{"ai-box.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8095"}}},
+        "ai-box.example.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8080"}}}}}
+      want: true
+    - name: wrong backend port
+      json: >-
+        {"TCP":{"443":{"HTTPS":true}},"Web":{"ai-box.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8085"}}}}}
+      want: true
+  loop_control:
+    loop_var: drift_case
+    label: "{{ drift_case.name }}"
+
+- name: Serve | role tailscale_serve's own defaults (the mediaserver's) are untouched
+  ansible.builtin.include_vars:
+    file: "{{ test_repo }}/roles/tailscale_serve/defaults/main.yml"
+    name: ctl_test_ts_defaults
+
+- name: Serve | the mediaserver still declares its dashboard on 443
+  ansible.builtin.assert:
+    that:
+      - ctl_test_ts_defaults.tailscale_serve_dashboard_backend == 'http://127.0.0.1:8085'
+      - ctl_test_ts_defaults.tailscale_serve_handlers | length == 7
+    quiet: true

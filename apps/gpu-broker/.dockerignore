@@ -1,0 +1,5 @@
+# Allowlist: only what the image needs.
+*
+!gpu_broker/
+!requirements.lock
+**/__pycache__

@@ -1,0 +1,56 @@
+---
+# One symlinked-archive case for test_voice_profile.yml: case = {name, link}. A scratch library root gets
+# 90-archive (link "") or 90-archive/<link> as a symlink to a victim directory holding one sentinel. library.yml
+# must refuse at the guard before writing anything, and the victim must be untouched.
+- name: Archive case | set up the library, the victim and the link for {{ case.name }}
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      r="{{ test_tmp }}/a-{{ case.name }}"
+      v="{{ test_tmp }}/victim-{{ case.name }}"
+      mkdir -p "$r" "$v"
+      echo keep > "$v/sentinel"
+      chmod 0644 "$v/sentinel"
+      chmod 0700 "$v"
+      if [ -n "{{ case.link }}" ]; then
+        mkdir -p "$r/90-archive"
+        ln -sfn "$v" "$r/90-archive/{{ case.link }}"
+      else
+        ln -sfn "$v" "$r/90-archive"
+      fi
+    executable: /bin/bash
+  changed_when: true
+
+- name: Archive case | library.yml through the link for {{ case.name }}
+  block:
+    - name: Archive case | library.yml for {{ case.name }}
+      ansible.builtin.include_tasks: ../tasks/library.yml
+      vars:
+        voice_profile_library_root: "{{ test_tmp }}/a-{{ case.name }}"
+
+    - name: Archive case | not reached for {{ case.name }}
+      ansible.builtin.set_fact:
+        vp_test_archive_by: ""
+  rescue:
+    - name: Archive case | note which task refused for {{ case.name }}
+      ansible.builtin.set_fact:
+        vp_test_archive_by: "{{ ansible_failed_task.name }}"
+
+- name: Archive case | read the victim for {{ case.name }}
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      v="{{ test_tmp }}/victim-{{ case.name }}"
+      find "$v" -printf '%P|%m|%y\n' | LC_ALL=C sort
+      cat "$v/sentinel"
+    executable: /bin/bash
+  register: vp_test_archive_victim
+  changed_when: false
+
+- name: Archive case | refused by the guard, victim untouched for {{ case.name }}
+  ansible.builtin.assert:
+    that:
+      - vp_test_archive_by == 'Guard | each pruned directory is absent or a real directory (never a symlink)'
+      - vp_test_archive_victim.stdout_lines == ['sentinel|644|f', '|700|d', 'keep']
+    fail_msg: "refused by '{{ vp_test_archive_by }}'; victim: {{ vp_test_archive_victim.stdout_lines }}"
+    quiet: true

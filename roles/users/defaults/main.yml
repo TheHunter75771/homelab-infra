@@ -7,3 +7,7 @@ users_rrsync_path: /usr/bin/rrsync
 # admin user run a homepage-container script that was deleted in the 2026-10-23 wipe.
 users_stale_sudoers:
   - homepage-actions
+# Media server accounts (docs/CONTRACTS.md §12.2): the media service account and groups, the admin's
+# media/docker/bootgate memberships and the backup pull account. false on hosts without media
+# (ai_servers): only the automation-user assert, the stale-sudoers cleanup and docker membership.
+users_media_accounts: true

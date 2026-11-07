@@ -1,0 +1,67 @@
+---
+# Reviewer G round 3: a directory swapped for a symlink between find's listing and chown must not
+# redirect chown outside the library. A wrapper performs the swap on its first call, then runs the
+# REAL chown. Unprivileged, the test chowns to this user and one of its supplementary groups, so a
+# successful redirect would visibly change the victim's group.
+- name: Race | pick a supplementary group of this user
+  ansible.builtin.set_fact:
+    test_race_group: >-
+      {{ lookup('ansible.builtin.pipe', 'id -Gn').split() | reject('equalto', ai_library_share_force_group) | first | default('') }}
+
+- name: Race | set up dirA inside the library, a victim outside it (same filesystem), and the wrapper
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      d="{{ ai_library_share_dir }}/00-inbox"
+      mkdir -p "$d/dirA" "{{ test_rt }}-victim/sub"
+      echo f > "$d/dirA/file"
+      echo v > "{{ test_rt }}-victim/sub/file"
+      rm -f "{{ test_tmp }}/race-done"
+      cat > "{{ test_tmp }}/race-chown" <<EOF
+      #!/bin/sh
+      if [ ! -e "{{ test_tmp }}/race-done" ]; then
+        touch "{{ test_tmp }}/race-done"
+        mv "$d/dirA" "$d/dirA.moved" && ln -s "{{ test_rt }}-victim/sub" "$d/dirA"
+      fi
+      exec chown "\$@"
+      EOF
+      chmod 0755 "{{ test_tmp }}/race-chown"
+    executable: /bin/bash
+  changed_when: true
+  when: test_race_group | length > 0
+
+- name: Race | run ownership.yml with the racing chown
+  ansible.builtin.include_tasks: ../tasks/ownership.yml
+  vars:
+    ai_library_share_force_group: "{{ test_race_group }}"
+    ai_library_share_chown: "{{ test_tmp }}/race-chown"
+  when: test_race_group | length > 0
+
+- name: Race | the victim's group
+  ansible.builtin.command:
+    argv: [stat, -c, "%G", "{{ test_rt }}-victim/sub", "{{ test_rt }}-victim/sub/file"]
+  register: test_race_victim
+  changed_when: false
+  when: test_race_group | length > 0
+
+- name: Race | the swap happened, chown ran for real, and nothing outside the library changed
+  ansible.builtin.assert:
+    that:
+      - lookup('ansible.builtin.pipe', 'test -e ' ~ test_tmp ~ '/race-done && echo yes || echo no') == 'yes'
+      - ai_library_share_owned is changed
+      - lookup('ansible.builtin.pipe', 'stat -c %G ' ~ ai_library_share_dir ~ '/README.md') == test_race_group
+      - test_race_victim.stdout_lines | unique == [lookup('ansible.builtin.pipe', 'id -gn')]
+    fail_msg: "victim groups {{ test_race_victim.stdout_lines }}, race group {{ test_race_group }}"
+    quiet: true
+  when: test_race_group | length > 0
+
+- name: Race | undo the swap
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      d="{{ ai_library_share_dir }}/00-inbox"
+      rm -f "$d/dirA"
+      rm -rf "$d/dirA.moved"
+    executable: /bin/bash
+  changed_when: true
+  when: test_race_group | length > 0

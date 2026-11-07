@@ -1,0 +1,27 @@
+---
+# Test for tasks/chrony_selectdata.yml against `chronyc -n selectdata -a` fixture outputs
+# (tests/fixtures/chrony-selectdata.yml). No chrony needed.
+#   .venv/bin/ansible-playbook -i localhost, -c local roles/base/tests/test_chrony_selectdata.yml </dev/null 2>&1 | cat
+- name: The selectdata check passes with authselectmode ignore and fails on R, N or a missing fallback
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+  vars:
+    chrony_test_cases: "{{ lookup('ansible.builtin.file', 'fixtures/chrony-selectdata.yml') | from_yaml }}"
+  tasks:
+    - name: Run each case
+      ansible.builtin.include_tasks: chrony_case.yml
+      loop: "{{ chrony_test_cases }}"
+      loop_control:
+        loop_var: chrony_case
+        label: "{{ chrony_case.name }}"
+
+    - name: Every case got the expected verdict
+      ansible.builtin.assert:
+        that:
+          - chrony_test_verdicts | length == chrony_test_cases | length
+          - chrony_test_verdicts | dict2items | rejectattr('value') | list | length == 0
+        fail_msg: "Wrong verdicts: {{ chrony_test_verdicts | dict2items | rejectattr('value') | map(attribute='key') | list }}"
+        quiet: true

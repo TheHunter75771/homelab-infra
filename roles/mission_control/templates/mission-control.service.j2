@@ -1,0 +1,36 @@
+# {{ ansible_managed }}
+# Mission Control server MC1 (docs/CONTRACTS.md §12.29): read-only collectors, the PWA (MC2) and web push, on
+# 127.0.0.1:{{ mission_control_listen_port }} behind `tailscale serve` https :{{ mission_control_serve_port }}. It answers only requests whose
+# {{ mission_control_identity_header }} header (set by tailscale serve) is Noah's login.
+# Sandbox: exactly vars/main.yml mission_control_sandbox (the post-start egress probe runs under the same list).
+# - User mc, no capabilities, no supplementary groups; writes only {{ mission_control_state_dir }}.
+# - IP filter (systemd: an address matching IPAddressAllow passes even when IPAddressDeny matches it too; an
+#   address in neither list passes). Denied: loopback, RFC 1918, CGNAT/tailnet, link-local, ULA and the special
+#   ranges. So the public internet (the push services: FCM, APNs, Mozilla) is reachable, and of the private ranges
+#   only the allowed hosts are: 127.0.0.1 (tailscale serve in, AI Control), 127.0.0.53 (the DNS stub), Money Hub
+#   and ERAU on homebk-edge, Open WebUI's container address{{ ', the mediaserver' if mission_control_mediaserver_on | bool else '' }}{{ ', Home Assistant' if mission_control_ha_ip | length > 0 else '' }}.
+# - /run is an empty read-only tmpfs with only the system bus socket, /run/systemd/system and the resolver's dir
+#   bound in, so no other daemon's socket (tailscaled, snapd, Docker, the AI Control helper) is reachable.
+# - Local access: the guard unit's nftables table lets only root reach 127.0.0.1:{{ mission_control_listen_port }} and :{{ mission_control_serve_port }}.
+[Unit]
+Description=Mission Control (Noah's hub; tailnet-only via tailscale serve :{{ mission_control_serve_port }})
+Documentation=file://{{ mission_control_server_dir }}
+After=network-online.target {{ mission_control_guard_unit }}
+Wants=network-online.target
+# The local-access guard (Q-1) must be in place before the server listens; if it can't load, the server doesn't run.
+Requires={{ mission_control_guard_unit }}
+
+[Service]
+Type=exec
+ExecStart={{ mission_control_serve_argv | join(' ') }}
+Restart=always
+RestartSec=5s
+SyslogIdentifier=mission-control
+MemoryMax={{ mission_control_memory_max }}
+TasksMax={{ mission_control_tasks_max }}
+{% for p in mission_control_sandbox %}
+{{ p }}
+{% endfor %}
+
+[Install]
+WantedBy=multi-user.target

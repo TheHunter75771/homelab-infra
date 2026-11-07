@@ -1,0 +1,62 @@
+---
+# AI accounts (docs/CONTRACTS.md §12.13 + amendment). Exactly two, kept separate:
+#   claude  - Claude, the operator: full sudo, every session I/O-logged, SSH key from the gaming PC only.
+#   localai - Noah's local AI: no sudo, no SSH, no login shell, no password. Owns nothing by default.
+# Per-account files are named after the account (20-operator-<name>, /var/log/sudo-io/<name>), so two
+# entries can never share a sudoers file, an I/O log or an sshd drop-in.
+#
+# Entry keys (anything else is rejected):
+#   name                (required)
+#   shell               (required) a no-login shell (nologin/false) forbids sudo and ssh_login
+#   home                default /home/<name>
+#   sudo                none | full_logged                              (default none)
+#   ssh_login           true -> authorized_keys with ssh_pubkey, from="<ssh_from>" (default false)
+#   ssh_pubkey          one public key line; required with ssh_login
+#   ssh_from            list of source addresses; required (non-empty) with ssh_login
+#   sshd_loopback_only  true -> sshd drop-in refusing the account except from 127.0.0.1/::1 (needs ssh_login)
+#   sshd_deny           true -> sshd drop-in refusing the account from everywhere (no ssh_login)
+#   groups              exact supplementary groups (default []); privileged groups are rejected
+#   comment             GECOS
+#
+# Revoking claude is done here (inventory), not by hand: a hand edit is reverted by the next run.
+#   operator_sudo: none          -> sudoers rule removed
+#   operator_ssh_login: false    -> authorized_keys removed, no key needed; on the gaming PC sshd denies claude
+operator_sudo: full_logged
+operator_ssh_login: true
+operator_key_from_extra: []
+operator_accounts:
+  - name: "{{ operator_user | default('claude') }}"
+    comment: AI operator (Claude), sudo I/O-logged
+    shell: /bin/bash
+    sudo: "{{ operator_sudo }}"
+    ssh_login: "{{ operator_ssh_login }}"
+    ssh_pubkey: "{{ operator_pubkey | default('') if operator_ssh_login | bool else '' }}"
+    ssh_from: "{{ (operator_key_from | default([]) + operator_key_from_extra) if operator_ssh_login | bool else [] }}"
+    sshd_loopback_only: "{{ (operator_manage_sshd_match | default(false) | bool) and (operator_ssh_login | bool) }}"
+    sshd_deny: "{{ (operator_manage_sshd_match | default(false) | bool) and not (operator_ssh_login | bool) }}"
+    groups: []
+  - name: localai
+    comment: Local AI (no sudo, no login)
+    shell: /usr/sbin/nologin
+    home: /var/lib/localai
+    sudo: none
+    ssh_login: false
+    sshd_loopback_only: false
+    sshd_deny: "{{ operator_manage_sshd_match | default(false) | bool }}"
+    groups: []
+
+# Days of sudo I/O logs kept (systemd-tmpfiles ages them out).
+operator_iolog_retention_days: 90
+
+# On hosts that also carry sudo-rs (Ubuntu 25.10+), members of this group can't execute the sudo-rs
+# binary (dpkg-statoverride root:<group> 4705). Every full_logged account is a member, so its only way
+# to root is classic sudo, which writes the I/O log. sudo-rs has no I/O logging (see README).
+operator_sudo_rs_deny_group: operator-no-sudo-rs
+
+# Account names an operator entry may never take.
+operator_reserved_names:
+  - root
+  - "{{ admin_user | default('') }}"
+  - "{{ automation_user | default('') }}"
+  - "{{ backup_pull_user | default('') }}"
+  - "{{ mediasvc_user | default('') }}"

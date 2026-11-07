@@ -1,0 +1,153 @@
+---
+# Server inputs and the host's disks, checked before anything is written (read-only).
+- name: Preflight | server inputs
+  ansible.builtin.assert:
+    that:
+      - gaming_pc_tailnet_ip | default('') is match('^[0-9]{1,3}([.][0-9]{1,3}){3}$')
+      - ai_box_tailnet_ip | default('') is match('^[0-9]{1,3}([.][0-9]{1,3}){3}$')
+      # IPv6 forms are optional, but when set they must be single host addresses.
+      - gaming_pc_tailnet_ip6 | default('') == '' or gaming_pc_tailnet_ip6 is match('^[0-9A-Fa-f:]+$')
+      - ai_box_tailnet_ip6 | default('') == '' or ai_box_tailnet_ip6 is match('^[0-9A-Fa-f:]+$')
+      - ai_library_share_force_user is match('^[a-z_][a-z0-9_-]*$')
+      - ai_library_share_force_group is match('^[a-z_][a-z0-9_-]*$')
+      - ai_library_share_force_user not in ['root', ai_library_share_user]
+      - ai_library_share_share_mount is abs and ai_library_share_backup_mount is abs
+      # Exactly <mount>/ai-library on both drives (Lead after Reviewer G): no '.', '..' or '//'.
+      - ai_library_share_dir == ai_library_share_share_mount ~ '/' ~ ai_library_share_folder
+      - ai_library_share_backup_dir == ai_library_share_backup_mount ~ '/' ~ ai_library_share_folder
+      - >-
+        [ai_library_share_share_mount, ai_library_share_backup_mount, ai_library_share_dir, ai_library_share_backup_dir]
+        | reject('match', '^(/[A-Za-z0-9_][A-Za-z0-9_.-]*)+$') | list | length == 0
+      - ai_library_share_share_fstypes | length > 0 and ai_library_share_backup_fstypes | length > 0
+    fail_msg: >-
+      Check the ai_library_share server inputs: gaming_pc_tailnet_ip and ai_box_tailnet_ip must be IPv4
+      literals in host_vars (the *_ip6 forms bare IPv6 addresses when set); ai_library_share_force_user and
+      ai_library_share_force_group name Noah's account (the ntfs3 mount owner), never root or ailib; the
+      paths are absolute and both folders are exactly <mount>/ai-library (no '.', '..').
+    quiet: true
+
+# 445 reaches only ai-box through module G's firewalld policy (role ollama_rocm): this role opens
+# nothing, it only checks that G guards the port.
+- name: Preflight | port 445 is in module G's privileged policy list
+  ansible.builtin.assert:
+    that:
+      - ollama_rocm_policy_privileged_ports is defined
+      - ollama_rocm_policy_privileged_ports is sequence and ollama_rocm_policy_privileged_ports is not string
+      - 445 in (ollama_rocm_policy_privileged_ports | map('int') | list)
+    fail_msg: >-
+      445 must be in ollama_rocm_policy_privileged_ports (inventory group_vars/workstations_root), which role
+      ollama_rocm turns into the ai-box-only firewalld policy; it is
+      {{ ollama_rocm_policy_privileged_ports | default('undefined') }}. Run playbooks/gaming-pc-ai.yml first:
+      tailscale0 is in firewalld's trusted zone, so without that policy every tailnet device reaches 445.
+    quiet: true
+
+# The share drive must be really mounted before anything runs (§12.11 mount safety): never create a
+# library on the empty mount point. findmnt --mountpoint finds only a mount AT that path.
+- name: Preflight | the share drive is mounted
+  ansible.builtin.command:
+    argv: ["{{ ai_library_share_findmnt }}", -n, -r, -o, FSTYPE, --mountpoint, "{{ ai_library_share_share_mount }}"]
+  register: ai_library_share_share_findmnt
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Preflight | refuse unless the share drive is a mountpoint of the expected type
+  ansible.builtin.assert:
+    that:
+      - ai_library_share_share_findmnt.rc == 0
+      - ai_library_share_share_findmnt.stdout | trim in ai_library_share_share_fstypes
+    fail_msg: >-
+      {{ ai_library_share_share_mount }} is not mounted ({{ ai_library_share_share_findmnt.stdout | trim | default('', true)
+      or 'no mount' }}; expected {{ ai_library_share_share_fstypes | join(' or ') }}). Mount the share drive first;
+      the role never creates the library on an empty mount point.
+    quiet: true
+
+- name: Preflight | the backup drive is mounted
+  ansible.builtin.command:
+    argv: ["{{ ai_library_share_findmnt }}", -n, -r, -o, FSTYPE, --mountpoint, "{{ ai_library_share_backup_mount }}"]
+  register: ai_library_share_backup_findmnt
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Preflight | refuse unless the backup drive is a mountpoint of the expected type
+  ansible.builtin.assert:
+    that:
+      - ai_library_share_backup_findmnt.rc == 0
+      - ai_library_share_backup_findmnt.stdout | trim in ai_library_share_backup_fstypes
+    fail_msg: >-
+      {{ ai_library_share_backup_mount }} is not mounted ({{ ai_library_share_backup_findmnt.stdout | trim | default('', true)
+      or 'no mount' }}; expected {{ ai_library_share_backup_fstypes | join(' or ') }}). The backup folder would
+      otherwise land on the root disk.
+    quiet: true
+
+# The folders live directly on those mounts, not on a nested mount or the root disk.
+- name: Preflight | which mount holds each parent folder
+  ansible.builtin.command:
+    argv: ["{{ ai_library_share_findmnt }}", -n, -r, -o, TARGET, -T, "{{ item | dirname }}"]
+  loop:
+    - "{{ ai_library_share_dir }}"
+    - "{{ ai_library_share_backup_dir }}"
+  register: ai_library_share_parent_findmnt
+  changed_when: false
+  check_mode: false
+
+- name: Preflight | the library and backup folders are on their drives
+  ansible.builtin.assert:
+    that:
+      - ai_library_share_parent_findmnt.results[0].stdout | trim == ai_library_share_share_mount
+      - ai_library_share_parent_findmnt.results[1].stdout | trim == ai_library_share_backup_mount
+    fail_msg: >-
+      {{ ai_library_share_dir }} is on {{ ai_library_share_parent_findmnt.results[0].stdout | trim }} (want
+      {{ ai_library_share_share_mount }}); {{ ai_library_share_backup_dir }} is on
+      {{ ai_library_share_parent_findmnt.results[1].stdout | trim }} (want {{ ai_library_share_backup_mount }}).
+    quiet: true
+
+# force user/group must be the ntfs3 mount owner (uid=, gid=), or Samba writes as someone else.
+- name: Preflight | read the account databases
+  ansible.builtin.getent:
+    database: "{{ item }}"
+  loop: [passwd, group]
+
+- name: Preflight | stat the share drive's root
+  ansible.builtin.stat:
+    path: "{{ ai_library_share_share_mount }}"
+    follow: false
+    get_checksum: false
+  register: ai_library_share_share_stat
+
+- name: Preflight | force user and group exist and own the share drive
+  ansible.builtin.assert:
+    that:
+      - ai_library_share_force_user in ansible_facts.getent_passwd
+      - ai_library_share_force_group in ansible_facts.getent_group
+      - ai_library_share_share_stat.stat.uid | string == ansible_facts.getent_passwd[ai_library_share_force_user][1]
+      - ai_library_share_share_stat.stat.gid | string == ansible_facts.getent_group[ai_library_share_force_group][1]
+    fail_msg: >-
+      force user/group {{ ai_library_share_force_user }}:{{ ai_library_share_force_group }} must exist and own
+      {{ ai_library_share_share_mount }} (it is {{ ai_library_share_share_stat.stat.uid | default('?') }}:{{
+      ai_library_share_share_stat.stat.gid | default('?') }}, the ntfs3 uid=/gid= mount options).
+    quiet: true
+
+- name: Preflight | the mounts and folders are absent or real directories (no symlink)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    ai_library_share_guard_dirs:
+      - "{{ ai_library_share_share_mount }}"
+      - "{{ ai_library_share_backup_mount }}"
+      - "{{ ai_library_share_dir }}"
+      - "{{ ai_library_share_backup_dir }}"
+      - "{{ ai_library_share_secret_dir }}"
+
+- name: Preflight | the library sources exist on the controller (module L)
+  ansible.builtin.stat:
+    path: "{{ ai_library_share_lib_src_dir }}/core.py"
+  register: ai_library_share_src_stat
+  delegate_to: localhost
+  become: false
+
+- name: Preflight | require the library sources
+  ansible.builtin.assert:
+    that: ai_library_share_src_stat.stat.exists
+    fail_msg: "Missing on the controller: {{ ai_library_share_lib_src_dir }}/core.py"
+    quiet: true

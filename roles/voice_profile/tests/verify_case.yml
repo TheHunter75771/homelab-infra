@@ -1,0 +1,75 @@
+---
+# One verify.yml run against the fake systemctl and systemd-run (tests/bin), with the real installed voice-profile
+# running `status`. case = {name, unit (static | enabled | timer | missing), config (the config file status
+# reads), refused_by ('' = must pass)}.
+- name: Verify case | the fake unit's state for {{ case.name }}
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      echo "{{ case.unit }}" > "$VP_TEST_UNIT"
+      rm -f "$VP_TEST_RUN_ARGS"
+    executable: /bin/bash
+  changed_when: true
+
+- name: Verify case | verify.yml for {{ case.name }}
+  block:
+    - name: Verify case | run verify.yml ({{ case.name }})
+      ansible.builtin.include_tasks: ../tasks/verify.yml
+      vars:
+        voice_profile_config_file: "{{ case.config }}"
+
+    - name: Verify case | passed ({{ case.name }})
+      ansible.builtin.set_fact:
+        vp_test_verify_by: ""
+  rescue:
+    - name: Verify case | note which task refused ({{ case.name }})
+      ansible.builtin.set_fact:
+        vp_test_verify_by: "{{ ansible_failed_task.name }}"
+
+- name: Verify case | the outcome matches ({{ case.name }})
+  ansible.builtin.assert:
+    that: vp_test_verify_by == case.refused_by
+    fail_msg: "{{ case.name }}: refused by '{{ vp_test_verify_by }}', expected '{{ case.refused_by }}'"
+    quiet: true
+
+- name: Verify case | the real status ran and reported (library, samples, the closed broker port) ({{ case.name }})
+  ansible.builtin.assert:
+    that:
+      - "voice_profile_status_run.stdout is search('(?m)^library: ')"
+      - "voice_profile_status_run.stdout is search('(?m)^samples: 0 [.]docx file')"
+      - "voice_profile_status_run.stdout is search('(?m)^voice-profile[.]md: missing$')"
+      - "voice_profile_status_run.stdout is search('(?m)^broker: unreachable$')"
+    fail_msg: "{{ voice_profile_status_run.stdout_lines | default([]) | join('; ') }}"
+    quiet: true
+  when: case.unit == 'static' and case.refused_by == ''
+
+- name: Verify case | the arguments the fake systemd-run got ({{ case.name }})
+  ansible.builtin.command:
+    argv: [cat, "{{ lookup('ansible.builtin.env', 'VP_TEST_RUN_ARGS') }}"]
+  register: vp_test_run_args
+  changed_when: false
+  when: case.unit == 'static'
+
+- name: Verify case | a waited, piped, collected oneshot with every sandbox property, then status ({{ case.name }})
+  vars:
+    got: "{{ vp_test_run_args.stdout_lines }}"
+    sep: "{{ 7 + voice_profile_sandbox | length }}"
+  ansible.builtin.assert:
+    that:
+      - got[:6] == ['--wait', '--pipe', '--collect', '--quiet', '--service-type=oneshot', '--description=voice-profile status (Ansible verify)']
+      - got[6] == '--property=TimeoutStartSec=2min'
+      - got[7:sep | int] == voice_profile_sandbox | map('regex_replace', '^', '--property=') | list
+      - got[sep | int] == '--'
+      - "'--property=IPAddressDeny=any' in got"
+      - "'--property=ReadWritePaths=' ~ voice_profile_writing_dir in got"
+      - "'--property=ReadWritePaths=' ~ voice_profile_archive_dir in got"
+      - "'--property=ReadOnlyPaths=-' ~ voice_profile_include_file in got"
+      - "'--property=InaccessiblePaths=/dev/shm' in got"
+      - "'--property=ReadOnlyPaths=-' ~ voice_profile_samples_dir in got"
+      - "'--property=Environment=AI_LIBRARY_CAP=500GB' in got"
+      # status, never build: the converge never runs a build.
+      - got[sep | int + 1:] == ['/usr/bin/python3', '-I', '-B', voice_profile_launcher, '--config', case.config, 'status']
+      - "'build' not in got"
+    fail_msg: "{{ got }}"
+    quiet: true
+  when: case.unit == 'static'

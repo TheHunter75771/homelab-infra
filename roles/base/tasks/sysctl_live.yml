@@ -1,0 +1,77 @@
+---
+# Imported by main.yml after the handlers have run; also run on its own by tests/test_sysctl_live.yml and
+# tests/test_sysctl_live_check.yml (a scratch tree in place of /proc/sys and a stub apply command).
+# Something else can reset a hardening key after boot. UFW does: it applies /etc/ufw/sysctl.conf on
+# every start, after systemd-sysctl (docs/CONTRACTS.md §12.9). So the live values are read, and if
+# any of them drifted, the hardening file is re-applied (changed only then) and the values are read
+# again. The assert stays the final guard: a value that won't stick still fails the run.
+# In check mode nothing is re-applied: drift is reported as a would-be change and doesn't fail the
+# run (the sysrq rule still does).
+- name: Read the live hardening settings
+  ansible.builtin.slurp:
+    src: "{{ base_sysctl_proc_dir }}/{{ item }}"
+  loop: "{{ base_sysctl_live_keys }}"
+  register: base_sysctl_live
+
+- name: Work out which hardening settings drifted
+  ansible.builtin.set_fact:
+    base_sysctl_drifted: >-
+      {{ base_sysctl_live_expected | dict2items | difference(base_live | dict2items) | map(attribute='key') | list }}
+  vars:
+    base_live: >-
+      {{ dict(base_sysctl_live.results | map(attribute='item')
+         | zip(base_sysctl_live.results | map(attribute='content') | map('b64decode') | map('trim'))) }}
+
+- name: Re-apply the hardening file when a live value drifted
+  ansible.builtin.command:
+    argv: "{{ base_sysctl_apply_argv }}"
+  when:
+    - base_sysctl_drifted | length > 0
+    - not ansible_check_mode
+  changed_when: true
+  register: base_sysctl_reapplied
+
+- name: Check mode reports the re-apply it would do
+  ansible.builtin.debug:
+    msg: "Would re-apply {{ base_sysctl_file }}; drifted: {{ base_sysctl_drifted | join(', ') }}"
+  when:
+    - base_sysctl_drifted | length > 0
+    - ansible_check_mode
+  changed_when: true
+  register: base_sysctl_would_reapply
+
+- name: Read the live hardening settings again
+  ansible.builtin.slurp:
+    src: "{{ base_sysctl_proc_dir }}/{{ item }}"
+  loop: "{{ base_sysctl_live_keys }}"
+  register: base_sysctl_live_after
+  when: base_sysctl_reapplied is not skipped
+
+- name: Hardening sysctls are live (redirects off incl. the LAN interface, martians logged, BPF/kptr/FIFO locked down)
+  ansible.builtin.assert:
+    that:
+      # In check mode a drift was only reported (nothing was re-applied), so it can't be judged yet.
+      - (ansible_check_mode and base_sysctl_drifted | length > 0) or base_sysctl_still_drifted | length == 0
+      # Left alone on purpose: the emergency SysRq path must still exist. (Forwarding isn't checked:
+      # base runs before Docker, which is what turns it on.)
+      - base_live['kernel/sysrq'] != '0'
+    fail_msg: >-
+      {% if not (ansible_check_mode and base_sysctl_drifted | length > 0) and base_sysctl_still_drifted | length > 0 %}
+      Still drifted{{ ' after re-applying ' ~ base_sysctl_file if base_sysctl_reapplied is not skipped else '' }}:
+      {% for key in base_sysctl_still_drifted %}
+      {{ key }}={{ base_live[key] }} (want {{ base_sysctl_live_expected[key] }}){{ ';' if not loop.last else '.' }}
+      {% endfor %}
+      Something resets them after the file is applied (e.g. UFW's /etc/ufw/sysctl.conf; role firewall keeps
+      its log_martians lines at 1).
+      {% endif %}
+      {% if base_live['kernel/sysrq'] == '0' %}
+      kernel.sysrq is 0; the emergency SysRq path must stay available (Ubuntu's default is 176).
+      {% endif %}
+    quiet: true
+  vars:
+    base_sysctl_final: "{{ base_sysctl_live_after if base_sysctl_reapplied is not skipped else base_sysctl_live }}"
+    base_live: >-
+      {{ dict(base_sysctl_final.results | map(attribute='item')
+         | zip(base_sysctl_final.results | map(attribute='content') | map('b64decode') | map('trim'))) }}
+    base_sysctl_still_drifted: >-
+      {{ base_sysctl_live_expected | dict2items | difference(base_live | dict2items) | map(attribute='key') | list }}

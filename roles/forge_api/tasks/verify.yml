@@ -1,0 +1,319 @@
+---
+# Switched on only, never in check mode (tasks/main.yml). Read-only: nothing here writes, restarts or enters a
+# container (§12.25 row H8, Lead decisions F-2 and F-3, Reviewer Q's Q-F3 and Q-1).
+#  1. the socket is enabled and active (listening, or running while its service runs); the service is active and
+#     stays so without restarting;
+#  2. `check-config --require-library` as rgate in a transient service with exactly the unit's sandbox exits 0
+#     (rgate reads the config and the token, and opens the library, through the real sandbox);
+#  3. the host carries the bind address on the ai bridge (with the ai network's prefix);
+#  4. one listening socket on the port, on the bind address only, held by systemd (the socket unit) and the
+#     service's process (inherited, LISTEN_FDS): nothing else listens there;
+#  5. from the host, a call gets no answer at all (the socket's IP filter drops it: refused or timed out);
+#  6. UFW holds exactly the declared rule for the port (from open-webui to the bind address), and no other;
+#  7. from open-webui's network namespace (nsenter --net from the host, no exec), a call without the token gets 401;
+#  8. the token isn't in the units' journal (grep reads the pattern from the token file: the token never enters
+#     Ansible, an argv or this output), and the journal does hold the service's own lines;
+#  9. Open WebUI's trust settings (Q-1, S-2), read from its database on the host, read-only: the approver is the
+#     only admin; no workspace tools for users, by default or through any group; no write grant on a tool; every
+#     tool the approver's; iframe same-origin off. Each is reported; a failure stops the play only with
+#     forge_api_verify_owui_trust (default true).
+- name: Verify | the socket's state
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=ActiveState, --property=SubState, --property=UnitFileState, --property=Listen, "{{ forge_api_socket }}"]
+  register: forge_api_socket_state
+  changed_when: false
+
+# Reviewer Q (Q2-1): the port-squatting fix only works if the socket really ships: enabled, active, on exactly the
+# bind address and port. With Accept=no the socket's SubState is `listening` while no service runs and `running`
+# while its service runs (service.yml starts it; any connection triggers it): both are healthy (Integrator, live
+# run 1). Anything else (failed, dead, stop-*, ...) is refused.
+- name: Verify | the socket is enabled and listening on the bind address only
+  vars:
+    s: "{{ dict(forge_api_socket_state.stdout_lines | map('split', '=', 1)) }}"
+  ansible.builtin.assert:
+    that:
+      - s.ActiveState | default('') == 'active'
+      - s.SubState | default('') in ['listening', 'running']
+      - s.UnitFileState | default('') == 'enabled'
+      - s.Listen | default('') == (forge_api_bind | trim) ~ ':' ~ forge_api_port ~ ' (Stream)'
+    fail_msg: "forge-api.socket: {{ forge_api_socket_state.stdout_lines }}; journalctl -u forge-api.socket -n 20."
+    quiet: true
+
+- name: Verify | forge-api is active
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=ActiveState, --property=NRestarts, --property=MainPID, "{{ forge_api_service }}"]
+  register: forge_api_state1
+  changed_when: false
+  until: forge_api_state1.stdout is search('(?m)^ActiveState=active$')
+  retries: "{{ forge_api_verify_retries }}"
+  delay: "{{ forge_api_verify_delay }}"
+
+- name: Verify | let it run through its start-up
+  ansible.builtin.wait_for:
+    timeout: "{{ forge_api_verify_delay | int * 5 }}"
+
+- name: Verify | read the state again
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=ActiveState, --property=NRestarts, --property=MainPID, "{{ forge_api_service }}"]
+  register: forge_api_state2
+  changed_when: false
+
+- name: Verify | still active, no restart in between
+  vars:
+    s1: "{{ dict(forge_api_state1.stdout_lines | map('split', '=', 1)) }}"
+    s2: "{{ dict(forge_api_state2.stdout_lines | map('split', '=', 1)) }}"
+  ansible.builtin.assert:
+    that:
+      - s2.ActiveState | default('') == 'active'
+      - s2.NRestarts | default('x') == s1.NRestarts | default('y')
+      - s2.MainPID | default('0') is match('^[1-9][0-9]*$')
+      - s2.MainPID == s1.MainPID
+    fail_msg: >-
+      forge-api is {{ s2.ActiveState | default('?') }} after {{ s2.NRestarts | default('?') }} restarts (was
+      {{ s1.NRestarts | default('?') }}), MainPID {{ s1.MainPID | default('?') }} -> {{ s2.MainPID | default('?') }}:
+      journalctl -u forge-api -n 50.
+    quiet: true
+
+- name: Verify | check-config --require-library as rgate in the unit's sandbox
+  ansible.builtin.command:
+    argv: >-
+      {{ ['systemd-run', '--wait', '--pipe', '--collect', '--quiet', '--service-type=oneshot',
+          '--description=forge-api check-config (Ansible verify)',
+          '--property=TimeoutStartSec=' ~ forge_api_verify_timeout]
+         + (forge_api_sandbox | map('regex_replace', '^', '--property=') | list)
+         + ['--'] + forge_api_argv + ['check-config', '--require-library'] }}
+  register: forge_api_check_run
+  changed_when: false
+  failed_when: false
+
+- name: Verify | the sandboxed check-config exited 0
+  ansible.builtin.assert:
+    that:
+      - forge_api_check_run.rc == 0
+      - forge_api_check_run.stdout is search('(?m)^config ok[:] .*library opens$')
+    fail_msg: >-
+      forge-api check-config --require-library (as {{ forge_api_user }}, in the unit's sandbox) exited
+      {{ forge_api_check_run.rc }}: {{ forge_api_check_run.stdout_lines[-3:] | default([]) }}
+      {{ forge_api_check_run.stderr_lines[-5:] | default([]) }}
+    success_msg: "{{ forge_api_check_run.stdout | trim }}"
+    quiet: true
+
+- name: Verify | the host's address on the ai bridge
+  ansible.builtin.command:
+    argv: [ip, -o, -4, addr, show, to, "{{ forge_api_bind | trim }}/32"]
+  register: forge_api_ip_addr
+  changed_when: false
+
+- name: Verify | the bind address is the ai bridge's gateway on this host
+  vars:
+    want: "inet {{ forge_api_bind | trim }}/{{ forge_api_ai_subnet | trim | regex_replace('^.*/', '') }} "
+  ansible.builtin.assert:
+    that:
+      - forge_api_ip_addr.stdout_lines | length == 1
+      - want in forge_api_ip_addr.stdout
+    fail_msg: >-
+      {{ forge_api_bind }} should be on exactly one interface, as '{{ want | trim }}' (the ai bridge, role
+      ai_stack); ip says {{ forge_api_ip_addr.stdout_lines }}. Is the AI stack up? Set ai_stack_network_gateway if
+      Docker gave the network another gateway.
+    quiet: true
+
+- name: Verify | the listeners on the port
+  ansible.builtin.command:
+    argv: [ss, -H, -l, -t, -n, -p, "sport = :{{ forge_api_port }}"]
+  register: forge_api_ss
+  changed_when: false
+
+# Socket activation (Q2-1): exactly one listening socket on the port, on any address (so nothing else listens on
+# <bind>:8790, 0.0.0.0:8790 or [::]:8790), and it is the one systemd bound and passed on: its holders are exactly
+# pid 1 (forge-api.socket) and the service's MainPID (the inherited fd). A socket the service bound itself would
+# lack pid 1 (and SocketBindDeny=any forbids it); a squatter would be a second socket or a third holder.
+- name: Verify | one socket on the bind address only, held by systemd and the service
+  vars:
+    main_pid: "{{ dict(forge_api_state2.stdout_lines | map('split', '=', 1)).MainPID }}"
+    users: "{{ forge_api_ss.stdout_lines[0] | default('') | regex_findall('pid=([0-9]+),') | sort }}"
+  ansible.builtin.assert:
+    that:
+      - forge_api_ss.stdout_lines | length == 1
+      - forge_api_ss.stdout_lines[0].split()[3] == (forge_api_bind | trim) ~ ':' ~ forge_api_port
+      - users == ['1', main_pid] | sort
+    fail_msg: >-
+      Port {{ forge_api_port }} must have exactly one listening socket, on {{ forge_api_bind }}, held by systemd
+      (pid 1, forge-api.socket) and forge-api (pid {{ main_pid }}) only; ss says {{ forge_api_ss.stdout_lines }}.
+    quiet: true
+
+- name: Verify | a call from the host itself
+  ansible.builtin.command:
+    argv: [curl, -sS, -m, "{{ forge_api_verify_curl_timeout }}", -o, /dev/null, -w, "%{http_code}", "{{ forge_api_url }}"]
+  register: forge_api_host_call
+  changed_when: false
+  failed_when: false
+
+# Lead decision F-2: the IP filter drops the host's packets before the app sees them, so there is no answer at
+# all (7 refused, 28 timed out). Any HTTP status, even 403 or 401, means the filter isn't in force.
+- name: Verify | the host gets no answer (the IP filter)
+  ansible.builtin.assert:
+    that:
+      - forge_api_host_call.rc in [7, 28]
+      - forge_api_host_call.stdout | trim == '000'
+    fail_msg: >-
+      From the host, {{ forge_api_url }} answered (curl rc {{ forge_api_host_call.rc }}, HTTP
+      '{{ forge_api_host_call.stdout | trim }}'): the unit's IPAddressDeny/IPAddressAllow isn't in force.
+    quiet: true
+
+- name: Verify | UFW's rules
+  ansible.builtin.command:
+    argv: [ufw, show, added]
+  environment:
+    LANGUAGE: C
+    LC_ALL: C
+  register: forge_api_ufw
+  changed_when: false
+
+# Role firewall owns UFW (declared list, everything else pruned), so the rule comes from there (README, "UFW").
+# Every inbound allow that could admit the port counts: the port itself, a range or list holding it, or an address
+# rule with no port at all (filter_plugins: forge_api_ufw_port_rules).
+- name: Verify | UFW has exactly the declared rule for the port, and no other
+  vars:
+    port_rules: "{{ forge_api_ufw.stdout_lines | forge_api_ufw_port_rules(forge_api_port) }}"
+  ansible.builtin.assert:
+    that: port_rules == ['ufw ' ~ forge_api_ufw_rule]
+    fail_msg: >-
+      UFW must hold exactly 'ufw {{ forge_api_ufw_rule }}' for port {{ forge_api_port }} (declared through role
+      firewall, README "UFW"), and nothing else for that port; it has {{ port_rules }}.
+    quiet: true
+
+- name: Verify | open-webui's process (for its network namespace)
+  ansible.builtin.command:
+    argv: [docker, inspect, -f, "{{ '{{' }}.State.Pid{{ '}}' }}", "{{ forge_api_webui_container }}"]
+  register: forge_api_webui_pid
+  changed_when: false
+
+- name: Verify | open-webui is running
+  ansible.builtin.assert:
+    that: forge_api_webui_pid.stdout | trim is match('^[1-9][0-9]*$')
+    fail_msg: "{{ forge_api_webui_container }} isn't running (pid '{{ forge_api_webui_pid.stdout | trim }}'): converge the AI stack first."
+    quiet: true
+
+# Lead decision F-3: the host's own curl, run in open-webui's network namespace only (nsenter --net; no
+# `docker exec`, nothing runs inside the container). Its packets leave from 172.20.0.4 through the bridge, the
+# UFW rule and the IP filter, so a call without the token reaches F's bearer check: 401.
+- name: Verify | a call without the token from open-webui's network namespace
+  ansible.builtin.command:
+    argv:
+      - nsenter
+      - "--net=/proc/{{ forge_api_webui_pid.stdout | trim }}/ns/net"
+      - --
+      - curl
+      - -s
+      - -m
+      - "{{ forge_api_verify_curl_timeout }}"
+      - -o
+      - /dev/null
+      - -w
+      - "%{http_code}"
+      - "{{ forge_api_url }}"
+  register: forge_api_webui_call
+  changed_when: false
+  failed_when: false
+
+- name: Verify | open-webui's address without the token gets 401
+  ansible.builtin.assert:
+    that: forge_api_webui_call.stdout | trim == '401'
+    fail_msg: >-
+      From open-webui's network namespace, {{ forge_api_url }} without the token gave HTTP
+      '{{ forge_api_webui_call.stdout | trim }}' (curl rc {{ forge_api_webui_call.rc }}); want 401. 000 means the UFW
+      rule or the IP filter drops open-webui too.
+    quiet: true
+
+- name: Verify | the unit's journal against the token
+  ansible.builtin.command:
+    argv:
+      - bash
+      - -c
+      - |
+        set -euo pipefail
+        j="$(journalctl --unit "$1" --unit "$2" --output short --quiet --no-pager)"
+        printf 'lines=%s\n' "$(printf '%s\n' "$j" | grep -c '')"
+        printf 'service=%s\n' "$(printf '%s\n' "$j" | grep -cE -- ' forge-api\[[0-9]+\]: ' || true)"
+        printf 'token=%s\n' "$(printf '%s\n' "$j" | grep -cF -f "$3" || true)"
+      - forge-api-verify
+      - "{{ forge_api_service }}"
+      - "{{ forge_api_socket }}"
+      - "{{ forge_api_token_file }}"
+  environment:
+    LC_ALL: C
+  register: forge_api_journal
+  changed_when: false
+  failed_when: false
+
+# The token file holds one line, so the pattern list is exactly the token (an empty line would match every line
+# and fail this check, never pass it).
+- name: Verify | the token is not in the journal, which holds the service's own lines
+  vars:
+    j: "{{ dict(forge_api_journal.stdout_lines | map('split', '=', 1)) }}"
+  ansible.builtin.assert:
+    that:
+      - forge_api_journal.rc == 0
+      - j.service | default('0') | int >= 1
+      - j.token | default('x') == '0'
+    fail_msg: >-
+      journalctl -u forge-api.service -u forge-api.socket: {{ forge_api_journal.stdout_lines }}
+      {{ forge_api_journal.stderr_lines[-3:] | default([]) }}. token > 0 means the token was logged (rotate it: remove
+      {{ forge_api_token_file }}, converge, paste the new one into the tool's Valve); service 0 means the journal
+      couldn't be read or the service never logged.
+    quiet: true
+
+# --- Q-1: Open WebUI's trust settings, from its database on the host (never through the container). ---
+- name: Verify | open-webui's mounts
+  ansible.builtin.command:
+    argv: [docker, inspect, -f, "{{ '{{' }}json .Mounts{{ '}}' }}", "{{ forge_api_webui_container }}"]
+  register: forge_api_webui_mounts
+  changed_when: false
+
+- name: Verify | open-webui's data directory on the host
+  vars:
+    found: >-
+      {{ forge_api_webui_mounts.stdout | from_json | selectattr('Destination', 'equalto', forge_api_webui_data_dir)
+         | map(attribute='Source') | list }}
+  ansible.builtin.set_fact:
+    forge_api_webui_db: "{{ (found | first | default('')) ~ '/' ~ forge_api_webui_db_name }}"
+    forge_api_webui_data_found: "{{ found | length == 1 and (found | first | default('')) is match('^/[A-Za-z0-9._/-]+$') }}"
+
+- name: Verify | Open WebUI's trust settings (read-only)
+  ansible.builtin.script:
+    cmd: "{{ forge_api_owui_check_src }} {{ forge_api_webui_db | quote }} {{ forge_api_approver_user_id | quote }}"
+    executable: "{{ forge_api_python }}"
+  # S-4: the checker has its own 30 s alarm; this bounds the task too.
+  timeout: 60
+  register: forge_api_owui
+  changed_when: false
+  failed_when: false
+
+- name: Verify | report each trust check
+  vars:
+    r: "{{ forge_api_owui.stdout | default('') | trim | from_json if forge_api_owui.rc | default(2) == 0 else {} }}"
+  ansible.builtin.debug:
+    msg: >-
+      {{ (r.checks | default([]) | map(attribute='name') | zip(r.checks | default([]) | map(attribute='ok'),
+          r.checks | default([]) | map(attribute='detail')) | map('join', ': ') | list)
+         if r else ['unreadable: ' ~ (forge_api_owui.stdout | default('') | trim) ~ ' ' ~ (forge_api_owui.stderr | default('') | trim)] }}
+
+- name: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+  vars:
+    r: "{{ forge_api_owui.stdout | default('') | trim | from_json if forge_api_owui.rc | default(2) == 0 else {} }}"
+  ansible.builtin.assert:
+    that:
+      - forge_api_webui_data_found | bool
+      - forge_api_owui.rc | default(2) == 0
+      - r.ok | default(false) is sameas true
+      - >-
+        r.checks | default([]) | map(attribute='name') | list
+        == ['admins', 'default-permissions', 'group-permissions', 'tool-write-grants', 'tool-owners', 'iframe-same-origin']
+    fail_msg: >-
+      Open WebUI's trust settings ({{ forge_api_webui_db }}):
+      {{ r.checks | default([]) | rejectattr('ok') | map(attribute='detail') | list }} {{ forge_api_owui.stdout | default('') | trim }}.
+      Fix them in Open WebUI (Admin Panel > Users, Groups and Default permissions; Workspace > Tools and their access;
+      Settings > Interface),
+      or set forge_api_verify_owui_trust false to only report them.
+    quiet: true
+  when: forge_api_verify_owui_trust | bool

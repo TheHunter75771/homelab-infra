@@ -1,0 +1,24 @@
+---
+# One probe round for verify_guard.yml: the table listed, then the three targets as root and as nobody.
+- name: Verify guard | the guard's table is loaded
+  ansible.builtin.command:
+    argv: ["{{ ai_control_nft }}", list, table, inet, "{{ ai_control_guard_table }}"]
+  register: ai_control_guard_list
+  changed_when: false
+  failed_when: false
+
+- name: Verify guard | connect as root (serve refused, S through)
+  ansible.builtin.command:
+    argv: "{{ [ai_control_python, '-I', '-B', '-c', ai_control_guard_probe, 'tcp', ai_control_guard_targets | to_json] }}"
+  register: ai_control_guard_root
+  changed_when: false
+  failed_when: false
+
+- name: Verify guard | connect as nobody (all refused)
+  ansible.builtin.command:
+    argv: >-
+      {{ ai_control_guard_setpriv_nobody
+         + [ai_control_python, '-I', '-B', '-c', ai_control_guard_probe, 'tcp', ai_control_guard_targets | to_json] }}
+  register: ai_control_guard_nobody
+  changed_when: false
+  failed_when: false

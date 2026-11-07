@@ -1,0 +1,4 @@
+# {{ ansible_managed }}
+# SearXNG settings (docs/CONTRACTS.md §12.16.2), over the image's defaults (use_default_settings).
+# server.secret_key is deliberately absent: it comes from SEARXNG_SECRET ({{ searxng_env_file }}, root 0600).
+{{ searxng_settings_content }}

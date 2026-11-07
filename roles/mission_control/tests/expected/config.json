@@ -1,0 +1,52 @@
+{
+  "aicontrol_url": "http://127.0.0.1:8095",
+  "allowed_login": "noah@example.com",
+  "backups": [
+    {
+      "id": "owui-stage",
+      "kind": "unit",
+      "label": "Open WebUI (ai-box)",
+      "max_age_hours": 30,
+      "unit": "ai-openwebui-backup.service"
+    },
+    {
+      "id": "mediaserver",
+      "kind": "mediaserver",
+      "label": "Mediaserver"
+    }
+  ],
+  "erau_url": "https://homebk-edge.example.ts.net",
+  "ha_entities": [],
+  "ha_token_file": "/etc/mission-control/ha-token",
+  "ha_url": null,
+  "host_map": {
+    "homebk-edge.example.ts.net": "100.64.0.30",
+    "mediaserver.example.ts.net": "100.64.0.40"
+  },
+  "links": {
+    "ai": "http://ai-box.example.ts.net:8080/",
+    "ai_control": "https://ai-box.example.ts.net/",
+    "money": "http://100.64.0.30:8710/",
+    "school": "https://homebk-edge.example.ts.net/"
+  },
+  "listen_host": "127.0.0.1",
+  "listen_port": 8097,
+  "lockscreen_detail": "minimal",
+  "mediaserver_url": "https://mediaserver.example.ts.net",
+  "moneyhub_timezone": "UTC",
+  "moneyhub_url": "http://100.64.0.30:8710",
+  "state_dir": "/var/lib/mission-control",
+  "static_dir": "/opt/mission-control/web",
+  "timezone": "America/New_York",
+  "units": [
+    "ai-control.service",
+    "aictl-helper.socket",
+    "forge-api.socket",
+    "forge-api.service",
+    "homelab-ai-stack-start.service",
+    "ai-openwebui-backup.timer",
+    "mission-control-briefing.service"
+  ],
+  "vapid_file": "/etc/mission-control/vapid.json",
+  "webui_url": "http://172.20.0.4:8080"
+}

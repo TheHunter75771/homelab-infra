@@ -1,0 +1,29 @@
+---
+# Boot ordering for the tailnet publishes (docs/CONTRACTS.md §12.9, Integrator finding 2). Both published
+# ports bind tailnet_ip, which tailscaled adds on its own schedule, possibly after docker.service has started
+# the containers. Docker 29 then runs them without those port bindings (no error, empty `docker port`), and
+# `docker restart` doesn't fix it; only a recreate does. homelab-ai-stack-start.service runs after Docker
+# (pulled in by it, like the firewall's DOCKER-USER guard), waits for the address, and recreates
+# (`docker compose up -d --force-recreate --no-deps`) only the tailnet-published services that are up
+# without their binding, or that Docker refused to start. A container stopped on purpose (down, no start
+# error) or removed is left alone. docker.service is not touched. Details in the script's header.
+# Installed before the stack's `compose up`: the playbook's heal step (tasks/stack.yml) runs the same script.
+# The unit is enabled and started in tasks/stack.yml, after the stack is up.
+
+- name: Boot helper | script
+  ansible.builtin.template:
+    src: homelab-ai-stack-start.sh.j2
+    dest: "{{ ai_stack_start_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+  register: ai_stack_start_script_file
+
+- name: Boot helper | unit
+  ansible.builtin.template:
+    src: homelab-ai-stack-start.service.j2
+    dest: /etc/systemd/system/homelab-ai-stack-start.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: ai_stack_start_unit

@@ -1,0 +1,12 @@
+# {{ ansible_managed }}
+# Role ai_backup (docs/CONTRACTS.md §12.28): nightly at 03:45; catches up after ai-box was off.
+[Unit]
+Description=Nightly Open WebUI backup
+
+[Timer]
+OnCalendar={{ ai_backup_stage_calendar }}
+Persistent=true
+Unit={{ ai_backup_stage_service }}
+
+[Install]
+WantedBy=timers.target

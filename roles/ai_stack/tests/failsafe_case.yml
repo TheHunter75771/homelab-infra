@@ -1,0 +1,25 @@
+---
+# One fail-safe case for test_render.yml: runs the role's tasks/verify_rw_failsafe_assert.yml against sample
+# `lsattr -d` results and checks it passes or fails as expected.
+- name: Fail-safe case | the role's check
+  block:
+    - name: Fail-safe case | tasks/verify_rw_failsafe_assert.yml
+      ansible.builtin.include_tasks: "{{ ai_stack_test_role }}/tasks/verify_rw_failsafe_assert.yml"
+      vars:
+        ai_stack_rw_view_attrs: {results: "{{ fs_case.results }}"}
+
+    - name: Fail-safe case | it passed
+      ansible.builtin.set_fact:
+        fs_case_failed: false
+  rescue:
+    - name: Fail-safe case | it failed
+      ansible.builtin.set_fact:
+        fs_case_failed: true
+  always:
+    - name: Fail-safe case | outcome is as expected
+      ansible.builtin.assert:
+        that:
+          - fs_case_failed is defined
+          - (not fs_case_failed) == (fs_case.ok | bool)
+        fail_msg: "{{ fs_case.name }}: expected {{ 'pass' if fs_case.ok | bool else 'fail' }}."
+        quiet: true

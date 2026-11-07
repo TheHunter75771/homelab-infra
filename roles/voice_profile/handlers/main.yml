@@ -1,0 +1,6 @@
+---
+# The only handler: the unit is on-demand (§12.21.1), so a converge never starts, restarts or stops it. A new
+# unit file or config takes effect at the next `systemctl start voice-profile`.
+- name: Reload systemd for voice-profile
+  ansible.builtin.systemd_service:
+    daemon_reload: true

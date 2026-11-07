@@ -1,0 +1,59 @@
+---
+# One refusal case for test_forge_api.yml: case = {name, vars, task, msg?}. The case's vars are passed as include
+# params (they outrank the test's set_fact values); every other input keeps its good value (test_good). `unpriv`
+# sets what the fake sysctl says for net.ipv4.ip_unprivileged_port_start (1024 by default; fail: it errors).
+- name: The fake sysctl for {{ case.name }}
+  ansible.builtin.copy:
+    content: "{{ case.unpriv | default('1024') }}\n"
+    dest: "{{ lookup('ansible.builtin.env', 'FA_TEST_DIR') }}/unpriv"
+    mode: "0644"
+
+- name: Preflight refuses {{ case.name }}
+  block:
+    - name: Preflight with {{ case.name }}
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+      vars:
+        forge_api_enabled: "{{ case.vars.get('forge_api_enabled', false) }}"
+        forge_api_approver_user_id: "{{ case.vars.get('approver', test_good.approver) }}"
+        forge_api_library_root: "{{ case.vars.get('forge_api_library_root', test_good.library_root) }}"
+        forge_api_library_mount: "{{ case.vars.get('forge_api_library_mount', test_good.library_mount) }}"
+        forge_api_library_forbidden_re: "{{ case.vars.get('forge_api_library_forbidden_re', test_good.forbidden_re) }}"
+        forge_api_port: "{{ case.vars.get('forge_api_port', 879) }}"
+        forge_api_memory_max: "{{ case.vars.get('forge_api_memory_max', '256M') }}"
+        forge_api_tasks_max: "{{ case.vars.get('forge_api_tasks_max', 64) }}"
+        forge_api_limit_nofile: "{{ case.vars.get('forge_api_limit_nofile', 256) }}"
+        forge_api_user: "{{ case.vars.get('forge_api_user', 'rgate') }}"
+        ai_stack_network_subnet: "{{ case.vars.get('ai_stack_network_subnet', test_good.subnet) }}"
+        ai_stack_webui_ip: "{{ case.vars.get('ai_stack_webui_ip', test_good.webui) }}"
+        forge_api_bind: "{{ case.vars.get('forge_api_bind', test_good.bind) }}"
+        forge_api_ip_allow: "{{ case.vars.get('forge_api_ip_allow', test_good.ip_allow) }}"
+        forge_api_ip_deny: "{{ case.vars.get('forge_api_ip_deny', ['any']) }}"
+        forge_api_ufw_rule: "{{ case.vars.get('forge_api_ufw_rule', test_good.ufw_rule) }}"
+        forge_api_token_file: "{{ case.vars.get('forge_api_token_file', test_good.token_file) }}"
+        forge_api_pkg_src: "{{ case.vars.get('forge_api_pkg_src', test_good.pkg_src) }}"
+        forge_api_launcher_src: "{{ case.vars.get('forge_api_launcher_src', test_good.launcher_src) }}"
+        forge_api_library_src_dir: "{{ case.vars.get('forge_api_library_src_dir', test_good.library_src_dir) }}"
+
+    - name: Not reached
+      ansible.builtin.set_fact:
+        fa_test_refused_by: ""
+        fa_test_refused_msg: ""
+  rescue:
+    - name: Note which task refused
+      ansible.builtin.set_fact:
+        fa_test_refused_by: "{{ ansible_failed_task.name }}"
+        fa_test_refused_msg: "{{ ansible_failed_result.msg | default('') }}"
+
+- name: Back to the default sysctl after {{ case.name }}
+  ansible.builtin.file:
+    path: "{{ lookup('ansible.builtin.env', 'FA_TEST_DIR') }}/unpriv"
+    state: absent
+
+- name: Refused by the expected check for {{ case.name }}
+  ansible.builtin.assert:
+    that:
+      - fa_test_refused_by == case.task
+      # Where a case names it, the refusal is the role's own message (not a template error).
+      - case.msg is not defined or case.msg in fa_test_refused_msg
+    fail_msg: "{{ case.name }}: refused by '{{ fa_test_refused_by }}' ({{ fa_test_refused_msg | default('') }}), expected '{{ case.task }}'"
+    quiet: true

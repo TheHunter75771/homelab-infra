@@ -1,0 +1,78 @@
+---
+# The app's code only (launcher + package; no tests, README or caches) -> gpu_gate_install_dir,
+# owned by gpu_gate_owner, 0755 dirs and launcher, 0644 modules. A module that no longer exists in
+# the source is removed. tests/test_gpu_gate.yml runs this unprivileged into a scratch dir.
+- name: Find the gpu-gate package modules
+  ansible.builtin.set_fact:
+    gpu_gate_modules: "{{ query('ansible.builtin.fileglob', gpu_gate_src_dir ~ '/gpu_gate/*.py') | map('basename') | sort }}"
+
+- name: The source tree looks like gpu-gate
+  ansible.builtin.assert:
+    that:
+      - "'__main__.py' in gpu_gate_modules"
+      - (gpu_gate_src_dir ~ '/gpu-gate') is file
+    fail_msg: "{{ gpu_gate_src_dir }} doesn't contain the gpu-gate launcher and package."
+    quiet: true
+
+# The prune below deletes everything else in the install dir: never point it at a shared directory.
+- name: The install dir is a dedicated gpu-gate directory
+  ansible.builtin.assert:
+    that:
+      - gpu_gate_install_dir | basename == 'gpu-gate'
+      - gpu_gate_install_dir is abs
+    fail_msg: gpu_gate_install_dir must be an absolute path ending in /gpu-gate (it is pruned), not {{ gpu_gate_install_dir }}.
+    quiet: true
+
+- name: Code directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ gpu_gate_owner }}"
+    group: "{{ gpu_gate_owner }}"
+    mode: "0755"
+  loop:
+    - "{{ gpu_gate_install_dir }}"
+    - "{{ gpu_gate_install_dir }}/gpu_gate"
+  register: gpu_gate_install_dirs
+
+- name: Launcher is installed
+  ansible.builtin.copy:
+    src: "{{ gpu_gate_src_dir }}/gpu-gate"
+    dest: "{{ gpu_gate_install_dir }}/gpu-gate"
+    owner: "{{ gpu_gate_owner }}"
+    group: "{{ gpu_gate_owner }}"
+    mode: "0755"
+  notify: Restart gpu-gate
+  register: gpu_gate_install_launcher
+
+- name: Package modules are installed
+  ansible.builtin.copy:
+    src: "{{ gpu_gate_src_dir }}/gpu_gate/{{ item }}"
+    dest: "{{ gpu_gate_install_dir }}/gpu_gate/{{ item }}"
+    owner: "{{ gpu_gate_owner }}"
+    group: "{{ gpu_gate_owner }}"
+    mode: "0644"
+  loop: "{{ gpu_gate_modules }}"
+  notify: Restart gpu-gate
+  register: gpu_gate_install_modules
+
+- name: Find installed files
+  ansible.builtin.find:
+    paths:
+      - "{{ gpu_gate_install_dir }}"
+      - "{{ gpu_gate_install_dir }}/gpu_gate"
+    file_type: any
+    hidden: true
+  register: gpu_gate_installed
+
+- name: Anything else in the install dir is removed
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ gpu_gate_installed.files | map(attribute='path') | reject('in', gpu_gate_wanted) | sort }}"
+  vars:
+    gpu_gate_wanted: >-
+      {{ [gpu_gate_install_dir ~ '/gpu-gate', gpu_gate_install_dir ~ '/gpu_gate']
+         + (gpu_gate_modules | map('regex_replace', '^', gpu_gate_install_dir ~ '/gpu_gate/') | list) }}
+  notify: Restart gpu-gate
+  register: gpu_gate_install_pruned

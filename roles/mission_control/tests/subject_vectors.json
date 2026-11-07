@@ -1,0 +1,19 @@
+[
+  ["https://ai-box.example-tailnet.ts.net", true],
+  ["https://ai-box.example.ts.net", true],
+  ["mailto:noreply@ai-box.example-tailnet.ts.net", true],
+  ["mailto:noah@example.com", true],
+  ["https://ai-box.example-tailnet.ts.net:8443", false],
+  ["https://ai-box.example.ts.net:443", false],
+  ["https://ai-box.example.ts.net/", false],
+  ["https://ai-box.example.ts.net/push", false],
+  ["http://ai-box.example.ts.net", false],
+  ["https://ai-box", false],
+  ["mailto:a@b", false],
+  ["noah@example.com", false],
+  ["https://ai-box.example.ts.net\n", false],
+  ["https://user@ai-box.example.ts.net", false],
+  ["mailto:noah@example.com:25", false],
+  ["mailto:noah@example.com/x", false],
+  ["", false]
+]

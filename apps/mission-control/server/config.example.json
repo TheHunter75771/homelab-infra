@@ -1,0 +1,50 @@
+{
+  "listen_host": "127.0.0.1",
+  "listen_port": 8097,
+  "allowed_login": "NOAH_TAILSCALE_LOGIN@example.invalid",
+  "timezone": "America/New_York",
+  "static_dir": "/opt/mission-control/web",
+  "state_dir": "/var/lib/mission-control",
+  "vapid_file": "/etc/mission-control/vapid.json",
+  "lockscreen_detail": "minimal",
+  "aicontrol_url": "http://127.0.0.1:8095",
+  "webui_url": "http://AI_BOX_TAILNET_IP:8080",
+  "moneyhub_url": "http://HOMEBK_EDGE_TAILNET_IP:8710",
+  "moneyhub_timezone": "UTC",
+  "erau_url": "https://homebk-edge.TAILNET.ts.net",
+  "host_map": {"homebk-edge.TAILNET.ts.net": "192.0.2.10"},
+  "mediaserver_url": null,
+  "ha_url": null,
+  "ha_token_file": "/etc/mission-control/ha-token",
+  "ha_entities": [],
+  "units": [
+    "ai-control.service",
+    "aictl-helper.socket",
+    "forge-api.socket",
+    "forge-api.service",
+    "homelab-ai-stack-start.service",
+    "ai-openwebui-backup.timer"
+  ],
+  "backups": [
+    {"id": "owui-stage", "label": "Open WebUI (ai-box)", "kind": "unit", "unit": "ai-openwebui-backup.service", "max_age_hours": 30},
+    {"id": "mediaserver", "label": "Mediaserver", "kind": "mediaserver"}
+  ],
+  "links": {
+    "ai": "http://ai-box.TAILNET.ts.net:8080/",
+    "ai_control": "https://ai-box.TAILNET.ts.net/",
+    "money": "http://HOMEBK_EDGE_TAILNET_IP:8710/",
+    "school": "https://homebk-edge.TAILNET.ts.net/"
+  },
+  "notify_senders": [
+    {"name": "mediaserver", "token_sha256": "0000000000000000000000000000000000000000000000000000000000000000", "allow_from": ["192.0.2.20"]}
+  ],
+  "quiet_hours": {"start": "22:00", "end": "07:00"},
+  "notify_dedupe_seconds": 1800,
+  "notify_rate_per_hour": 30,
+  "app_links": [
+    {"label": "Open WebUI", "url": "http://ai-box.TAILNET.ts.net:8080/"},
+    {"label": "AI Control", "url": "https://ai-box.TAILNET.ts.net/"},
+    {"label": "Money Hub", "url": "http://HOMEBK_EDGE_TAILNET_IP:8710/"},
+    {"label": "ERAU dashboard", "url": "https://homebk-edge.TAILNET.ts.net/"}
+  ]
+}

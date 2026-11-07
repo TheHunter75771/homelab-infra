@@ -1,0 +1,57 @@
+# {{ ansible_managed }}
+# Voice profile builder V (docs/CONTRACTS.md §12.21, deploy module H7): extracts and cleans Noah's writing samples
+# in the AI Library's 40-writing/samples/, computes style stats in code, and asks the local model through the
+# broker for a draft voice profile (status: draft) for Noah to review. It never overwrites an approved profile.
+# User vprof (supplementary group rgate for the library mount, never docker), no capabilities, writes only
+# 40-writing (samples/ itself read-only) and 90-archive/40-writing.
+# ON DEMAND ONLY: a oneshot with no [Install] section (static, nothing can enable it) and no timer. Start a build
+# with `systemctl start voice-profile` (it blocks until done; `--no-block` to detach), follow it with
+# `journalctl -u voice-profile -f`. A converge never starts it.
+[Unit]
+Description=Voice profile build (drafts Noah's writing-voice profile for his review)
+Documentation=file://{{ voice_profile_launcher }}
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor={{ voice_profile_library_root }}
+# §12.11 mount safety: never run against an empty mount point.
+AssertPathExists={{ voice_profile_sentinel }}
+AssertPathIsDirectory={{ voice_profile_writing_dir }}
+AssertPathIsDirectory={{ voice_profile_archive_dir }}
+# Reviewer M (M-4): systemd follows a symlink in ReadWritePaths/ReadOnlyPaths when it sets up the sandbox, so a
+# link planted after the converge's guard would make its target writable (or hide samples' protection). Refuse
+# to start if any of them is a symlink ("!": a missing path passes; the Is-Directory asserts cover existence).
+AssertPathIsSymbolicLink=!{{ voice_profile_writing_dir }}
+AssertPathIsSymbolicLink=!{{ voice_profile_samples_dir }}
+AssertPathIsSymbolicLink=!{{ voice_profile_archive_root }}
+AssertPathIsSymbolicLink=!{{ voice_profile_archive_dir }}
+
+[Service]
+Type=oneshot
+# V's launcher under -I (no PYTHON* variables, no user site, no working directory on sys.path): it puts its own
+# root-owned directory, which holds voice_profile and library, first on sys.path. -B: no bytecode there.
+ExecStart={{ (voice_profile_argv + ['build']) | join(' ') }}
+# One whole build: the CPU model may take most of this to draft the profile; longer than V's broker timeout.
+TimeoutStartSec={{ voice_profile_timeout_start }}
+SyslogIdentifier=voice-profile
+# The sandbox: exactly vars/main.yml voice_profile_sandbox (the converge's status check uses the same list).
+# - AI_LIBRARY_CAP: the library's size cap as the library CLI reads it.
+# - ReadWritePaths is 40-writing: samples-text/ (cleaned texts + MANIFEST.md), style-stats.md,
+#   voice-profile.md or voice-profile.next.md, and the library's temp files beside them; and
+#   90-archive/40-writing, where Library.archive moves a stale cleaned text. samples/ (Noah's originals) is
+#   read-only again inside 40-writing, and so is include.txt, Noah's override list ("-": no error while
+#   missing). The rest of the library stays read-only (ProtectSystem=strict).
+# - InaccessiblePaths=/dev/shm: PrivateDevices keeps the host's /dev/shm (writable, shared); V never uses it.
+# - PrivateTmp: any scratch files stay private to the build.
+# - RestrictAddressFamilies has no AF_INET6: the broker URL is an IPv4 literal.
+# - /run read-only explicitly (found writable despite ProtectSystem=strict on the mediaserver, 2026-10-24).
+# - No ProcSubset=pid (Reviewer E, §12.17: it hides /proc/self/net); ProtectProc=invisible stays.
+# - IP filter (systemd checks the destination of outgoing packets and the source of incoming ones; an allow
+#   entry wins over a deny entry). The broker only (no resolver: the broker URL is an IPv4 literal):
+#   - {{ tailnet_ip | default('') }}/32 and {{ voice_profile_broker_ranges | join(', ') }}: the broker is published on ai-box's tailnet address,
+#     Docker DNATs the request to the broker container on the `ai` network (the egress filter sees that
+#     address) and the reply comes back from the tailnet address (the ingress filter sees that). SearXNG's
+#     subnet is proven not to overlap: it would forward queries to the internet;
+#   - everything else is denied (IPAddressDeny=any).
+{% for p in voice_profile_sandbox %}
+{{ p }}
+{% endfor %}

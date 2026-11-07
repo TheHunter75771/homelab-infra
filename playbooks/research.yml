@@ -1,0 +1,12 @@
+---
+# SearXNG + the Skill Forge research gate on ai-box (docs/CONTRACTS.md §12.16). Run as the operator account `claude`.
+# The gate stays installed-but-stopped until research_gate_enabled is true (after the AI Library share, §12.17).
+- name: SearXNG and the research gate (ai-box)
+  hosts: ai_servers
+  become: true
+  gather_facts: false
+  roles:
+    - role: searxng
+    - role: research_gate
+    # §12.25 ask-from-chat: the forge API open-webui calls (switched on by forge_api_enabled; needs the AI stack up).
+    - role: forge_api

@@ -1,0 +1,57 @@
+---
+# One refusal case for test_mission_control.yml: case = {name, vars, task}. The case's vars are passed as include
+# params (they outrank the test's set_fact and vars_files values); every other input keeps its good value.
+- name: Preflight refuses {{ case.name }}
+  block:
+    - name: Preflight with {{ case.name }}
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+      vars:
+        mission_control_noah_login: "{{ case.vars.get('mission_control_noah_login', 'noah@example.com') }}"
+        mission_control_user: "{{ case.vars.get('mission_control_user', test_me) }}"
+        mission_control_briefing_time: "{{ case.vars.get('mission_control_briefing_time', '05:30:00') }}"
+        mission_control_timezone: "{{ case.vars.get('mission_control_timezone', 'America/New_York') }}"
+        mission_control_vapid_subject: "{{ case.vars.get('mission_control_vapid_subject', 'https://ai-box.example.ts.net') }}"
+        mission_control_config_extra: "{{ case.vars.get('mission_control_config_extra', {}) }}"
+        mission_control_disk_mounts: "{{ case.vars.get('mission_control_disk_mounts', ['/']) }}"
+        mission_control_moneyhub_url: "{{ case.vars.get('mission_control_moneyhub_url', 'http://100.64.0.30:8710') }}"
+        mission_control_erau_url: "{{ case.vars.get('mission_control_erau_url', 'https://homebk-edge.example.ts.net') }}"
+        mission_control_erau_ip: "{{ case.vars.get('mission_control_erau_ip', '100.64.0.30') }}"
+        mission_control_ha_url: "{{ case.vars.get('mission_control_ha_url', '') }}"
+        mission_control_mediaserver_url: "{{ case.vars.get('mission_control_mediaserver_url', 'https://mediaserver.example.ts.net') }}"
+        mission_control_mediaserver_ip: "{{ case.vars.get('mission_control_mediaserver_ip', '100.64.0.40') }}"
+        mission_control_moneyhub_timezone: "{{ case.vars.get('mission_control_moneyhub_timezone', 'UTC') }}"
+        mission_control_units: "{{ case.vars.get('mission_control_units', test_good_units) }}"
+        mission_control_backups: "{{ case.vars.get('mission_control_backups', test_good_backups) }}"
+        mission_control_links: "{{ case.vars.get('mission_control_links', test_good_links) }}"
+        mission_control_container_allow: "{{ case.vars.get('mission_control_container_allow', ['172.20.0.4/32']) }}"
+        mission_control_ip_allow: >-
+          {{ case.vars.get('mission_control_ip_allow', ['127.0.0.1/32', '127.0.0.53/32', '100.64.0.30/32', '172.20.0.4/32', '100.64.0.40/32']) }}
+        mission_control_tailnet_ip6: "{{ case.vars.get('mission_control_tailnet_ip6', 'fd7a:115c:a1e0::a') }}"
+        mission_control_tailscale_iface: "{{ case.vars.get('mission_control_tailscale_iface', 'tailscale0') }}"
+        mission_control_ip_deny: "{{ case.vars.get('mission_control_ip_deny', test_good_deny) }}"
+        python_packages: "{{ case.vars.get('python_packages', test_good_packages) }}"
+        mission_control_build_lock_src: "{{ case.vars.get('mission_control_build_lock_src', playbook_dir ~ '/../files/build.lock') }}"
+        ai_control_serve_extra_handlers: "{{ case.vars.get('ai_control_serve_extra_handlers', test_good_extra) }}"
+        mission_control_aictl_vars_file: "{{ case.vars.get('mission_control_aictl_vars_file', test_repo ~ '/roles/ai_control/vars/main.yml') }}"
+        # B2/B1: the good values are a full setup (two senders with the canary tokens, allow_from, quiet hours, both
+        # limits, six links), so each case below changes exactly one thing.
+        mission_control_notify_tokens: "{{ case.vars.get('mission_control_notify_tokens', test_notify_tokens) }}"
+        mission_control_notify_allow_from: "{{ case.vars.get('mission_control_notify_allow_from', test_notify_allow_from) }}"
+        mission_control_quiet_hours: "{{ case.vars.get('mission_control_quiet_hours', test_quiet_hours) }}"
+        mission_control_notify_dedupe_seconds: "{{ case.vars.get('mission_control_notify_dedupe_seconds', 600) }}"
+        mission_control_notify_rate_per_hour: "{{ case.vars.get('mission_control_notify_rate_per_hour', 60) }}"
+        mission_control_app_links: "{{ case.vars.get('mission_control_app_links', test_app_links) }}"
+
+    - name: Not reached
+      ansible.builtin.set_fact:
+        test_refused_by: ""
+  rescue:
+    - name: Note which task refused
+      ansible.builtin.set_fact:
+        test_refused_by: "{{ ansible_failed_task.name }}"
+
+- name: Refused by the expected check for {{ case.name }}
+  ansible.builtin.assert:
+    that: test_refused_by == case.task
+    fail_msg: "{{ case.name }}: refused by '{{ test_refused_by }}', expected '{{ case.task }}'"
+    quiet: true

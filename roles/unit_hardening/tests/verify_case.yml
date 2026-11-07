@@ -1,0 +1,34 @@
+---
+# One verify case on canned readings: uh_v = the good baseline with case.patch applied (recursive combine; lists
+# are replaced), case.replace applied over it (top-level keys replaced whole), and case.units[i] combined into
+# unit i. case.task: the assertion that must fail, or '' (pass).
+- name: Verify case {{ case.name }}
+  block:
+    - name: Canned readings for {{ case.name }}
+      ansible.builtin.set_fact:
+        uh_v: >-
+          {% set ns = namespace(units=[]) %}{% for u in uh_test_v_good.units %}{% set ns.units = ns.units
+          + [u | combine((case.units | default([]))[loop.index0] | default({}), recursive=true)] %}{% endfor %}{{
+          uh_test_v_good | combine(case.patch | default({}), recursive=true) | combine(case.replace | default({}))
+          | combine({'units': ns.units}) }}
+
+    - name: Assertions on {{ case.name }}
+      ansible.builtin.include_role:
+        name: unit_hardening
+        tasks_from: verify_assert
+      vars:
+        unit_hardening_units: "{{ uh_test_v_units }}"
+
+    - name: Passed
+      ansible.builtin.set_fact:
+        uh_test_refused_by: ""
+  rescue:
+    - name: Note which assertion failed
+      ansible.builtin.set_fact:
+        uh_test_refused_by: "{{ ansible_failed_task.name }}"
+
+- name: Verify case ended as expected for {{ case.name }}
+  ansible.builtin.assert:
+    that: uh_test_refused_by == case.task
+    fail_msg: "{{ case.name }}: failed at '{{ uh_test_refused_by }}', expected '{{ case.task or 'pass' }}'"
+    quiet: true

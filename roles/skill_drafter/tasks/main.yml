@@ -1,0 +1,28 @@
+---
+# Role skill_drafter (docs/CONTRACTS.md §12.19, module H6). Hosts: ai_servers, after the AI Library share is
+# mounted (playbooks/ai-library.yml), the research gate (rgate, playbooks/research.yml) and the AI stack (the
+# broker).
+# Order: inputs (and, when enabled, the library mount) -> Python + account -> code -> config -> unit ->
+# enabled+started, or stopped+disabled -> read-only check (enabled only).
+
+- name: Preflight checks
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Python and account
+  ansible.builtin.import_tasks: base.yml
+
+- name: Code (skill_drafter, forge, library)
+  ansible.builtin.import_tasks: install.yml
+
+- name: Config
+  ansible.builtin.import_tasks: config.yml
+
+- name: Unit, and the switch
+  ansible.builtin.import_tasks: service.yml
+
+- name: Read-only check after start
+  ansible.builtin.include_tasks: verify.yml
+  when:
+    - skill_drafter_enabled | bool
+    - skill_drafter_verify | bool
+    - not ansible_check_mode

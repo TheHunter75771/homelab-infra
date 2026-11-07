@@ -1,0 +1,6 @@
+# {{ ansible_managed }}
+# Role unit_hardening (docs/CONTRACTS.md §12.30, H15): keep /run/tailscale when tailscaled stops or restarts.
+# Units with InaccessiblePaths=-/run/tailscale hide it with a mount on that directory; removing the directory (the
+# default RuntimeDirectoryPreserve=no) would detach those mounts and show them the new socket.
+[Service]
+RuntimeDirectoryPreserve=yes

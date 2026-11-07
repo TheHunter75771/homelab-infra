@@ -1,0 +1,61 @@
+---
+# /opt/finance-digest holds exactly D's launcher and package plus the library code, all root-owned: the launcher
+# `finance-digest` (0755) and two packages (0755 dirs, 0644 *.py): D's finance_digest and apps/skill-library's
+# library (§12.18.1: D imports it; installed beside it, read-only). The launcher puts its own directory first on
+# sys.path, so under `python3 -I` the digest imports exactly these copies. Anything else (a removed file, a
+# stray, a test dir, D's tests, README and example config) is pruned.
+- name: Install | the code directories are real directories (before any write)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    finance_digest_guard_dirs: "{{ [finance_digest_app_dir] + (finance_digest_packages | map('regex_replace', '^', finance_digest_app_dir ~ '/') | list) }}"
+
+- name: Install | code directory
+  ansible.builtin.file:
+    path: "{{ finance_digest_app_dir }}"
+    state: directory
+    owner: "{{ finance_digest_owner }}"
+    group: "{{ finance_digest_owner }}"
+    mode: "0755"
+
+- name: Install | packages
+  ansible.builtin.include_tasks: tree.yml
+  vars:
+    finance_digest_tree_src: "{{ finance_digest_pkg.src }}"
+    finance_digest_tree_dest: "{{ finance_digest_app_dir }}/{{ finance_digest_pkg.name }}"
+    finance_digest_tree_name: "{{ finance_digest_pkg.name }}"
+  loop:
+    - {name: finance_digest, src: "{{ finance_digest_pkg_src }}"}
+    - {name: library, src: "{{ finance_digest_library_src_dir }}/library"}
+  # Not `item`: the included file's own loops would shadow it (its vars are evaluated lazily).
+  loop_control:
+    loop_var: finance_digest_pkg
+    label: "{{ finance_digest_pkg.name }}"
+
+- name: Install | launcher
+  ansible.builtin.copy:
+    src: "{{ finance_digest_launcher_src }}"
+    dest: "{{ finance_digest_launcher }}"
+    owner: "{{ finance_digest_owner }}"
+    group: "{{ finance_digest_owner }}"
+    mode: "0755"
+    follow: false
+
+- name: Install | the code directory is still a real directory (before the find and prune)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    finance_digest_guard_dirs: ["{{ finance_digest_app_dir }}"]
+
+- name: Install | entries of the code directory
+  ansible.builtin.find:
+    paths: "{{ finance_digest_app_dir }}"
+    file_type: any
+    hidden: true
+  register: finance_digest_app_found
+
+- name: Install | anything but the launcher and the two packages is removed
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: >-
+    {{ finance_digest_app_found.files | map(attribute='path')
+       | reject('in', finance_digest_app_entries | map('regex_replace', '^', finance_digest_app_dir ~ '/') | list) | sort }}

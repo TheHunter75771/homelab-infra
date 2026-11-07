@@ -1,0 +1,158 @@
+---
+# Pre-seeded Hugging Face models (docs/CONTRACTS.md §12.30, Reviewer I R16). Seeded on the HOST into a folder
+# root owns, OUTSIDE open-webui's data volume: root in the container can plant symlinks in the volume, so the
+# host never writes there. Each model folder is then bind-mounted READ-ONLY into open-webui's HF cache
+# (templates/compose.yaml.j2). Runs before the Compose definition and compose up, so the bind sources exist.
+#
+# Nothing here writes through a symlink: every folder from the seed folder's parent down to each pinned
+# snapshot must be absent or a real directory, root's and not group/other-writable, and every file (and
+# refs/main) absent or a regular file; anything else stops the play. A model with a file missing or different
+# loses refs/main FIRST; then only those files are fetched from the pinned revision (get_url checks the SHA-256
+# of each download before moving it into place), hashed again, and refs/main is written last. So a model that
+# isn't complete never looks complete to huggingface_hub, even when a run dies halfway.
+
+- name: HF models | stat the folders without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: false
+  loop: "{{ ai_stack_hf_dirs }}"
+  register: ai_stack_hf_dir_stat
+
+- name: HF models | each folder is absent or a real directory, root's and not group/other-writable
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isdir and not item.stat.islnk)
+      - not item.stat.exists or item.stat.pw_name == ai_stack_hf_owner
+      - not item.stat.exists or not (item.stat.wgrp or item.stat.woth)
+    fail_msg: >-
+      {{ item.item }} isn't a real directory owned by {{ ai_stack_hf_owner }} and closed to group and other (it's a
+      symlink, a file, or someone else's: {{ item.stat.pw_name | default('?') }}, {{ item.stat.mode | default('?') }}).
+      Refusing to write through it; check what is in it, then fix it by hand.
+    quiet: true
+  loop: "{{ ai_stack_hf_dir_stat.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: HF models | stat the pinned files with their SHA-256 (without following links)
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    follow: false
+    get_checksum: true
+    checksum_algorithm: sha256
+  loop: "{{ ai_stack_hf_files }}"
+  loop_control:
+    label: "{{ item.dir }}/{{ item.name }}"
+  register: ai_stack_hf_file_stat
+
+- name: HF models | stat each refs/main (without following links)
+  ansible.builtin.stat:
+    path: "{{ ai_stack_hf_seed_dir }}/{{ item }}/refs/main"
+    follow: false
+    get_checksum: false
+  loop: "{{ ai_stack_hf_model_dirs }}"
+  register: ai_stack_hf_ref_stat
+
+- name: HF models | each file and refs/main is absent or a regular file (never a symlink)
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isreg and not item.stat.islnk)
+    fail_msg: >-
+      {{ item.item.path if item.item is mapping else ai_stack_hf_seed_dir ~ '/' ~ item.item ~ '/refs/main' }} exists
+      but isn't a regular file (a symlink or a folder). Refusing to write through it; fix it by hand.
+    quiet: true
+  loop: "{{ ai_stack_hf_file_stat.results + ai_stack_hf_ref_stat.results }}"
+  loop_control:
+    label: "{{ item.item.path if item.item is mapping else item.item ~ '/refs/main' }}"
+
+# stale: missing or a different SHA-256 (fetched again). fetch: stale, or the owner or mode is off (get_url
+# fixes those without a download when the hash matches). present: the folders already there (a check run
+# creates none, and get_url needs its folder even then; copy's check mode doesn't look at the folder).
+- name: HF models | which files are missing or different, and which need get_url
+  ansible.builtin.set_fact:
+    ai_stack_hf_present_dirs: "{{ ai_stack_hf_dir_stat.results | selectattr('stat.exists') | map(attribute='item') | list }}"
+    ai_stack_hf_stale: >-
+      {%- set out = [] -%}
+      {%- for r in ai_stack_hf_file_stat.results -%}
+      {%- if not (r.stat.exists and r.stat.checksum | default('') == r.item.sha256) -%}
+      {%- set _ = out.append(r.item) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+    ai_stack_hf_fetch: >-
+      {%- set out = [] -%}
+      {%- for r in ai_stack_hf_file_stat.results -%}
+      {%- if not (r.stat.exists and r.stat.checksum | default('') == r.item.sha256
+                  and r.stat.pw_name == ai_stack_hf_owner and r.stat.gr_name == ai_stack_hf_group
+                  and r.stat.mode == '0644') -%}
+      {%- set _ = out.append(r.item) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+# Before any download (R16-5): until every file of the model verifies again, huggingface_hub finds no ref.
+- name: HF models | a model with a file missing or different loses refs/main first
+  ansible.builtin.file:
+    path: "{{ ai_stack_hf_seed_dir }}/{{ item }}/refs/main"
+    state: absent
+  loop: "{{ ai_stack_hf_stale | map(attribute='dir') | unique | list }}"
+
+- name: HF models | folders (seed folder, each model's refs and pinned snapshot; root 0755)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ ai_stack_hf_owner }}"
+    group: "{{ ai_stack_hf_group }}"
+    mode: "0755"
+  loop: "{{ ai_stack_hf_dirs }}"
+
+- name: HF models | fetch the missing or different files from the pinned revision (owner and mode fixed too)
+  ansible.builtin.get_url:
+    url: "{{ ai_stack_hf_base_url }}/{{ item.repo }}/resolve/{{ item.revision }}/{{ item.name }}"
+    dest: "{{ item.path }}"
+    checksum: "sha256:{{ item.sha256 }}"
+    owner: "{{ ai_stack_hf_owner }}"
+    group: "{{ ai_stack_hf_group }}"
+    mode: "0644"
+    timeout: 60
+  loop: "{{ ai_stack_hf_fetch }}"
+  loop_control:
+    label: "{{ item.dir }}/{{ item.name }}"
+  when: not ansible_check_mode or (item.path | dirname) in ai_stack_hf_present_dirs
+
+# A check run fetches nothing, so there is nothing to hash again.
+- name: HF models | hash the fetched files again
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    follow: false
+    get_checksum: true
+    checksum_algorithm: sha256
+  loop: "{{ ai_stack_hf_fetch }}"
+  loop_control:
+    label: "{{ item.dir }}/{{ item.name }}"
+  register: ai_stack_hf_fetched_stat
+  when: not ansible_check_mode
+
+- name: HF models | every fetched file is a regular file with the pinned SHA-256, root's, 0644
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists and item.stat.isreg and not item.stat.islnk
+      - item.stat.checksum == item.item.sha256
+      - item.stat.pw_name == ai_stack_hf_owner and item.stat.gr_name == ai_stack_hf_group and item.stat.mode == '0644'
+    fail_msg: "{{ item.item.path }} doesn't match its pin after the fetch; refs/main stays absent."
+    quiet: true
+  loop: "{{ ai_stack_hf_fetched_stat.results }}"
+  loop_control:
+    label: "{{ item.item.dir }}/{{ item.item.name }}"
+  when: not ansible_check_mode
+
+- name: HF models | refs/main names the pinned revision (written last, once every file verified)
+  ansible.builtin.copy:
+    content: "{{ item.revision }}"
+    dest: "{{ ai_stack_hf_seed_dir }}/models--{{ item.repo | replace('/', '--') }}/refs/main"
+    owner: "{{ ai_stack_hf_owner }}"
+    group: "{{ ai_stack_hf_group }}"
+    mode: "0644"
+  loop: "{{ ai_stack_hf_models }}"
+  loop_control:
+    label: "{{ item.repo }}"

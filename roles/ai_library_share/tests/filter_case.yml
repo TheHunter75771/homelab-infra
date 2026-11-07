@@ -1,0 +1,75 @@
+---
+# One case for tasks/verify_filter.yml: case = {name, want (default fail)} plus overrides of what the
+# stub systemctl / firewall-cmd print: deny, allow (systemctl show), policy (G's rich rules), zones
+# (--get-active-zones), services, ports, rich (the public zone). Defaults: every layer present.
+- name: Filter case | what the stubs print for {{ case.name }}
+  ansible.builtin.copy:
+    dest: "{{ test_tmp }}/fw-{{ item.key }}"
+    content: "{{ item.value ~ '\n' if item.value | length > 0 else '' }}"
+    mode: "0644"
+  loop: "{{ files | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  vars:
+    test_g_rules: |-
+      rule family="ipv4" source NOT address="100.64.0.10" port port="445" protocol="tcp" reject
+      rule family="ipv6" source NOT address="2001:db8::10" port port="445" protocol="tcp" reject
+    files:
+      show: |-
+        IPAddressAllow={{ case.allow | default('127.0.0.0/8 ::1/128 100.64.0.10/32 2001:db8::10/128') }}
+        IPAddressDeny={{ case.deny | default('0.0.0.0/0 ::/0') }}
+      policy: "{{ case.policy | default(test_g_rules) }}"
+      zones: "{{ case.zones | default('public (default)\n  interfaces: enp42s0\ntrusted\n  interfaces: tailscale0') }}"
+      services: "{{ case.services | default('dhcpv6-client mdns ssh') }}"
+      ports: "{{ case.ports | default('') }}"
+      rich: "{{ case.rich | default('') }}"
+
+- name: Filter case | stub systemctl and firewall-cmd for {{ case.name }}
+  ansible.builtin.copy:
+    dest: "{{ test_tmp }}/stub-{{ item.name }}"
+    content: "{{ item.body }}"
+    mode: "0755"
+  loop:
+    - name: systemctl
+      body: |
+        #!/bin/sh
+        [ "$*" = "show smb.service -p IPAddressDeny -p IPAddressAllow" ] || { echo "unexpected: $*" >&2; exit 9; }
+        cat "{{ test_tmp }}/fw-show"
+    - name: firewall-cmd
+      body: |
+        #!/bin/sh
+        t="{{ test_tmp }}"
+        case "$*" in
+          "--policy=homelab-ai-only --list-rich-rules") cat "$t/fw-policy" ;;
+          "--get-active-zones") cat "$t/fw-zones" ;;
+          "--zone=public --list-services") cat "$t/fw-services" ;;
+          "--zone=public --list-ports") cat "$t/fw-ports" ;;
+          "--zone=public --list-rich-rules") cat "$t/fw-rich" ;;
+          *) echo "unexpected: $*" >&2; exit 9 ;;
+        esac
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Filter case | run verify_filter.yml for {{ case.name }}
+  block:
+    - name: Filter case | verify for {{ case.name }}
+      ansible.builtin.include_tasks: ../tasks/verify_filter.yml
+      vars:
+        ai_library_share_systemctl: "{{ test_tmp }}/stub-systemctl"
+        ai_library_share_firewall_cmd: "{{ test_tmp }}/stub-firewall-cmd"
+
+    - name: Filter case | result for {{ case.name }}
+      ansible.builtin.set_fact:
+        test_filter_result: pass
+  rescue:
+    - name: Filter case | result (refused) for {{ case.name }}
+      ansible.builtin.set_fact:
+        test_filter_result: >-
+          {{ 'fail' if ansible_failed_task.name is search('IP filter denies|policy rejects 445|no LAN zone opens 445')
+             else 'error: ' ~ ansible_failed_task.name }}
+
+- name: Filter case | outcome is as expected for {{ case.name }}
+  ansible.builtin.assert:
+    that: test_filter_result == case.want | default('fail')
+    fail_msg: "{{ case.name }}: got {{ test_filter_result }}, want {{ case.want | default('fail') }}"
+    quiet: true

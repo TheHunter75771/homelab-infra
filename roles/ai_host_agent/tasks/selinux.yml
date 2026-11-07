@@ -1,0 +1,22 @@
+---
+# SELinux (Fedora, enforcing), the same approach as roles ollama_rocm and gpu_gate: no custom policy,
+# port label or boolean. systemd (init_t) runs /usr/bin/python3 (bin_t) as unconfined_service_t;
+# the code under /opt is usr_t and the config/token under /etc are etc_t, both by the default file
+# contexts, which unconfined_service_t may read. Ansible's copy/template already apply the default
+# context; restorecon only repairs drift (e.g. a file moved in by hand keeps its old label).
+# verify.yml asserts the running domain and that no AVC names the agent's uid.
+- name: SELinux | is it enabled
+  ansible.builtin.command:
+    argv: [/usr/sbin/selinuxenabled]
+  register: ai_host_agent_selinux
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: SELinux | labels of the code, config and token are the policy defaults
+  ansible.builtin.command:
+    argv: [restorecon, -R, -v, "{{ ai_host_agent_install_dir }}", "{{ ai_host_agent_config_dir }}"]
+  register: ai_host_agent_restorecon
+  changed_when: ai_host_agent_restorecon.stdout | length > 0
+  when: ai_host_agent_selinux.rc == 0
+  notify: Restart ai-host-agent

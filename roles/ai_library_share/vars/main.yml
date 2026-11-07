@@ -1,0 +1,135 @@
+---
+# Fixed by the contract (§12.11, §12.12, §12.17). The tests override the paths and programs to point
+# at a scratch dir and stubs.
+
+# The Samba account and share.
+ai_library_share_user: ailib
+ai_library_share_share_name: ai-library
+# Mount safety (§12.11, Lead on module L): the library root carries this file; nothing runs on a
+# library root without it (backup, verify, research_gate's preflight).
+ai_library_share_sentinel: .ai-library-sentinel
+ai_library_share_sentinel_text: |
+  AI Library sentinel (homelab-infra, CONTRACTS §12.11). Do not delete: the backup, the ai-box mount
+  check and the research gate refuse a library root without it (an unmounted share looks empty).
+
+# Both folders are exactly <mount>/<this> (Lead after Reviewer G); the tests use a unique name.
+ai_library_share_folder: ai-library
+
+# Server: root-only secrets dir and the generated password (48 hex chars, never rotated by a converge).
+ai_library_share_secret_dir: /etc/ai-library-share
+ai_library_share_password_file: "{{ ai_library_share_secret_dir }}/ailib-password"
+ai_library_share_smb_conf: /etc/samba/smb.conf
+ai_library_share_smb_unit: smb.service
+ai_library_share_nmb_unit: nmb.service
+ai_library_share_selinux_boolean: samba_export_all_rw
+ai_library_share_packages_server: [samba, samba-common-tools, rsync]
+
+# Client: root-only credentials for mount.cifs.
+ai_library_share_client_dir: /etc/ai-library
+ai_library_share_credentials_file: "{{ ai_library_share_client_dir }}/credentials"
+ai_library_share_packages_client: [cifs-utils]
+
+# Units (both hosts write under this dir; the tests point it at a scratch dir).
+ai_library_share_unit_dir: /etc/systemd/system
+ai_library_share_wait_unit: ai-library-tailnet-wait.service
+ai_library_share_smb_dropin_dir: "{{ ai_library_share_unit_dir }}/{{ ai_library_share_smb_unit }}.d"
+ai_library_share_smb_dropin: "{{ ai_library_share_smb_dropin_dir }}/ai-library.conf"
+ai_library_share_backup_service: ai-library-backup.service
+ai_library_share_backup_timer: ai-library-backup.timer
+# systemd-escape --path --suffix=mount /srv/ai-library (preflight re-derives it on the host).
+ai_library_share_mount_unit: 'srv-ai\x2dlibrary.mount'
+ai_library_share_automount_unit: 'srv-ai\x2dlibrary.automount'
+
+# The contract's CIFS options (§12.17.3). `serverino` is spelled out: the library's inbox recovery
+# needs stable inode numbers (§12.11 README note), so `noserverino` must never be added. The fstab-only
+# x-systemd.automount / x-systemd.idle-timeout=0 become the .automount unit (TimeoutIdleSec=0).
+ai_library_share_mount_options_base:
+  - vers=3.1.1
+  - seal
+  - nounix
+  - serverino
+  - uid={{ ai_library_share_mount_user }}
+  - gid={{ ai_library_share_mount_user }}
+  - file_mode=0660
+  - dir_mode=0770
+  - nosuid
+  - nodev
+  - noexec
+  - soft
+  - echo_interval=15
+  - _netdev
+  # Samba 4.24 stores client-made SMB3 symlinks as reparse points, which the kernel would show as
+  # symlinks: never create or follow them (Lead after Reviewer G; ai-box runs kernel 7.0).
+  - symlink=none
+# Never accepted in ai_library_share_mount_options_extra: they undo a contract option or the symlink ban.
+ai_library_share_mount_options_refused:
+  - noserverino
+  - unix
+  - posix
+  - mfsymlinks
+  - sfu
+  - guest
+  - noperm
+  - suid
+  - dev
+  - exec
+  - hard
+  - sec=none
+  - nosharesock
+
+# The installed helper scripts (in ai_library_share_lib_dir, next to the library package).
+ai_library_share_scripts:
+  - ai-library-backup.py
+  - probe.py
+  - tailnet-wait.sh
+  - testparm-strict.py
+ai_library_share_package: library
+ai_library_share_python: /usr/bin/python3
+
+# Programs (the tests point some of them at stubs).
+ai_library_share_findmnt: findmnt
+ai_library_share_testparm: testparm
+ai_library_share_pdbedit: pdbedit
+ai_library_share_smbpasswd: /usr/bin/smbpasswd
+ai_library_share_getsebool: getsebool
+ai_library_share_setsebool: setsebool
+ai_library_share_ausearch: ausearch
+ai_library_share_ss: ss
+ai_library_share_firewall_cmd: firewall-cmd
+ai_library_share_systemctl: systemctl
+# How the client verify runs its probe as the mount user (the tests run it as themselves: []).
+ai_library_share_runuser: /usr/sbin/runuser
+ai_library_share_runas: ["{{ ai_library_share_runuser }}", -u, "{{ ai_library_share_mount_user }}", --]
+# Server: everything in the library is made as, and owned by, Samba's force user and group. This
+# ntfs3 mount (acl) stores the real owner, so files root creates are root:root 0755 and Samba, which
+# writes as the force user, is denied (Integrator, first live run).
+ai_library_share_server_runas:
+  - "{{ ai_library_share_runuser }}"
+  - -u
+  - "{{ ai_library_share_force_user }}"
+  - -g
+  - "{{ ai_library_share_force_group }}"
+  - --
+ai_library_share_find: find
+ai_library_share_chown: chown
+
+# Server: who may talk to smbd at all (the drop-in's IPAddressAllow; IPAddressDeny=any) and Samba's
+# hosts allow: ai-box's tailnet addresses (IPv6 only when set), plus loopback for the IP filter.
+ai_library_share_allow_ips: >-
+  {{ [ai_box_tailnet_ip | default(''), ai_box_tailnet_ip6 | default('')]
+     | select('string') | reject('equalto', '') | list }}
+ai_library_share_smb_ip_allow: "{{ ['localhost'] + ai_library_share_allow_ips }}"
+# What `systemctl show` prints for that allowlist (localhost = 127.0.0.0/8 + ::1/128).
+ai_library_share_smb_ip_allow_shown: >-
+  {{ ['127.0.0.0/8', '::1/128']
+     + (ai_library_share_allow_ips | map('regex_replace', '^([0-9.]+)$', '\1/32')
+        | map('regex_replace', '^([0-9A-Fa-f:]+)$', '\1/128') | list) }}
+# Module G's runtime rich rules for 445 (spelled as firewall-cmd prints them; roles/ollama_rocm vars).
+ai_library_share_g_rules: >-
+  {{ ['rule family="ipv4" source NOT address="' ~ ai_box_tailnet_ip | default('') ~ '" port port="445" protocol="tcp" reject']
+     + (['rule family="ipv6" source NOT address="' ~ ai_box_tailnet_ip6 ~ '" port port="445" protocol="tcp" reject']
+        if ai_box_tailnet_ip6 | default('') | length > 0 else []) }}
+ai_library_share_g_policy: homelab-ai-only
+ai_library_share_mount_options: "{{ ai_library_share_mount_options_base + ai_library_share_mount_options_extra }}"
+# Owner of the secrets dir and password file (root:root; the tests override it).
+ai_library_share_secret_owner: root

@@ -1,0 +1,29 @@
+---
+# The live mount carries the contract's options (as the kernel reports them).
+- name: Verify | the live mount's type and options
+  ansible.builtin.command:
+    argv: ["{{ ai_library_share_findmnt }}", -n, -r, -o, "FSTYPE,OPTIONS", --mountpoint, "{{ ai_library_share_mount_point }}"]
+  register: ai_library_share_live_mount
+  changed_when: false
+  failed_when: false
+
+- name: Verify | the mount is CIFS 3.1.1, sealed, nounix, serverino, soft, nosuid/nodev/noexec
+  vars:
+    ai_library_share_live: "{{ (ai_library_share_live_mount.stdout_lines | last | default('')).split(' ') }}"
+    ai_library_share_live_opts: "{{ (ai_library_share_live[1] | default('')).split(',') }}"
+  ansible.builtin.assert:
+    that:
+      - ai_library_share_live_mount.rc == 0
+      - ai_library_share_live[0] == 'cifs'
+      - "'vers=3.1.1' in ai_library_share_live_opts"
+      - "'seal' in ai_library_share_live_opts"
+      - "'nounix' in ai_library_share_live_opts"
+      - "'serverino' in ai_library_share_live_opts"
+      - "'soft' in ai_library_share_live_opts"
+      - "'nosuid' in ai_library_share_live_opts and 'nodev' in ai_library_share_live_opts and 'noexec' in ai_library_share_live_opts"
+      - ai_library_share_live_opts | intersect(ai_library_share_mount_options_refused) | length == 0
+    fail_msg: >-
+      {{ ai_library_share_mount_point }} is mounted as "{{ ai_library_share_live_mount.stdout | trim or 'nothing' }}"; it
+      must be cifs with vers=3.1.1, seal, nounix, serverino, soft, nosuid, nodev, noexec and none of
+      {{ ai_library_share_mount_options_refused | join(', ') }}.
+    quiet: true

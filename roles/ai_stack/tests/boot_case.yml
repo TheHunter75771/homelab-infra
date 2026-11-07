@@ -1,0 +1,89 @@
+---
+# One boot-helper case for test_render.yml (loop_var ai_stack_case):
+#   name        case name (its own state dir and docker log)
+#   containers  {<service>: {status, port (bool), error (optional), port_text (optional)}}; a service left
+#               out has no container
+#   env         extra environment for the fake docker (optional)
+#   rc          expected exit status
+#   compose     services the single `docker compose ... up --force-recreate --no-deps` must name ([] = no call)
+#   stderr      text expected on stderr (optional)
+#   args        helper options (optional; none = boot mode)
+#   dry         true for --dry-run: `compose` lists what must be reported, and nothing may be called
+#   no_docker   true when the helper must not call Docker at all
+- name: Case | state directory | {{ ai_stack_case.name }}
+  ansible.builtin.file:
+    path: "{{ ai_stack_case_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Case | container list | {{ ai_stack_case.name }}
+  ansible.builtin.copy:
+    dest: "{{ ai_stack_case_dir }}/names"
+    content: "{{ (ai_stack_case.containers.keys() | list + ['some-other-project-container']) | join('\n') }}\n"
+    mode: "0644"
+
+- name: Case | container states | {{ ai_stack_case.name }}
+  ansible.builtin.copy:
+    dest: "{{ ai_stack_case_dir }}/{{ item.key }}.inspect"
+    content: "{{ item.value.status }}|{{ item.value.error | default('') }}\n"
+    mode: "0644"
+  loop: "{{ ai_stack_case.containers | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Case | current bindings | {{ ai_stack_case.name }}
+  ansible.builtin.copy:
+    dest: "{{ ai_stack_case_dir }}/{{ item.key }}.port"
+    content: "{{ item.value.port_text | default('100.64.0.10:' ~ ai_stack_case_ports[item.key]) }}\n"
+    mode: "0644"
+  loop: "{{ ai_stack_case.containers | dict2items | selectattr('value.port') | list }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Case | what a recreate binds | {{ ai_stack_case.name }}
+  ansible.builtin.copy:
+    dest: "{{ ai_stack_case_dir }}/{{ item.key }}.port.fixed"
+    content: "100.64.0.10:{{ ai_stack_case_ports[item.key] }}\n"
+    mode: "0644"
+  loop: "{{ ai_stack_case.containers | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Case | run the helper | {{ ai_stack_case.name }}
+  ansible.builtin.command:
+    argv: "{{ [ai_stack_test_tmp.path ~ '/start.sh'] + ai_stack_case.args | default([]) }}"
+  environment: "{{ {'FAKE_IP_HAS_ADDR': '1', 'FAKE_STATE_DIR': ai_stack_case_dir, 'FAKE_LOCK': ai_stack_case_lock,
+                    'FAKE_DOCKER_LOG': ai_stack_case_dir ~ '/docker.log'} | combine(ai_stack_case.env | default({})) }}"
+  register: ai_stack_case_run
+  changed_when: false
+  failed_when: ai_stack_case_run.rc != ai_stack_case.rc
+
+- name: Case | look for Docker calls | {{ ai_stack_case.name }}
+  ansible.builtin.stat:
+    path: "{{ ai_stack_case_dir }}/docker.log"
+  register: ai_stack_case_log
+
+- name: Case | Docker calls | {{ ai_stack_case.name }}
+  ansible.builtin.assert:
+    that:
+      - (ai_stack_case.no_docker | default(false)) == (not ai_stack_case_log.stat.exists)
+      - ai_stack_case_compose == ai_stack_case_expected_compose
+      # Never a plain start/restart (Docker 29 keeps the missing bindings), never anything else mutating.
+      - ai_stack_case_calls | select('match', '^(start|restart|stop|rm|run) ') | list == []
+      # The recreate runs under the stack lock.
+      - ai_stack_case_calls is not contains('UNLOCKED compose')
+      # The playbook's changed_when: a RECREATE/WOULD-RECREATE line exactly when something is (would be) recreated.
+      - (ai_stack_case_run.stdout is search(ai_stack_heal_changed_re, multiline=True)) == (ai_stack_case.compose | length > 0)
+      - ai_stack_case.stderr is undefined or ai_stack_case_run.stderr is search(ai_stack_case.stderr | regex_escape)
+    fail_msg: "{{ {'calls': ai_stack_case_calls, 'stdout': ai_stack_case_run.stdout_lines,
+                   'stderr': ai_stack_case_run.stderr_lines} | to_json }}"
+    quiet: true
+  vars:
+    ai_stack_case_calls: >-
+      {{ lookup('ansible.builtin.file', ai_stack_case_dir ~ '/docker.log').splitlines()
+         if ai_stack_case_log.stat.exists else [] }}
+    ai_stack_case_compose: "{{ ai_stack_case_calls | select('match', '^compose ') | list }}"
+    ai_stack_case_expected_compose: >-
+      {{ [] if (ai_stack_case.compose | length == 0 or ai_stack_case.dry | default(false)) else
+         ['compose -f /srv/homelab/stacks/ai/compose.yaml up --detach --pull never --force-recreate --no-deps '
+          ~ (ai_stack_case.compose | join(' '))] }}

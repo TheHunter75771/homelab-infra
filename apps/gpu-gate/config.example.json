@@ -1,0 +1,16 @@
+{
+  "interval": 5,
+  "window": 1800,
+  "threshold": 50,
+  "card": null,
+  "ollama_url": "http://127.0.0.1:11434",
+  "ollama_timeout": 5,
+  "ollama_match_uid": true,
+  "ollama_match": ["ollama", "llama-server"],
+  "ollama_engines": ["gfx", "compute"],
+  "binds": ["127.0.0.1"],
+  "port": 11500,
+  "games": [],
+  "ignore": [],
+  "log_level": "INFO"
+}

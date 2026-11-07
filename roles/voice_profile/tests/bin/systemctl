@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Fake systemctl for tests/test_voice_profile.yml. Only the two read-only queries the role makes:
+#   show --property=ActiveState voice-profile.service           (preflight: is a build running?)
+#     $VP_TEST_ACTIVE: idle (default) | failed | running
+#   show --property=LoadState --property=UnitFileState --property=TriggeredBy voice-profile.service  (verify)
+#     $VP_TEST_UNIT: static (default) | enabled | timer | missing
+# Anything else (start, enable, restart, ...) is an error: the role must never call it.
+set -euo pipefail
+: "${VP_TEST_ACTIVE:?}" "${VP_TEST_UNIT:?}"
+mode() { if [ -f "$1" ]; then cat "$1"; else echo "$2"; fi; }
+case "$*" in
+  "show --property=ActiveState voice-profile.service")
+    case "$(mode "$VP_TEST_ACTIVE" idle)" in
+      idle) echo ActiveState=inactive ;;
+      failed) echo ActiveState=failed ;;
+      running) echo ActiveState=activating ;;
+      *) echo "fake systemctl: bad active mode" >&2; exit 2 ;;
+    esac ;;
+  "show --property=LoadState --property=UnitFileState --property=TriggeredBy voice-profile.service")
+    case "$(mode "$VP_TEST_UNIT" static)" in
+      static) printf 'LoadState=loaded\nUnitFileState=static\nTriggeredBy=\n' ;;
+      enabled) printf 'LoadState=loaded\nUnitFileState=enabled\nTriggeredBy=\n' ;;
+      timer) printf 'LoadState=loaded\nUnitFileState=static\nTriggeredBy=voice-profile.timer\n' ;;
+      missing) printf 'LoadState=not-found\nUnitFileState=\nTriggeredBy=\n' ;;
+      *) echo "fake systemctl: bad unit mode" >&2; exit 2 ;;
+    esac ;;
+  *) echo "fake systemctl: unexpected arguments: $*" >&2; exit 2 ;;
+esac

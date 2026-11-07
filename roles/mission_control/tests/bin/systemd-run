@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Fake systemd-run for tests/test_mission_control.yml (verify_egress.yml): records its arguments, one per line, in
+# $MC_TEST_RUN_ARGS and prints $MC_TEST_PROBE_OUT (a file holding a canned probe result). The real probe can't run
+# offline (it needs the cgroup IP filter); the canned results drive verify_egress_assert.yml.
+set -euo pipefail
+printf '%s\n' "$@" >"${MC_TEST_RUN_ARGS:?}"
+cat -- "${MC_TEST_PROBE_OUT:?}"

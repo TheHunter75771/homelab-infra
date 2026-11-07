@@ -1,0 +1,13 @@
+---
+# Role gpu_gate (docs/CONTRACTS.md §12.4, §12.9, §12.10): installs apps/gpu-gate on the gaming PC as
+# the reviewed systemd unit (User=ollama, no capabilities). Runs after role ollama_rocm, which
+# creates the ollama user and the firewalld rules for gpu_gate_port.
+# Host vars: gaming_pc_tailnet_ip (required), gaming_pc_tailnet_ip6 (bound too when set).
+gpu_gate_src_dir: "{{ role_path }}/../../apps/gpu-gate"
+gpu_gate_install_dir: /opt/gpu-gate
+# Owner of the installed code (the tests run unprivileged and override it).
+gpu_gate_owner: root
+gpu_gate_port: 11500
+gpu_gate_ollama_port: 11434
+# More config keys (see apps/gpu-gate/config.example.json), merged over the ones below.
+gpu_gate_config_extra: {}

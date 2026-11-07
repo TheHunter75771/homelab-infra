@@ -1,0 +1,27 @@
+---
+# The skills mount (§12.19) uses role ai_library_share's credentials file and tailnet wait unit. Read only
+# (stat, no checksum: the file's content is never read here), never written.
+- name: Preflight | the AI Library client's credentials and tailnet wait unit
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    get_checksum: false
+  loop:
+    - "{{ ai_stack_skills_credentials_file }}"
+    - "{{ ai_stack_skills_wait_unit_file }}"
+  register: ai_stack_skills_prereqs
+  check_mode: false
+
+- name: Preflight | the AI Library client is installed (credentials root 0600)
+  vars:
+    ai_stack_cred: "{{ ai_stack_skills_prereqs.results[0].stat }}"
+  ansible.builtin.assert:
+    that:
+      - ai_stack_cred.exists
+      - ai_stack_cred.isreg
+      - ai_stack_cred.pw_name == ai_stack_skills_credentials_owner
+      - ai_stack_cred.mode == '0600'
+      - ai_stack_skills_prereqs.results[1].stat.exists
+    fail_msg: >-
+      The skills mount needs role ai_library_share's client on this host: {{ ai_stack_skills_credentials_file }}
+      (root 0600) and {{ ai_stack_skills_wait_unit_file }}. Run playbooks/ai-library.yml first.
+    quiet: true

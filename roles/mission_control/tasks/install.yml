@@ -1,0 +1,50 @@
+---
+# The deployable files only: MC1's package (no tests, README or example config), MC2's public/ (only the web file
+# types it ships), and the CLI launcher. Each tree is root-owned (0755 dirs, 0644 files) and pruned of anything
+# else, so a file removed from the repo disappears from the host. No write or prune goes through a symlink.
+- name: Install | the code directories are real directories (before any write)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    mission_control_guard_dirs:
+      - "{{ mission_control_app_dir }}"
+      - "{{ mission_control_server_dir }}"
+      - "{{ mission_control_server_dir }}/mission_control"
+      - "{{ mission_control_web_dir }}"
+
+- name: Install | server directory
+  ansible.builtin.file:
+    path: "{{ mission_control_server_dir }}"
+    state: directory
+    owner: "{{ mission_control_owner }}"
+    group: "{{ mission_control_owner }}"
+    mode: "0755"
+
+- name: Install | server MC1 (the mission_control package)
+  ansible.builtin.include_tasks: tree.yml
+  vars:
+    mission_control_tree_src: "{{ mission_control_server_src }}"
+    mission_control_tree_dest: "{{ mission_control_server_dir }}/mission_control"
+    mission_control_tree_name: mission_control
+    mission_control_tree_include: '[.]py$'
+
+- name: Install | server dir holds only the package
+  ansible.builtin.include_tasks: prune_server.yml
+
+- name: Install | web MC2 (public/)
+  ansible.builtin.include_tasks: tree.yml
+  vars:
+    mission_control_tree_src: "{{ mission_control_web_src }}"
+    mission_control_tree_dest: "{{ mission_control_web_dir }}"
+    mission_control_tree_name: web
+    mission_control_tree_include: '[.]({{ mission_control_web_extensions | join("|") }})$'
+
+# §12.29: `mission-control briefing --send`. Runs the installed package with the pinned venv under -I -B.
+- name: Install | the mission-control CLI
+  ansible.builtin.template:
+    src: "{{ mission_control_role_dir }}/templates/mission-control.j2"
+    dest: "{{ mission_control_launcher }}"
+    owner: "{{ mission_control_owner }}"
+    group: "{{ mission_control_owner }}"
+    mode: "0755"
+    follow: false
+  notify: Restart mission-control

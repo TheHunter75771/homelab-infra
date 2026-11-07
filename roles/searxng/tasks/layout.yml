@@ -1,0 +1,69 @@
+---
+# The project directory, its config dir, and the secret (generated once). Tests run this file alone.
+# Never write through a symlink (Reviewer D, §12.15): each directory is absent or a real directory.
+- name: Layout | stat the directories without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: false
+  loop:
+    - "{{ searxng_dir }}"
+    - "{{ searxng_config_dir }}"
+  register: searxng_dir_stat
+
+- name: Layout | each directory is absent or a real directory (never a symlink)
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isdir and not item.stat.islnk)
+    fail_msg: "{{ item.item }} exists but isn't a real directory (a symlink or a file). Refusing to write through it; remove it by hand."
+    quiet: true
+  loop: "{{ searxng_dir_stat.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Layout | directories (root only; the container reads settings.yml through the 0755 config dir)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ searxng_owner }}"
+    group: "{{ searxng_owner }}"
+    mode: "0755"
+  loop:
+    - "{{ searxng_dir }}"
+    - "{{ searxng_config_dir }}"
+
+# SearXNG's secret_key (it signs its cookies and image-proxy URLs; the proxy is off). Generated once on the
+# host, never in the repo, the vault, a template or the output; docker compose reads env_file as root.
+# A .env that exists must be a regular file (checked BEFORE `creates`, which would accept a dangling symlink and
+# skip the creation); the creation itself opens with O_CREAT|O_EXCL|O_NOFOLLOW, so it can't follow or replace
+# anything (vars/main.yml searxng_secret_script). An existing key is never replaced (§12.16.2: never rotated).
+- name: Secret | stat .env without following links
+  ansible.builtin.stat:
+    path: "{{ searxng_env_file }}"
+    follow: false
+    get_checksum: false
+  register: searxng_env_stat
+
+- name: Secret | refuse a .env that is a link or not a file
+  ansible.builtin.assert:
+    that: not searxng_env_stat.stat.exists or (searxng_env_stat.stat.isreg and not searxng_env_stat.stat.islnk)
+    fail_msg: "{{ searxng_env_file }} must be a regular file (not a symlink). Remove it by hand; the next run makes a new key."
+    quiet: true
+
+- name: Secret | SEARXNG_SECRET is generated once (.env, root only)
+  ansible.builtin.command:
+    argv: [python3, -I, -c, "{{ searxng_secret_script }}", "{{ searxng_env_file }}"]
+    creates: "{{ searxng_env_file }}"
+  register: searxng_secret_created
+  no_log: true
+
+# Owner and mode only, never content. Skipped in a check run that would have created the file.
+- name: Secret | .env stays root 0600
+  ansible.builtin.file:
+    path: "{{ searxng_env_file }}"
+    state: file
+    owner: "{{ searxng_owner }}"
+    group: "{{ searxng_owner }}"
+    mode: "0600"
+    follow: false
+  when: not (ansible_check_mode and searxng_secret_created is changed)

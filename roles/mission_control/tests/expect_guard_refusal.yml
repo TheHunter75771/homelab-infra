@@ -1,0 +1,33 @@
+---
+# One symlink case for test_mission_control.yml: guard_case = {name, path}. The directory at path is moved aside
+# and replaced by a symlink to the victim dir; install.yml must be refused by the guard, the victim untouched.
+- name: Guard | replace the directory with a symlink to the victim for {{ guard_case.name }}
+  ansible.builtin.shell:
+    cmd: mv "{{ guard_case.path }}" "{{ guard_case.path }}.real" && ln -s "{{ test_tmp }}/victim" "{{ guard_case.path }}"
+  changed_when: true
+
+- name: Guard | install for {{ guard_case.name }}
+  block:
+    - name: Guard | install.yml for {{ guard_case.name }}
+      ansible.builtin.include_tasks: ../tasks/install.yml
+    - name: Not reached
+      ansible.builtin.set_fact:
+        test_guard_by: ""
+  rescue:
+    - name: Note which task refused
+      ansible.builtin.set_fact:
+        test_guard_by: "{{ ansible_failed_task.name }}"
+
+- name: Guard | restore for {{ guard_case.name }}
+  ansible.builtin.shell:
+    cmd: rm "{{ guard_case.path }}" && mv "{{ guard_case.path }}.real" "{{ guard_case.path }}" && ls -A "{{ test_tmp }}/victim"
+  register: test_victim
+  changed_when: true
+
+- name: Guard | refused by the guard, victim untouched for {{ guard_case.name }}
+  ansible.builtin.assert:
+    that:
+      - test_guard_by == 'Guard | each pruned directory is absent or a real directory (never a symlink)'
+      - test_victim.stdout_lines == ['keep']
+    fail_msg: "{{ guard_case.name }}: refused by '{{ test_guard_by }}'; victim holds {{ test_victim.stdout_lines }}"
+    quiet: true

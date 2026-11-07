@@ -1,0 +1,61 @@
+---
+# Role searxng (docs/CONTRACTS.md §12.16.2). Order: checks -> layout (symlink-guarded) -> the secret, once ->
+# settings.yml (validated by the image itself) -> compose.yaml (validated by docker compose) -> up --wait ->
+# read-only checks. A re-run is changed=0: the secret is created once, the files only change with their
+# inputs, and community.docker.docker_compose_v2 (state present) acts only on a real difference.
+
+- name: Preflight checks
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Layout and the secret
+  ansible.builtin.import_tasks: layout.yml
+
+# Validated with the pinned image itself: SearXNG's own loader merges it over the image's defaults and checks
+# the schema, then the formats, the engine list and the engines given `general` are asserted. Root inside a throwaway container with no
+# network, no capabilities and a read-only root, only so it can read Ansible's 0600 temp file.
+- name: Settings | settings.yml (no secret in it)
+  ansible.builtin.template:
+    src: settings.yml.j2
+    dest: "{{ searxng_config_dir }}/settings.yml"
+    owner: "{{ searxng_owner }}"
+    group: "{{ searxng_owner }}"
+    mode: "0644"
+    follow: false
+    validate: >-
+      docker run --rm --network none --user 0:0 --read-only --cap-drop ALL --security-opt no-new-privileges:true
+      --mount type=bind,source=%s,target=/etc/searxng/settings.yml,readonly
+      --env SEARXNG_SETTINGS_PATH=/etc/searxng/settings.yml --env PYTHONDONTWRITEBYTECODE=1
+      --env SXNG_EXPECT={{ searxng_engines | join(',') | replace(' ', '_') }}
+      --env SXNG_GENERAL={{ searxng_engine_categories.keys() | join(',') }}
+      --entrypoint /usr/local/searxng/.venv/bin/python {{ images.searxng }} -c
+      "import os, searx; s = searx.settings; n = {e['name'].replace(' ', '_') for e in s['engines']};
+      x = set(os.environ['SXNG_EXPECT'].split(','));
+      assert sorted(s['search']['formats']) == ['html', 'json'], s['search']['formats'];
+      assert not s['server']['limiter'] and not s['server']['public_instance'] and not s['server']['image_proxy'];
+      assert n and n <= x, sorted(n);
+      g = {e['name'] for e in s['engines'] if 'general' in (e.get('categories') or [])};
+      assert set(os.environ['SXNG_GENERAL'].split(',')) <= g, sorted(g)"
+
+- name: Compose | compose.yaml
+  ansible.builtin.template:
+    src: compose.yaml.j2
+    dest: "{{ searxng_compose_file }}"
+    owner: "{{ searxng_owner }}"
+    group: "{{ searxng_owner }}"
+    mode: "0644"
+    follow: false
+    validate: docker compose --project-directory {{ searxng_dir }} -f %s config --quiet
+
+# pull missing: the pinned digest is fetched once. wait: up only counts once the healthcheck passes.
+- name: Compose | SearXNG is up and healthy
+  community.docker.docker_compose_v2:
+    project_src: "{{ searxng_dir }}"
+    state: present
+    pull: missing
+    remove_orphans: true
+    wait: true
+    wait_timeout: "{{ searxng_compose_wait_timeout }}"
+
+- name: Read-only checks after start
+  ansible.builtin.include_tasks: verify.yml
+  when: not ansible_check_mode

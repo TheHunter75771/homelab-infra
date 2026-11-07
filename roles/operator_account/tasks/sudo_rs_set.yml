@@ -1,0 +1,142 @@
+---
+# Every setuid regular file sudo-rs ships (sudo, and su/sudoedit when they're separate files), after
+# resolving symlinks and diversions, that really belongs to sudo-rs. A new setuid file in a sudo-rs
+# update is picked up on the next run (README: residual risks, the upgrade window).
+
+# Present = any dpkg status except not-installed / config-files (half-installed, unpacked, ... still
+# have files on disk).
+- name: Is a sudo-rs package present (Debian)
+  ansible.builtin.command:
+    argv: [dpkg-query, -W, "-f=${db:Status-Status}", "{{ item }}"]
+  loop: "{{ operator_account_sudo_rs_packages }}"
+  register: operator_account_sudo_rs_dpkg
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: operator_account_os_family == 'Debian'
+
+- name: Is a sudo-rs package installed (RPM)
+  ansible.builtin.command:
+    argv: [rpm, -q, --quiet, "{{ item }}"]
+  loop: "{{ operator_account_sudo_rs_packages }}"
+  register: operator_account_sudo_rs_rpm
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: operator_account_os_family == 'RedHat'
+
+- name: Note the present sudo-rs packages
+  ansible.builtin.set_fact:
+    operator_account_sudo_rs_installed: >-
+      {{ (operator_account_sudo_rs_dpkg.results | selectattr('rc', 'defined') | selectattr('rc', 'equalto', 0)
+          | rejectattr('stdout', 'in', ['', 'not-installed', 'config-files']) | map(attribute='item') | list)
+         + (operator_account_sudo_rs_rpm.results | selectattr('rc', 'defined') | selectattr('rc', 'equalto', 0)
+          | map(attribute='item') | list) }}
+
+# Elsewhere than Debian the role can't list a package's files or keep a stat override; refuse instead.
+- name: The sudo-rs package is only allowed where the guard works (Debian family)
+  ansible.builtin.assert:
+    that:
+      - operator_account_sudo_rs_installed | length == 0 or operator_account_os_family == 'Debian'
+    fail_msg: "sudo-rs ({{ operator_account_sudo_rs_installed | join(', ') }}) is installed on a non-Debian host; sudo-rs has no I/O logging. Ask the Lead."
+    quiet: true
+
+- name: List the files of the sudo-rs packages
+  ansible.builtin.command:
+    argv: [dpkg-query, -L, "{{ item }}"]
+  loop: "{{ operator_account_sudo_rs_installed }}"
+  register: operator_account_sudo_rs_files
+  changed_when: false
+  check_mode: false
+
+# dpkg -L prints plain paths plus "diverted by <pkg> to: <path>" / "package diverts others to: <path>"
+# lines; a diverted file's real content lives at the "to:" path, so that path is guarded too.
+- name: Resolve the packaged and diverted-to paths
+  ansible.builtin.command:
+    argv: "{{ ['realpath', '-m', '--'] + paths }}"
+  vars:
+    lines: "{{ operator_account_sudo_rs_files.results | map(attribute='stdout_lines') | flatten }}"
+    paths: >-
+      {{ (lines | select('match', '^/.')
+          + lines | select('search', ' to: /') | map('regex_replace', '^.* to: (/.*)$', '\1')) | unique | list }}
+  register: operator_account_sudo_rs_real
+  changed_when: false
+  check_mode: false
+  when: operator_account_sudo_rs_installed | length > 0
+
+# find exits 1 when a listed path is missing (e.g. diverted away); its matches are still printed.
+- name: Find the setuid regular files among them
+  ansible.builtin.command:
+    argv: "{{ ['find'] + (operator_account_sudo_rs_real.stdout_lines | unique | sort) + ['-maxdepth', '0', '-type', 'f', '-perm', '-4000'] }}"
+  register: operator_account_sudo_rs_setuid
+  changed_when: false
+  failed_when: operator_account_sudo_rs_setuid.rc not in [0, 1]
+  check_mode: false
+  when: operator_account_sudo_rs_installed | length > 0
+
+- name: Note the setuid candidates (packaged, plus candidate paths that aren't classic sudo)
+  ansible.builtin.set_fact:
+    operator_account_sudo_rs_setuid_files: >-
+      {{ ((operator_account_sudo_rs_setuid.stdout_lines | default([])) + operator_account_sudo_rs_by_path) | unique | sort }}
+
+# A symlink in the package can point outside it (e.g. at another package's setuid binary); only files that
+# dpkg attributes to sudo-rs, or that identify as sudo-rs, are kept.
+- name: Which package owns each setuid candidate
+  ansible.builtin.command:
+    argv: [dpkg-query, -S, "{{ item }}"]
+  loop: "{{ operator_account_sudo_rs_setuid_files }}"
+  register: operator_account_sudo_rs_owner
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: operator_account_os_family == 'Debian'
+
+- name: What each setuid candidate says it is
+  ansible.builtin.command:
+    argv: ["{{ item }}", --version]
+  loop: "{{ operator_account_sudo_rs_setuid_files }}"
+  register: operator_account_sudo_rs_version
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Map each setuid candidate to its owning packages
+  ansible.builtin.set_fact:
+    # "pkg1, pkg2: /path" per line; "diversion by ..." lines are not ownership.
+    operator_account_rs_owner: >-
+      {%- set m = {} -%}
+      {%- for r in operator_account_sudo_rs_owner.results | default([]) if r.rc is defined and r.rc == 0 -%}
+      {%-   set owners = [] -%}
+      {%-   for l in r.stdout_lines if not l.startswith('diversion by') and ': ' in l -%}
+      {%-     set _ = owners.extend(l.split(': ')[0].split(', ')) -%}
+      {%-   endfor -%}
+      {%-   set _ = m.update({r.item: owners}) -%}
+      {%- endfor -%}
+      {{ m | to_json }}
+
+- name: Classify the setuid candidates
+  vars:
+    operator_account_rs_files: "{{ operator_account_sudo_rs_setuid_files }}"
+    operator_account_rs_always: "{{ operator_account_sudo_rs_by_path }}"
+    operator_account_rs_owner_map: "{{ operator_account_rs_owner | from_json }}"
+    # su-rs prints its banner on stderr.
+    operator_account_rs_version: >-
+      {{ dict(operator_account_sudo_rs_version.results | map(attribute='item')
+              | zip(operator_account_sudo_rs_version.results | map(attribute='stdout', default='')
+                    | zip(operator_account_sudo_rs_version.results | map(attribute='stderr', default=''))
+                    | map('join', '\n'))) }}
+  ansible.builtin.include_tasks: sudo_rs_classify.yml
+
+- name: The guarded set is sound
+  vars:
+    classic_real: "{{ (operator_account_sudo_real | from_json)[operator_account_sudo_classic] | default('') }}"
+  ansible.builtin.assert:
+    that:
+      - >-
+        operator_account_sudo_rs_installed | length == 0 or
+        operator_account_sudo_rs_setuid.stdout_lines | default([]) | intersect(operator_account_sudo_rs) | length > 0
+      - classic_real not in operator_account_sudo_rs
+    fail_msg: >-
+      sudo-rs is installed ({{ operator_account_sudo_rs_installed | join(', ') }}) but no setuid file of it was found,
+      or classic sudo ({{ classic_real }}) landed in the guarded set {{ operator_account_sudo_rs }}. Not guessing; ask the Lead.
+    quiet: true

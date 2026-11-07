@@ -1,0 +1,25 @@
+{
+  "user": "aictl",
+  "containers": ["ollama-cpu", "gpu-broker", "open-webui"],
+  "log_units": {
+    "docker": ["docker.service"],
+    "tailscaled": ["tailscaled.service"],
+    "chrony": ["chrony.service"],
+    "ai-control": ["ai-control.service"],
+    "aictl-helper": ["aictl-helper@*.service"],
+    "homelab-ai-stack": ["homelab-ai-stack*"]
+  },
+  "sudo_users": ["claude", "localai"],
+  "localai_user": "localai",
+  "timer_patterns": ["ai-*", "homelab-*"],
+  "sudo_exes": ["/usr/bin/sudo.ws", "/usr/lib/cargo/bin/sudo"],
+  "iolog_root": "/var/log/sudo-io",
+  "docker": "/usr/bin/docker",
+  "systemctl": "/usr/bin/systemctl",
+  "journalctl": "/usr/bin/journalctl",
+  "docker_unit": "docker.service",
+  "request_timeout": 5,
+  "send_timeout": 10,
+  "command_timeout": 8,
+  "read_timeout": 8
+}
