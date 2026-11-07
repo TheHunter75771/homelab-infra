@@ -26,9 +26,15 @@ test('parser: tags, attributes (quoted, unquoted, bare), entities, void and self
   assert.deepEqual(parse('<a <img src=x>'), ['<a ', ['img', { src: 'x' }]]); // a `<` outside quotes ends a tag
 });
 
-test('parser: comments are dropped, and an unclosed <!-- runs to the end of the input (as in a browser)', () => {
+test('parser: a comment ends at --> or --!>, at once for <!--> and <!--->, or at the end of the input (WHATWG)', () => {
+  const img = ['img', { src: 'x', onerror: 'alert(1)' }];
   assert.deepEqual(parse('a<!-- <img src=x> -->b'), ['a', 'b']);
-  assert.deepEqual(parse('a<!-- <img src=x onerror=alert(1)>'), ['a']);
+  assert.deepEqual(parse('a<!-- <b> --->c<!---->d'), ['a', 'c', 'd']);
+  // what follows an abruptly or incorrectly closed comment is markup again, as in a browser
+  assert.deepEqual(parse('<!--><img src=x onerror=alert(1)>'), [img]);
+  assert.deepEqual(parse('<!---><img src=x onerror=alert(1)>'), [img]);
+  assert.deepEqual(parse('<!-- x --!><img src=x onerror=alert(1)>'), [img]);
+  assert.deepEqual(parse('a<!-- <img src=x onerror=alert(1)>'), ['a']); // never closed
 });
 
 // [what, prefix, repeated part, repetitions, suffix]. The first is the CodeQL report; the rest are inputs that
@@ -41,6 +47,7 @@ const SHAPES = [
   ['a closing quote read as a name', '/>', " b='<a '", 50_000, '=z'],
   ['a quote inside an unquoted value', " x'", `x' b=' b="<a=z<a b=`, 20_000, ''],
   ['unclosed comments', '', '<!--', 50_000, ''],
+  ['comments closed at once', '', '<!--><!--->', 40_000, ''],
   ['a long run of whitespace', '<a', ' ', 200_000, 'x'],
 ];
 

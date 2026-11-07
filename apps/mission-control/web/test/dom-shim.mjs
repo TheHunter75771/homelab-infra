@@ -228,18 +228,28 @@ function serialize(n) {
 
 /**
  * A small, forgiving HTML parser: tags, attributes (quoted, unquoted, bare), text, comments, void elements.
- * Its patterns match in linear time on any input (dom-shim.test.mjs holds them to that):
+ * Its two patterns match in linear time on any input (dom-shim.test.mjs holds them to that):
  * - an attribute name holds no whitespace, quote, `<`, `>`, `/` or `=`, and an unquoted value no whitespace, quote,
  *   `<` or `>`. So each attribute reads only one way (the old pattern let `""` be a quoted or an unquoted value and
  *   backtracked exponentially: CodeQL js/redos), and a quote always opens or closes a quoted value, so a tag attempt
  *   that starts inside one can't fall into step with the attributes after it;
- * - a `<` outside a quoted value ends a tag attempt, and an unclosed `<!--` runs to the end of the input (as in a
- *   browser), so a failed attempt never rescans the rest of the input from every later `<`.
+ * - a `<` outside a quoted value ends a tag attempt, and an unclosed `<!--` runs to the end of the input, so a failed
+ *   attempt never rescans the rest of the input from every later `<`.
+ * A comment ends where the WHATWG tokenizer ends one: at `-->` or `--!>`, at once for `<!-->` and `<!--->`, or at
+ * the end of the input. The rest is not linear: an end tag walks up the open-element stack, so many unmatched end
+ * tags cost depth x count.
+ *
+ * It departs from a browser in the unsafe direction for the hostile tests: each of these is TEXT here, while a
+ * browser builds the element with its onerror, so hostile fixtures must not rely on them:
+ *   a quote inside a name or an unquoted value   <img x"y onerror=…>   <img src=x' onerror=…>
+ *   a `<` inside a name or an unquoted value     <img src=x<1 onerror=…>   (`<` + a letter starts a new tag instead)
+ *   no whitespace after a quoted value           <img src="x"onerror=…>
+ *   `/` between attributes (the old shim too)    <img/src=x onerror=…>
  */
 export function parseHTML(doc, html) {
   const root = new Fragment(doc);
   const stack = [root];
-  const re = /<\/?([a-zA-Z][\w-]*)((?:\s+[^\s"'<>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'<>]+))?)*)\s*\/?>|<!--[\s\S]*?(?:-->|$)/g;
+  const re = /<\/?([a-zA-Z][\w-]*)((?:\s+[^\s"'<>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'<>]+))?)*)\s*\/?>|<!--(?:-?>|[\s\S]*?(?:--!?>|$))/g;
   let last = 0;
   let m;
   while ((m = re.exec(html))) {

@@ -141,8 +141,14 @@ The preview server is for local testing only and is never deployed.
 | `dom.test.mjs` | pins `dom.js`'s attribute allowlists to an exact set; `h()` / `s()` refuse anything else |
 | `sw.test.mjs` | the worker in a fake scope: precache, shell served through a 502, snapshot saved on 200 only (JSON 5xx bodies and a 304 never replace it) |
 | `static.test.mjs` | banned APIs, CSP-clean `index.html`, no other origins, imports resolve, `sw.js` stamped, manifest |
-| `dom-shim.test.mjs` | what the shim's HTML parser builds (attributes quoted / unquoted / bare, entities, void and self-closing tags, comments), and that it stays linear: inputs that make a backtracking tag pattern blow up (CodeQL js/redos) parse in under 1 s each, in a child process that is killed if it hangs |
-| `dev-server.test.mjs` | the preview server on a free port: each `--scenario` name serves its fixture, and unknown names, `constructor` / `__proto__` / `toString` among them, serve the normal summary without crashing the server |
+| `dom-shim.test.mjs` | what the shim's HTML parser builds (attributes quoted / unquoted / bare, entities, void and self-closing tags, comments closed by `-->`, `--!>`, `<!-->` or `<!--->` with markup after them), and that its regexes stay linear: inputs that make a backtracking tag pattern blow up (CodeQL js/redos) parse in under 1 s each, in a child process that is killed if it hangs |
+| `dev-server.test.mjs` | the preview server on a free port, switched with `GET /__scenario?name=`: each scenario name serves its fixture, and unknown names, `constructor` / `__proto__` / `toString` among them, serve the normal summary without crashing the server |
 
 `test/dom-shim.mjs` is a small DOM with a real (small) HTML parser behind `innerHTML`. That parser is what lets
-the hostile test catch a regression. All fixtures are synthetic.
+the hostile test catch a regression. Its regexes are linear; the end-tag walk up the open-element stack is not
+(quadratic on many unmatched end tags). It is stricter than a browser in the unsafe direction: a quote or `<`
+inside an attribute name or unquoted value (`<img src=x' onerror=…>`, `<img x"y onerror=…>`,
+`<img src=x<1 onerror=…>`), a quoted value with no space before the next attribute (`<img src="x"onerror=…>`)
+and `/` between attributes (`<img/src=x onerror=…>`) parse as text here while a browser builds the element. So
+hostile fixtures must not rely on those forms (the list is in the comment above `parseHTML`). All fixtures are
+synthetic.
