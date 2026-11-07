@@ -2,7 +2,7 @@
 // Local preview only: serves public/ with the CSP the server should send, plus a fake API built from the
 // synthetic test fixtures. Never deployed. Usage:
 //   node scripts/dev-server.mjs [--port 8097] [--scenario normal|broken|down|hostile|slow]
-// Switch at runtime: GET /__scenario?name=down
+// Switch at runtime: GET /__scenario?name=down. --port 0 takes any free port (the log line says which).
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -26,12 +26,16 @@ function shift(v, k) {
   return v;
 }
 
+// The scenario name comes from the query string, so it's looked up in a Map: a name like "constructor" or
+// "__proto__" is just unknown (the plain cards), never an Object.prototype member that then gets called.
+const CARDS = new Map([['normal', fx.cardsWithApps], ['broken', fx.cardsBroken], ['hostile', () => fx.hostile(fx.cardsWithApps())], ['slow', fx.cards]]);
+
 function json(res, code, body) {
   res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Content-Security-Policy': CSP });
   res.end(JSON.stringify(body));
 }
 
-http
+const server = http
   .createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     const p = url.pathname;
@@ -47,7 +51,7 @@ http
         return json(res, 200, { ok: true });
       }
       if (p === '/api/cards') {
-        const c = { normal: fx.cardsWithApps, broken: fx.cardsBroken, hostile: () => fx.hostile(fx.cardsWithApps()), slow: fx.cards }[scenario] || fx.cards;
+        const c = CARDS.get(scenario) || fx.cards;
         return json(res, 200, shift(c()));
       }
       if (p === '/api/briefing') {
@@ -65,4 +69,4 @@ http
     res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache', 'Content-Security-Policy': CSP });
     fs.createReadStream(file).pipe(res);
   })
-  .listen(PORT, '127.0.0.1', () => console.log(`Mission Control preview on http://127.0.0.1:${PORT} (scenario ${scenario})`));
+  .listen(PORT, '127.0.0.1', () => console.log(`Mission Control preview on http://127.0.0.1:${server.address().port} (scenario ${scenario})`));

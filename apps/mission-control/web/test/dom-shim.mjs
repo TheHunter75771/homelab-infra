@@ -226,11 +226,20 @@ function serialize(n) {
   return `<${n.localName}${attrs}>${n.childNodes.map(serialize).join('')}${VOID.has(n.localName) ? '' : `</${n.localName}>`}`;
 }
 
-/** A small, forgiving HTML parser: tags, attributes (quoted, unquoted, bare), text, void elements. */
+/**
+ * A small, forgiving HTML parser: tags, attributes (quoted, unquoted, bare), text, comments, void elements.
+ * Its patterns match in linear time on any input (dom-shim.test.mjs holds them to that):
+ * - an attribute name holds no whitespace, quote, `<`, `>`, `/` or `=`, and an unquoted value no whitespace, quote,
+ *   `<` or `>`. So each attribute reads only one way (the old pattern let `""` be a quoted or an unquoted value and
+ *   backtracked exponentially: CodeQL js/redos), and a quote always opens or closes a quoted value, so a tag attempt
+ *   that starts inside one can't fall into step with the attributes after it;
+ * - a `<` outside a quoted value ends a tag attempt, and an unclosed `<!--` runs to the end of the input (as in a
+ *   browser), so a failed attempt never rescans the rest of the input from every later `<`.
+ */
 export function parseHTML(doc, html) {
   const root = new Fragment(doc);
   const stack = [root];
-  const re = /<\/?([a-zA-Z][\w-]*)((?:\s+[^\s=>/]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?)*)\s*\/?>|<!--[\s\S]*?-->/g;
+  const re = /<\/?([a-zA-Z][\w-]*)((?:\s+[^\s"'<>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'<>]+))?)*)\s*\/?>|<!--[\s\S]*?(?:-->|$)/g;
   let last = 0;
   let m;
   while ((m = re.exec(html))) {
@@ -246,7 +255,7 @@ export function parseHTML(doc, html) {
       continue;
     }
     const el = doc.createElement(name);
-    const attrRe = /([^\s=>/]+)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s>]+))?/g;
+    const attrRe = /([^\s"'<>/=]+)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s"'<>]+))?/g; // the same name and value as re
     let a;
     while ((a = attrRe.exec(m[2] || ''))) el.setAttribute(a[1], a[2] ? decode(a[2].replace(/^["']|["']$/g, '')) : '');
     stack[stack.length - 1].appendChild(el);

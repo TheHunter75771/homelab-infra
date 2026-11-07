@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Local preview only: serves public/ with the server's CSP and a fake API built from the synthetic test
 // fixtures. Never deployed. Usage: node scripts/dev-server.mjs [--port 8095] [--scenario normal|gaming|pcoff|down|hostile]
-// The scenario can also be switched at runtime: GET /__scenario?name=gaming
+// The scenario can also be switched at runtime: GET /__scenario?name=gaming. --port 0 takes any free port (the log
+// line says which).
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -17,6 +18,9 @@ const CSP = "default-src 'self'; img-src 'self' data:; style-src 'self'; script-
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json', '.json': 'application/json' };
 
 const TS_KEYS = new Set(['ts', 'time', 'since', 'modified', 'expires_at', 'next', 'last']);
+// The scenario name comes from the query string, so it's looked up in a Map: a name like "constructor" or
+// "__proto__" is just unknown (the normal summary), never an Object.prototype member that then gets called.
+const SUMMARIES = new Map([['normal', fx.normal], ['gaming', fx.gamingCpu], ['pcoff', fx.pcOff], ['down', fx.everythingDown], ['hostile', fx.hostileSummary]]);
 
 function scen() {
   const shift = (s) => {
@@ -32,7 +36,7 @@ function scen() {
   };
   const H = scenario === 'hostile';
   const wrap = (v) => shift(H ? fx.hostile(v) : v);
-  const summary = { normal: fx.normal, gaming: fx.gamingCpu, pcoff: fx.pcOff, down: fx.everythingDown, hostile: fx.hostileSummary }[scenario] || fx.normal;
+  const summary = SUMMARIES.get(scenario) || fx.normal;
   const hist = scenario === 'gaming' ? fx.history({ busy: 70, share: 0, available: false }) : fx.history();
   return {
     summary: shift(summary()),
@@ -53,7 +57,7 @@ function json(res, code, body) {
   res.end(JSON.stringify(body));
 }
 
-http
+const server = http
   .createServer((req, res) => {
     const url = new URL(req.url, 'http://localhost');
     const p = url.pathname;
@@ -91,4 +95,4 @@ http
     res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream', 'Content-Security-Policy': CSP });
     fs.createReadStream(file).pipe(res);
   })
-  .listen(PORT, '127.0.0.1', () => console.log(`AI Control preview on http://127.0.0.1:${PORT} (scenario ${scenario})`));
+  .listen(PORT, '127.0.0.1', () => console.log(`AI Control preview on http://127.0.0.1:${server.address().port} (scenario ${scenario})`));
