@@ -152,16 +152,16 @@ units = {
     "fragile.service": {"text": unit("fragile", f"User=svcf\nExecStart={CLEAN} serve"),
                         "props": props(True, pid=1201, user="svcf"), "fails_when_hardened": True},
 }
-PASSWD = {"svca": 2001, "svcb": 2002, "jobu": 2003, "busyu": 2004, "offu": 2005, "ollama": 2010, "svcf": 2011,
-          "dyn": 2012, "refu": 2013}
+UIDS = {"svca": 2001, "svcb": 2002, "jobu": 2003, "busyu": 2004, "offu": 2005, "ollama": 2010, "svcf": 2011,
+        "dyn": 2012, "refu": 2013}
 write(f"{host}/etc/passwd", "root:x:0:0:root:/root:/bin/bash\n"
-      + "".join(f"{n}:x:{u}:{u}::/nonexistent:/usr/sbin/nologin\n" for n, u in PASSWD.items()))
+      + "".join(f"{n}:x:{u}:{u}::/nonexistent:/usr/sbin/nologin\n" for n, u in UIDS.items()))
 write(f"{tmp}/www/api/ps", json.dumps({"models": []}) + "\n")
 for name, u in units.items():
     u["fragment"] = f"{UNIT_DIR}/{name}"
 
 state = {"root": host, "unit_dir": UNIT_DIR, "proc": f"{tmp}/proc", "units": units, "loaded": {}, "next_pid": 5000,
-         "passwd": PASSWD}
+         "uids": UIDS}
 with open(f"{tmp}/state.json", "w") as fh:
     json.dump(state, fh, indent=1, sort_keys=True)
 

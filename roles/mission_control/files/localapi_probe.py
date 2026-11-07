@@ -43,6 +43,7 @@ def dial(sock_path, sni, host, port):
         if " 101 " not in status + " ":
             return "refused %s" % (status.split(" ", 2)[1] if status.count(" ") else "none")
         ctx = ssl.create_default_context()
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # Python's own default since 3.10, made explicit
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         tls = ctx.wrap_socket(s, server_hostname=sni)

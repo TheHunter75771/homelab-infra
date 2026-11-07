@@ -76,6 +76,7 @@ def dial(path, host, port, sni):
             result["upstream"] = "unexpected bytes before TLS"
             return result
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # Python's own default since 3.10, made explicit
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         try:

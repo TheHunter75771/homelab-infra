@@ -12,7 +12,7 @@ $UH_TEST_LOG. It models what the role relies on:
     the LOADED drop-ins say PrivatePIDs=yes; a unit marked fails_when_hardened goes to failed instead when it would
     be hidden.
 The fake /proc lives at state["proc"]: <pid>/root/run/tailscale[/tailscaled.sock], <pid>/mountinfo, <pid>/status
-(Uid from the unit's User= through state["passwd"]; root when empty), <pid>/comm, <pid>/cgroup, <pid>/ns/pid.
+(Uid from the unit's User= through state["uids"]; root when empty), <pid>/comm, <pid>/cgroup, <pid>/ns/pid.
 """
 import json
 import os
@@ -105,7 +105,7 @@ def make_proc(st, pid, hidden, unit="", user="", private_pids=False, binds=None)
     the host's /run (tailscale/ hidden or with the socket, plus docker.sock); a list: a tmpfs with only those."""
     base = os.path.join(st["proc"], str(pid))
     os.makedirs(os.path.join(base, "ns"), exist_ok=True)
-    uid = 0 if user in ("", "root", "0") else st["passwd"][user]
+    uid = 0 if user in ("", "root", "0") else st["uids"][user]
     with open(os.path.join(base, "status"), "w") as fh:
         fh.write(f"Name:\tfake\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t{uid}\t{uid}\t{uid}\t{uid}\n")
     with open(os.path.join(base, "comm"), "w") as fh:

@@ -124,12 +124,12 @@ class TokenFileTests(unittest.TestCase):
             load_token(str(self.dir))
 
     def test_messages_never_hold_the_token(self):
-        secret = "S" * 40
-        for content, mode in ((secret, 0o644), (secret + " x", 0o640), (secret + "\x00", 0o640)):
+        canary = "S" * 40
+        for content, mode in ((canary, 0o644), (canary + " x", 0o640), (canary + "\x00", 0o640)):
             try:
                 load_token(self.write(content, mode, "g"))
             except ConfigError as exc:
-                self.assertNotIn(secret, str(exc))
+                self.assertNotIn(canary, str(exc))
             else:
                 self.fail("accepted")
 

@@ -2,6 +2,7 @@ import datetime as dt
 import hashlib
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -351,6 +352,21 @@ class CanonicalUrlTest(unittest.TestCase):
                     "https://example.com/<script>", 'https://example.com/"x"', "https://example.com/`x`"):
             with self.assertRaises(ValueError, msg=url):
                 canonical_url(url)
+
+    def test_url_pattern_is_linear(self):
+        """CodeQL py/polynomial-redos: the URL pattern stays linear on a long run of scheme characters even under
+        search(), which tries every start position (the unanchored pattern took seconds there). canonical_url caps a
+        URL at MAX_URL first; the pattern must not rely on that."""
+        run = "A" * 50_000
+        for probe in (run, run + ":", "A://" + run + "/\n", "https://" + run):
+            start = time.perf_counter()
+            checklist._URL_RE.search(probe)
+            checklist._URL_RE.fullmatch(probe)
+            self.assertLess(time.perf_counter() - start, 1.0, probe[:12])
+        self.assertIsNone(checklist._URL_RE.search(run))
+        self.assertEqual(checklist._URL_RE.fullmatch("A://" + run + "/x").group("authority", "rest"), (run, "/x"))
+        with self.assertRaisesRegex(ValueError, "absolute"):
+            canonical_url("A" * checklist.MAX_URL)
 
 
 # -------------------------------------------------------------------- hashing

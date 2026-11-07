@@ -38,6 +38,7 @@ if mode == "reset":
     conn.close()
     sys.exit(0)
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.minimum_version = ssl.TLSVersion.TLSv1_2
 ctx.load_cert_chain(cert, key)
 tls = ctx.wrap_socket(conn, server_side=True)
 req = b""

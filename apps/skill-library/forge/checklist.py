@@ -364,7 +364,9 @@ def url_span(url: str) -> str:
 
 # ------------------------------------------------------------------ URLs
 
-_URL_RE = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://(?P<authority>[^/?#]*)(?P<rest>.*)", re.DOTALL)
+# Linear whichever way it runs (CodeQL py/polynomial-redos): ^ pins the start, the scheme run stops at the first ':',
+# and rest is empty or begins at the first '/', '?' or '#', where the authority run must stop. Same groups as before.
+_URL_RE = re.compile(r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://(?P<authority>[^/?#]*)(?P<rest>(?:[/?#].*)?)", re.DOTALL)
 _HOSTNAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*")
 _IPV4_RE = re.compile(r"(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}")
 _UNSAFE_URL_CHARS = frozenset('<>"`{}|^')

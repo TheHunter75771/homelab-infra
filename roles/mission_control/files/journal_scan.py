@@ -24,20 +24,23 @@ def _read(path):
         return None
 
 
-def _walk(node, out):
+def _walk(node, labels, values):
     if isinstance(node, dict):
         for key, value in node.items():
             if key in ("endpoint", "auth", "p256dh") and isinstance(value, str) and len(value) >= 8:
-                out.append(("subscription " + key, value))
+                labels.append("subscription " + key)
+                values.append(value)
             else:
-                _walk(value, out)
+                _walk(value, labels, values)
     elif isinstance(node, list):
         for item in node:
-            _walk(item, out)
+            _walk(item, labels, values)
 
 
-def secrets(vapid_path, ha_path, subs_path):
-    found = []
+def collect(vapid_path, ha_path, subs_path):
+    """Two parallel lists: labels[i] names the kind of values[i]. Only the labels (and how many) are ever printed;
+    the values serve the membership test alone."""
+    labels, values = [], []
     vapid = _read(vapid_path)
     if vapid is not None:
         try:
@@ -45,20 +48,20 @@ def secrets(vapid_path, ha_path, subs_path):
         except (ValueError, AttributeError):
             priv = None
         if isinstance(priv, str) and priv:
-            found.append(("VAPID private key", priv))
             raw = base64.urlsafe_b64decode(priv + "=" * (-len(priv) % 4))
-            found.append(("VAPID private key (base64)", base64.b64encode(raw).decode().rstrip("=")))
-            found.append(("VAPID private key (hex)", raw.hex()))
+            labels += ["VAPID private key", "VAPID private key (base64)", "VAPID private key (hex)"]
+            values += [priv, base64.b64encode(raw).decode().rstrip("="), raw.hex()]
     ha = _read(ha_path)
     if ha is not None and ha.strip():
-        found.append(("Home Assistant token", ha.strip()))
+        labels.append("Home Assistant token")
+        values.append(ha.strip())
     subs = _read(subs_path)
     if subs is not None:
         try:
-            _walk(json.loads(subs), found)
+            _walk(json.loads(subs), labels, values)
         except ValueError:
             pass
-    return found
+    return labels, values
 
 
 def main(argv):
@@ -66,19 +69,19 @@ def main(argv):
         print(json.dumps({"error": "usage"}))
         return 2
     journalctl, vapid_path, ha_path, subs_path, units = argv[1], argv[2], argv[3], argv[4], argv[5:]
-    found = secrets(vapid_path, ha_path, subs_path)
+    labels, values = collect(vapid_path, ha_path, subs_path)
     cmd = [journalctl, "-q", "--no-pager", "-o", "cat"]
     for unit in units:
         cmd += ["-u", unit]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=120, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        print(json.dumps({"lines": 0, "secrets": len(found), "leaks": [], "error": exc.__class__.__name__}))
+        print(json.dumps({"lines": 0, "secrets": len(labels), "leaks": [], "error": exc.__class__.__name__}))
         return 0
     text = proc.stdout
-    leaks = sorted({label for label, value in found if value in text})
+    leaks = sorted({label for i, label in enumerate(labels) if values[i] in text})
     error = "" if proc.returncode == 0 else "journalctl exited %d" % proc.returncode
-    print(json.dumps({"lines": len(text.splitlines()), "secrets": len(found), "leaks": leaks, "error": error}))
+    print(json.dumps({"lines": len(text.splitlines()), "secrets": len(labels), "leaks": leaks, "error": error}))
     return 0
 
 

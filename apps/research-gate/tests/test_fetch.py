@@ -510,6 +510,7 @@ class TlsTests(unittest.TestCase):
         self.addCleanup(self.server.close)
         self.sni: list[str | None] = []
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.load_cert_chain(self.cert, self.key)
         ctx.sni_callback = lambda sock, name, c: self.sni.append(name)
         self.server.httpd.socket = ctx.wrap_socket(self.server.httpd.socket, server_side=True)
