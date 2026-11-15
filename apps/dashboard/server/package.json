@@ -16,6 +16,6 @@
     "test:time-travel": "node test/tools/time-travel.mjs"
   },
   "dependencies": {
-    "web-push": "3.6.7"
+    "web-push": "4.0.0"
   }
 }
