@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createECDH, randomBytes } from 'node:crypto';
-import webpush from 'web-push';
+import * as webpush from 'web-push';
 import { createLogger } from '../../src/log.js';
 
 export function tempDir(t) {

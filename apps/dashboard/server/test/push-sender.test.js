@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createDecipheriv, createECDH, hkdfSync, randomBytes } from 'node:crypto';
-import webpush from 'web-push';
+import * as webpush from 'web-push';
 import { buildPayload, GONE_STATUS, SEND_OPTIONS, sendToAll, TEST_MESSAGE } from '../src/push/sender.js';
 import { captureLogger, pushError, stubWebpush } from './helpers/push-fixtures.js';
 
