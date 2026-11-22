@@ -1,0 +1,88 @@
+---
+# Every read-only share (skills, writing) is read-only inside open-webui (docs/CONTRACTS.md §12.19,
+# §12.21). Read-only check, changed=0, skipped in check mode. What open-webui sees at a share's target is
+# the LAST (top) mount at that path in its /proc/1/mountinfo (tasks/verify_skills_assert.yml):
+#   - never rw, and always ro (Docker's bind of the local view, or the read-only CIFS mount);
+#   - while the host's mount for that share is active: the top mount has ro,nosuid,nodev,noexec, whether
+#     it is the only one (mounted before the container was created) or propagated on top (afterwards).
+# The container's table is read first and the host's states second; if they disagree (the reconcile timer
+# acted in between), all are read again once before failing.
+
+- name: Skills verify | open-webui's mount table, then the host's mount states
+  when: not ansible_check_mode
+  block:
+    - name: Skills verify | open-webui's mount table
+      community.docker.docker_container_exec:
+        container: open-webui
+        argv: [cat, /proc/1/mountinfo]
+      register: ai_stack_skills_mountinfo
+      changed_when: false
+
+    # systemd's view of each mount, never a stat of the path (a stale soft mount would hang one).
+    - name: Skills verify | is each share's mount active on the host?
+      ansible.builtin.command:
+        argv: [systemctl, is-active, --quiet, "{{ share.mount_unit }}"]
+      loop: "{{ ai_stack_ro_shares }}"
+      loop_control:
+        loop_var: share
+        label: "{{ share.name }}"
+      register: ai_stack_ro_share_now
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    # The assert is its own file so tests/test_render.yml runs it against sample mount tables.
+    - name: Skills verify | each share is read-only in open-webui
+      ansible.builtin.include_tasks: verify_skills_assert.yml
+      loop: "{{ ai_stack_ro_share_now.results }}"
+      loop_control:
+        loop_var: share_now
+        label: "{{ share_now.share.name }}"
+  rescue:
+    - name: Skills verify | read open-webui's mount table again (one retry)
+      community.docker.docker_container_exec:
+        container: open-webui
+        argv: [cat, /proc/1/mountinfo]
+      register: ai_stack_skills_mountinfo
+      changed_when: false
+
+    - name: Skills verify | read the host's mount states again (one retry)
+      ansible.builtin.command:
+        argv: [systemctl, is-active, --quiet, "{{ share.mount_unit }}"]
+      loop: "{{ ai_stack_ro_shares }}"
+      loop_control:
+        loop_var: share
+        label: "{{ share.name }}"
+      register: ai_stack_ro_share_now
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Skills verify | each share is read-only in open-webui (retry)
+      ansible.builtin.include_tasks: verify_skills_assert.yml
+      loop: "{{ ai_stack_ro_share_now.results }}"
+      loop_control:
+        loop_var: share_now
+        label: "{{ share_now.share.name }}"
+
+# §12.27 fail-safe: while the read-write share isn't mounted, its local directory (what open-webui's rw bind
+# shows then) is immutable, so nothing can write to ai-box's disk through it. Only while not mounted:
+# lsattr reads the local inode, never the share. Read-only.
+- name: Skills verify | read-write shares' local directories, while not mounted
+  ansible.builtin.command:
+    argv: [lsattr, -d, "{{ item.share.view }}"]
+  loop: "{{ ai_stack_ro_share_now.results | default([]) }}"
+  loop_control:
+    label: "{{ item.share.name }}"
+  register: ai_stack_rw_view_attrs
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - not ansible_check_mode
+    - item.share.mode | default('ro') == 'rw'
+    - item.rc != 0
+
+- name: Skills verify | they are immutable (nothing in open-webui can write to ai-box's disk there)
+  ansible.builtin.include_tasks: verify_rw_failsafe_assert.yml
+  when: not ansible_check_mode

@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Fake systemctl for tests/test_forge_api.yml. Two jobs:
+# 1. The verify's read-only queries (verify.yml):
+#    show --property=ActiveState --property=SubState --property=UnitFileState --property=Listen forge-api.socket
+#      knob `socket`: running (default: its service runs, as after service.yml) | listening (no service yet) |
+#      disabled | stopped | wronglisten | failedsub (active but SubState=failed: only the SubState check can refuse it)
+#    show --property=ActiveState --property=NRestarts --property=MainPID forge-api.service
+#      knob `active`: active (default) | restarting (NRestarts grows on every call) | failed | pidchange
+# 2. What ansible.builtin.systemd_service asks for (tasks/service.yml): `show <unit>`, `is-enabled <unit> [-l]`,
+#    enable/disable/start/stop/restart <unit>, emulating systemd on the unit files in $FA_TEST_UNITS: a unit
+#    without a file is not-found; `enable` needs an [Install] section (else "static", refused); starting a unit
+#    whose Requires= unit has no file fails, and pulls the required unit up; stopping a unit stops the units that
+#    require it. Every state change is appended to $FA_TEST_DIR/systemctl.log ("<action> <unit>").
+# Anything else is an error.
+set -euo pipefail
+: "${FA_TEST_DIR:?}" "${FA_TEST_UNITS:?}"
+. "$(dirname "$0")/_knob"
+st="$FA_TEST_DIR/units"; mkdir -p "$st"
+get() { if [ -f "$st/$1.$2" ]; then cat "$st/$1.$2"; else echo "$3"; fi; }
+put() { echo "$3" > "$st/$1.$2"; }
+log() { echo "$*" >> "$FA_TEST_DIR/systemctl.log"; }
+has_file() { [ -f "$FA_TEST_UNITS/$1" ]; }
+has_install() { grep -q '^\[Install\]$' "$FA_TEST_UNITS/$1"; }
+requires() { sed -n 's/^Requires=//p' "$FA_TEST_UNITS/$1" | tr ' ' '\n' | sed '/^$/d'; }
+file_state() { if ! has_install "$1"; then echo static; else get "$1" enabled disabled; fi; }
+case "$*" in
+  "show --property=ActiveState --property=SubState --property=UnitFileState --property=Listen forge-api.socket")
+    l="Listen=$(knob bind 172.20.0.1):879 (Stream)"
+    case "$(knob socket running)" in
+      running) printf 'ActiveState=active\nSubState=running\nUnitFileState=enabled\n%s\n' "$l" ;;
+      failedsub) printf 'ActiveState=active\nSubState=failed\nUnitFileState=enabled\n%s\n' "$l" ;;
+      listening) printf 'ActiveState=active\nSubState=listening\nUnitFileState=enabled\n%s\n' "$l" ;;
+      disabled) printf 'ActiveState=active\nSubState=listening\nUnitFileState=disabled\n%s\n' "$l" ;;
+      stopped) printf 'ActiveState=inactive\nSubState=dead\nUnitFileState=enabled\n%s\n' "$l" ;;
+      wronglisten) printf 'ActiveState=active\nSubState=listening\nUnitFileState=enabled\nListen=0.0.0.0:879 (Stream)\n' ;;
+      *) echo "fake systemctl: bad knob" >&2; exit 2 ;;
+    esac; exit 0 ;;
+  "show --property=ActiveState --property=NRestarts --property=MainPID forge-api.service")
+    n=$(( $(knob calls 0) + 1 )); echo "$n" > "$FA_TEST_DIR/calls"
+    case "$(knob active active)" in
+      active) printf 'ActiveState=active\nNRestarts=0\nMainPID=4321\n' ;;
+      restarting) printf 'ActiveState=active\nNRestarts=%s\nMainPID=4321\n' "$n" ;;
+      failed) printf 'ActiveState=failed\nNRestarts=5\nMainPID=0\n' ;;
+      pidchange) printf 'ActiveState=active\nNRestarts=0\nMainPID=%s\n' "$((4320 + n))" ;;
+      *) echo "fake systemctl: bad knob" >&2; exit 2 ;;
+    esac; exit 0 ;;
+esac
+[ "$#" -ge 2 ] || { echo "fake systemctl: unexpected arguments: $*" >&2; exit 2; }
+cmd="$1"; u="$2"
+case "$u" in forge-api.socket|forge-api.service) ;; *) echo "fake systemctl: unexpected unit: $*" >&2; exit 2 ;; esac
+case "$cmd" in
+  show)
+    [ "$#" -eq 2 ] || { echo "fake systemctl: unexpected arguments: $*" >&2; exit 2; }
+    if has_file "$u"; then
+      printf 'Id=%s\nLoadState=loaded\nActiveState=%s\nUnitFileState=%s\n' "$u" "$(get "$u" active inactive)" "$(file_state "$u")"
+    else
+      printf 'Id=%s\nLoadState=not-found\nActiveState=inactive\n' "$u"
+    fi ;;
+  is-enabled)
+    has_file "$u" || { echo "Failed to get unit file state for $u: No such file or directory" >&2; exit 1; }
+    s="$(file_state "$u")"; echo "$s"; [ "$s" = disabled ] && exit 1; exit 0 ;;
+  enable|disable)
+    [ "$#" -eq 2 ] || { echo "fake systemctl: unexpected arguments: $*" >&2; exit 2; }
+    has_file "$u" || { echo "Unit file $u does not exist." >&2; exit 1; }
+    has_install "$u" || { echo "The unit files have no installation config (WantedBy=, ...)." >&2; exit 1; }
+    put "$u" enabled "$( [ "$cmd" = enable ] && echo enabled || echo disabled )"; log "$cmd $u" ;;
+  start|restart)
+    [ "$#" -eq 2 ] || { echo "fake systemctl: unexpected arguments: $*" >&2; exit 2; }
+    has_file "$u" || { echo "Unit $u not found." >&2; exit 5; }
+    for r in $(requires "$u"); do
+      has_file "$r" || { echo "Unit $r not found (required by $u)." >&2; exit 5; }
+      put "$r" active active
+    done
+    put "$u" active active; log "$cmd $u" ;;
+  stop)
+    [ "$#" -eq 2 ] || { echo "fake systemctl: unexpected arguments: $*" >&2; exit 2; }
+    put "$u" active inactive; log "stop $u"
+    for o in forge-api.socket forge-api.service; do
+      if has_file "$o" && requires "$o" | grep -qx "$u"; then put "$o" active inactive; fi
+    done ;;
+  *) echo "fake systemctl: unexpected arguments: $*" >&2; exit 2 ;;
+esac

@@ -1,0 +1,39 @@
+---
+# One unit render for test_ai_host_agent.yml: case = {protect_proc, allowlist}. The unit keeps the
+# role's real paths; systemd-analyze only needs ExecStart's program (/usr/bin/python3) to exist.
+- name: Unit dir for this case
+  ansible.builtin.file:
+    path: "{{ test_tmp }}/unit-{{ case.protect_proc }}-{{ case.allowlist }}"
+    state: directory
+    mode: "0755"
+
+- name: Render the unit
+  ansible.builtin.template:
+    src: ai-host-agent.service.j2
+    dest: "{{ test_tmp }}/unit-{{ case.protect_proc }}-{{ case.allowlist }}/ai-host-agent.service"
+    mode: "0644"
+  vars:
+    ai_host_agent_protect_proc: "{{ case.protect_proc }}"
+    ai_host_agent_ip_allowlist: "{{ case.allowlist }}"
+
+- name: Systemd-analyze verify (any warning fails, except one about the machine's own unit files)
+  ansible.builtin.command:
+    argv: [systemd-analyze, verify, "{{ test_tmp }}/unit-{{ case.protect_proc }}-{{ case.allowlist }}/ai-host-agent.service"]
+  register: agent_test_verify
+  changed_when: false
+  # Any stderr line fails, except systemd's warnings about the machine's own unit files (ubuntu-latest's newer systemd:
+  # "<host unit dir>/x.service:26: Support for option CPUAccounting= has been removed") that name no unit verified here.
+  # Not caught: a host drop-in for a template or prefix of ours (foo@.service.d, foo-.service.d); a CI runner has none.
+  failed_when: >-
+    agent_test_verify.rc != 0
+    or agent_test_verify.stderr_lines | reject('match', '(/usr/lib|/lib|/etc|/run)/systemd/[^:]+:[0-9]+: ') | list | length > 0
+    or agent_test_verify.stderr_lines | select('search', agent_test_verify.cmd[2:] | map('basename') | map('regex_escape') | join('|'))
+    | list | length > 0
+
+- name: The knobs landed
+  ansible.builtin.command:
+    argv: [grep, -c, -E, '^(ProtectProc={{ case.protect_proc }}|IPAddressDeny=any)$',
+           "{{ test_tmp }}/unit-{{ case.protect_proc }}-{{ case.allowlist }}/ai-host-agent.service"]
+  register: agent_test_knobs
+  changed_when: false
+  failed_when: agent_test_knobs.stdout | int != (2 if case.allowlist else 1)

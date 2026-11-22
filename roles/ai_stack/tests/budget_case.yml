@@ -1,0 +1,29 @@
+---
+# One memory-budget case for test_render.yml: runs the role's real budget tasks (tasks/memory_budget.yml)
+# with a fake MemTotal and checks that they pass or fail as expected.
+- name: Budget case | run the role's budget tasks
+  block:
+    - name: Budget case | the role's tasks/memory_budget.yml
+      ansible.builtin.include_tasks: "{{ ai_stack_test_role }}/tasks/memory_budget.yml"
+      vars:
+        ai_stack_host_memtotal_mb: "{{ budget_memtotal }}"
+        ai_stack_mem_overcommit_mb: "{{ budget_overcommit }}"
+        ai_stack_mem_limits: "{{ ai_stack_test_default_limits | combine(budget_limits | default({})) }}"
+
+    - name: Budget case | it passed
+      ansible.builtin.set_fact:
+        budget_failed: false
+  rescue:
+    - name: Budget case | it failed
+      ansible.builtin.set_fact:
+        budget_failed: true
+  always:
+    - name: Budget case | outcome is as expected
+      ansible.builtin.assert:
+        that:
+          - budget_failed is defined
+          - (not budget_failed) == (budget_expect_ok | bool)
+        fail_msg: >-
+          memtotal {{ budget_memtotal }}, overcommit {{ budget_overcommit }}: expected
+          {{ 'pass' if budget_expect_ok | bool else 'fail' }}.
+        quiet: true

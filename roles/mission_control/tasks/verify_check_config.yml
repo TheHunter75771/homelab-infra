@@ -1,0 +1,26 @@
+---
+# MC1's own check (README "Run"): the config loads, the VAPID file is MC1's layout and readable, the state dir is
+# writable, the zone resolves. Run as mc in a transient unit with exactly the units' sandbox (mission_control_sandbox),
+# so it proves mc can read /etc/mission-control and write only the state dir under ProtectSystem=strict.
+- name: Verify | check-config as mc in the units' sandbox
+  ansible.builtin.command:
+    argv: >-
+      {{ ['systemd-run', '--wait', '--pipe', '--collect', '--quiet', '--service-type=oneshot',
+          '--description=mission-control check-config (Ansible verify)', '--property=TimeoutStartSec=60']
+         + (mission_control_sandbox | map('regex_replace', '^', '--property=') | list)
+         + ['--'] + mission_control_check_config_argv }}
+  register: mission_control_check_config
+  changed_when: false
+  failed_when: false
+
+- name: Verify | check-config passed
+  ansible.builtin.assert:
+    that:
+      - mission_control_check_config.rc == 0
+      - >-
+        mission_control_check_config.stdout is search('(?m)^mission-control: ' ~ (mission_control_config_file | regex_escape) ~ ' OK$')
+    fail_msg: >-
+      `mission-control check-config` as {{ mission_control_user }} exited {{ mission_control_check_config.rc }}:
+      {{ mission_control_check_config.stderr_lines[-5:] | default([]) | join(' / ') }}
+      {{ mission_control_check_config.stdout_lines[-5:] | default([]) | join(' / ') }}
+    quiet: true

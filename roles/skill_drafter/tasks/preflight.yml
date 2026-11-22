@@ -1,0 +1,225 @@
+---
+# Role inputs, checked before anything is written. With skill_drafter_enabled, also the library mount (the
+# root on its mount, the sentinel, 35-forge).
+- name: Preflight | the switch is a boolean
+  ansible.builtin.assert:
+    that: skill_drafter_enabled is boolean
+    fail_msg: skill_drafter_enabled must be true or false (got {{ skill_drafter_enabled }}).
+    quiet: true
+
+- name: Preflight | role docker's and role searxng's defaults (the container range, SearXNG's subnet)
+  ansible.builtin.include_vars:
+    file: "{{ item.file }}"
+    name: "{{ item.name }}"
+  loop:
+    - {file: "{{ skill_drafter_docker_defaults_file }}", name: skill_drafter_docker_role_defaults}
+    - {file: "{{ skill_drafter_searxng_defaults_file }}", name: skill_drafter_searxng_role_defaults}
+  loop_control:
+    label: "{{ item.name }}"
+
+# Plain absolute paths: they go into the unit (ReadWritePaths, RequiresMountsFor, Assert*) unescaped.
+- name: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+  ansible.builtin.assert:
+    that:
+      - item is string
+      - item is match('^/[A-Za-z0-9._/-]+$')
+      - item is not search('//|/$|(^|/)[.]{1,2}(/|$)')
+      - item is not match(skill_drafter_library_forbidden_re)
+    fail_msg: >-
+      {{ item }} must be an absolute path of plain characters (A-Z a-z 0-9 . _ - /), with no //, trailing /, . or ..
+      components, and not under {{ skill_drafter_library_forbidden_re }} (the unit's ProtectHome/ProtectSystem/PrivateTmp
+      hide or lock those).
+    quiet: true
+  loop:
+    - "{{ skill_drafter_library_root }}"
+    - "{{ skill_drafter_library_mount }}"
+
+- name: Preflight | the library root is the mount or below it
+  ansible.builtin.assert:
+    that:
+      - >-
+        skill_drafter_library_root == skill_drafter_library_mount
+        or skill_drafter_library_root.startswith(skill_drafter_library_mount ~ '/')
+    fail_msg: >-
+      skill_drafter_library_root ({{ skill_drafter_library_root }}) must be skill_drafter_library_mount
+      ({{ skill_drafter_library_mount }}) or inside it.
+    quiet: true
+
+- name: Preflight | the broker's address and the unit's settings
+  ansible.builtin.assert:
+    that:
+      - tailnet_ip | default('') | skill_drafter_ip_in(skill_drafter_tailnet_range)
+      - skill_drafter_broker_port | string is match('^[0-9]{1,5}$')
+      - skill_drafter_broker_port | int > 0 and skill_drafter_broker_port | int < 65536
+      - skill_drafter_dns_stub is match('^127([.][0-9]{1,3}){3}$')
+      - skill_drafter_library_cap is string and skill_drafter_library_cap is match('^[0-9]+([.][0-9]+)?[A-Za-z]{0,3}$')
+      - skill_drafter_memory_max | string is match('^[0-9]+[KMG]$')
+      - skill_drafter_tasks_max | string is match('^[0-9]{1,5}$')
+      - skill_drafter_restart_sec | string is match('^[0-9]+(ms|s|min)?$')
+      - skill_drafter_user is match('^[a-z_][a-z0-9_-]*$') and skill_drafter_user not in ['root', 'docker', skill_drafter_library_group]
+    fail_msg: >-
+      Check the skill_drafter inputs: tailnet_ip (ai-box's tailnet IPv4, inside {{ skill_drafter_tailnet_range }}), the
+      broker port (ai_stack_broker_port), the resolver stub (a 127.x address), the library cap like 500GB or 750GiB
+      (no spaces: it goes into the unit), MemoryMax / TasksMax / RestartSec, and a plain account name.
+    quiet: true
+
+- name: Preflight | the IP filter (deny any; allow the broker and the resolver stub only)
+  vars:
+    skill_drafter_ip_issues: "{{ skill_drafter_ip_allow | skill_drafter_ip_problems(skill_drafter_ip_deny) }}"
+  ansible.builtin.assert:
+    that:
+      - skill_drafter_broker_ranges | length > 0
+      - skill_drafter_ip_issues | length == 0
+    fail_msg: >-
+      IP filter: allow {{ skill_drafter_ip_allow }}, deny {{ skill_drafter_ip_deny }}, broker ranges
+      {{ skill_drafter_broker_ranges }}: {{ skill_drafter_ip_issues | join('; ') }}
+    quiet: true
+
+# Reviewer H (H5-1, as finance_digest): SearXNG forwards query strings to public search engines, so no broker
+# range may reach its subnet, whether the range is the computed default or an inventory override.
+- name: Preflight | no broker range reaches SearXNG's subnet
+  vars:
+    skill_drafter_searxng_hits: "{{ skill_drafter_broker_ranges | skill_drafter_overlapping(skill_drafter_searxng_subnet) }}"
+  ansible.builtin.assert:
+    that:
+      - skill_drafter_searxng_subnet | length > 0
+      - skill_drafter_searxng_hits | length == 0
+    fail_msg: >-
+      skill_drafter_broker_ranges {{ skill_drafter_searxng_hits }} overlap SearXNG's subnet
+      '{{ skill_drafter_searxng_subnet }}' (searxng_subnet, or role searxng's default): the drafter must never reach
+      SearXNG, which forwards queries to the internet. Narrow the ranges around it.
+    quiet: true
+
+- name: Preflight | the app sources exist on the controller (modules K2, F and L)
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ skill_drafter_launcher_src }}"
+    - "{{ skill_drafter_pkg_src }}/__init__.py"
+    - "{{ skill_drafter_pkg_src }}/config.py"
+    - "{{ skill_drafter_library_src_dir }}/forge/__init__.py"
+    - "{{ skill_drafter_library_src_dir }}/library/__init__.py"
+  register: skill_drafter_src_stat
+  delegate_to: localhost
+  become: false
+
+- name: Preflight | require the app sources
+  ansible.builtin.assert:
+    that: skill_drafter_src_stat.results | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      Missing on the controller:
+      {{ skill_drafter_src_stat.results | rejectattr('stat.exists') | map(attribute='item') | join(', ') }}
+    quiet: true
+
+# K2's own loader and the library's own size parser, on the controller, before anything is written (the host
+# re-checks config.json with the installed loader at `validate:`).
+- name: Preflight | K2's loader and the library's size parser on the role's config and cap
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -I
+      - -B
+      - -c
+      - |
+        import json, sys
+        sys.path[:0] = [sys.argv[1], sys.argv[2]]
+        from skill_drafter.config import validate
+        from library.naming import parse_size
+        validate(json.loads(sys.argv[3]))
+        parse_size(sys.argv[4])
+      - "{{ skill_drafter_src_dir }}"
+      - "{{ skill_drafter_library_src_dir }}"
+      - "{{ skill_drafter_config | to_json }}"
+      - "{{ skill_drafter_library_cap }}"
+  register: skill_drafter_cfg_check
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  delegate_to: localhost
+  become: false
+
+- name: Preflight | K2's loader accepts the config, and the cap parses
+  ansible.builtin.assert:
+    that: skill_drafter_cfg_check.rc == 0
+    fail_msg: >-
+      The drafter config or the library cap ({{ skill_drafter_library_cap }}) is refused:
+      {{ skill_drafter_cfg_check.stderr_lines | last | default('') }}
+    quiet: true
+
+# The account the library mount maps to (roles ai_library_share and research_gate create it). This role only
+# joins its group, it never creates it.
+- name: Preflight | the library's group exists
+  ansible.builtin.getent:
+    database: group
+    key: "{{ skill_drafter_library_group }}"
+    fail_key: false
+
+- name: Preflight | require the library's group
+  ansible.builtin.assert:
+    that: (ansible_facts.getent_group | default({})).get(skill_drafter_library_group) is not none
+    fail_msg: >-
+      Group {{ skill_drafter_library_group }} doesn't exist: converge the AI Library share first
+      (playbooks/ai-library.yml), which creates it with the mount.
+    quiet: true
+
+# --- Enabled only: the library must really be mounted (§12.11 mount safety). ---
+- name: Preflight | the library mount (enabled only)
+  when: skill_drafter_enabled | bool
+  block:
+    - name: Preflight | stat the library root without following links
+      ansible.builtin.stat:
+        path: "{{ skill_drafter_library_root }}"
+        follow: false
+        get_checksum: false
+      register: skill_drafter_root_stat
+
+    - name: Preflight | the library root is a real directory
+      ansible.builtin.assert:
+        that:
+          - skill_drafter_root_stat.stat.exists
+          - skill_drafter_root_stat.stat.isdir and not skill_drafter_root_stat.stat.islnk
+        fail_msg: "{{ skill_drafter_library_root }} is missing, or is a symlink or a file. Is the AI Library share mounted?"
+        quiet: true
+
+    - name: Preflight | which mount holds the library root
+      ansible.builtin.command:
+        argv: [findmnt, --noheadings, --first-only, --output, TARGET, --target, "{{ skill_drafter_library_root }}"]
+      register: skill_drafter_findmnt
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    # An unmounted share leaves an empty directory on the parent filesystem: findmnt then names that parent.
+    - name: Preflight | the library root is on the declared mount (not the disk under an empty mount point)
+      ansible.builtin.assert:
+        that:
+          - skill_drafter_findmnt.rc == 0
+          - skill_drafter_findmnt.stdout | trim == skill_drafter_library_mount
+          - skill_drafter_library_mount != '/'
+        fail_msg: >-
+          {{ skill_drafter_library_root }} is on mount '{{ skill_drafter_findmnt.stdout | default('') | trim }}', not on
+          skill_drafter_library_mount ({{ skill_drafter_library_mount }}). Is the AI Library share mounted?
+        quiet: true
+
+    - name: Preflight | stat the sentinel and the forge folder without following links
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+        get_checksum: false
+      loop:
+        - "{{ skill_drafter_sentinel }}"
+        - "{{ skill_drafter_forge_dir }}"
+      register: skill_drafter_lib_stat
+
+    - name: Preflight | the sentinel is a regular file and 35-forge a real folder (an initialized library)
+      vars:
+        sentinel: "{{ skill_drafter_lib_stat.results[0].stat }}"
+        forge: "{{ skill_drafter_lib_stat.results[1].stat }}"
+      ansible.builtin.assert:
+        that:
+          - sentinel.exists and sentinel.isreg and not sentinel.islnk
+          - forge.exists and forge.isdir and not forge.islnk
+        fail_msg: >-
+          {{ skill_drafter_sentinel }} must be a regular file (§12.11) and {{ skill_drafter_forge_dir }} a real folder
+          (ReadWritePaths needs it; python3 -m library --root ... init creates it). This isn't the mounted AI Library.
+        quiet: true

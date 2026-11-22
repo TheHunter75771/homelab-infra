@@ -1,0 +1,14 @@
+---
+- name: Units | backup service and timer
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ ai_library_share_unit_dir }}/{{ item.dest }}"
+    owner: "{{ ai_library_share_owner }}"
+    group: "{{ ai_library_share_owner }}"
+    mode: "0644"
+  loop:
+    - {src: ai-library-backup.service.j2, dest: "{{ ai_library_share_backup_service }}"}
+    - {src: ai-library-backup.timer.j2, dest: "{{ ai_library_share_backup_timer }}"}
+  loop_control:
+    label: "{{ item.dest }}"
+  notify: Reload systemd for ai-library-share

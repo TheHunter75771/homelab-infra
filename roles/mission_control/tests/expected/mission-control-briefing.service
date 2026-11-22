@@ -1,0 +1,51 @@
+# Ansible managed
+# Mission Control morning briefing (docs/CONTRACTS.md §12.29): composes today's briefing deterministically and sends
+# it as a web push. Started by mission-control-briefing.timer only (no [Install]). Same user and sandbox as the
+# server (vars/main.yml mission_control_sandbox).
+[Unit]
+Description=Mission Control morning briefing (web push)
+Documentation=file:///opt/mission-control/server
+After=network-online.target mission-control.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mission-control --config /etc/mission-control/config.json briefing --send
+TimeoutStartSec=5min
+SyslogIdentifier=mission-control-briefing
+MemoryMax=128M
+TasksMax=32
+User=mc
+Group=mc
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+TemporaryFileSystem=/run:ro
+BindReadOnlyPaths=/run/dbus/system_bus_socket /run/systemd/system /run/systemd/resolve
+ReadWritePaths=/var/lib/mission-control
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+IPAddressDeny=127.0.0.0/8 ::1/128 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 fe80::/10 fc00::/7 0.0.0.0/8 192.0.0.0/24 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4 ::/128 ::ffff:0:0/96 64:ff9b::/96 64:ff9b:1::/48 ff00::/8
+IPAddressAllow=127.0.0.1/32 127.0.0.53/32 100.64.0.30/32 172.20.0.4/32 100.64.0.40/32

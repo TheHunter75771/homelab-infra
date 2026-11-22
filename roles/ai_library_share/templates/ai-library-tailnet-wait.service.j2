@@ -1,0 +1,17 @@
+# {{ ansible_managed }}
+# Role ai_library_share (docs/CONTRACTS.md §12.17): waits for this host's tailnet address(es) so smbd
+# can bind them (gaming PC) and the CIFS mount can reach the PC (ai-box). Pulled in by smb.service's
+# drop-in or by the mount unit; never enabled on its own.
+[Unit]
+Description=Wait for the tailnet address (AI Library share)
+After=tailscaled.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh {{ ai_library_share_lib_dir }}/tailnet-wait.sh {{ ai_library_share_tailnet_wait_timeout | int }} {{ ai_library_share_wait_ips | join(' ') }}
+TimeoutStartSec={{ ai_library_share_tailnet_wait_timeout | int + 15 }}
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes

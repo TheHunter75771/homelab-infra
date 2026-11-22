@@ -1,0 +1,47 @@
+---
+# One bad key file for test_mission_control.yml: vapid_case = {name, content | symlink, task}. vapid.yml runs on a
+# separate path; it must be refused by the expected check and the bad file must be left exactly as it was.
+- name: VAPID | plant the bad file for {{ vapid_case.name }}
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -euo pipefail
+      p="{{ test_tmp }}/etc/mission-control/bad-vapid.json"
+      rm -f "$p"
+      {% if vapid_case.symlink | default(false) %}
+      ln -s "{{ test_tmp }}/etc/mission-control/vapid.json" "$p"
+      {% else %}
+      printf '%s' '{{ vapid_case.content }}' > "$p"
+      {% endif %}
+      sha256sum "$p" | cut -d' ' -f1
+  register: test_bad_before
+  changed_when: true
+
+- name: VAPID | run for {{ vapid_case.name }}
+  block:
+    - name: VAPID | vapid.yml for {{ vapid_case.name }}
+      ansible.builtin.include_tasks: ../tasks/vapid.yml
+      vars:
+        mission_control_vapid_file: "{{ test_tmp }}/etc/mission-control/bad-vapid.json"
+    - name: Not reached
+      ansible.builtin.set_fact:
+        test_vapid_by: ""
+  rescue:
+    - name: Note which task refused
+      ansible.builtin.set_fact:
+        test_vapid_by: "{{ ansible_failed_task.name }}"
+
+- name: VAPID | the file afterwards for {{ vapid_case.name }}
+  ansible.builtin.shell:
+    cmd: set -o pipefail; sha256sum "{{ test_tmp }}/etc/mission-control/bad-vapid.json" | cut -d' ' -f1
+    executable: /bin/bash
+  register: test_bad_after
+  changed_when: false
+
+- name: VAPID | refused by the expected check, nothing replaced for {{ vapid_case.name }}
+  ansible.builtin.assert:
+    that:
+      - test_vapid_by == vapid_case.task
+      - test_bad_after.stdout == test_bad_before.stdout
+    fail_msg: "{{ vapid_case.name }}: refused by '{{ test_vapid_by }}', expected '{{ vapid_case.task }}'"
+    quiet: true

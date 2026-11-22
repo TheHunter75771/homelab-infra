@@ -1,0 +1,35 @@
+---
+# Run by tests/run.sh with --check on a fresh fixture: the reads and the preflight run, the writes only show
+# their diff, nothing is reloaded or restarted, and the live verify is skipped. run.sh then checks that nothing
+# was written and that the fake systemctl saw no daemon-reload or try-restart.
+- name: Role unit_hardening in check mode
+  hosts: localhost
+  gather_facts: false
+  vars:
+    ansible_managed: Ansible managed
+    test_tmp: ""
+  tasks:
+    - name: Point the role at the scratch world and the fakes
+      ansible.builtin.set_fact:
+        unit_hardening_root: "{{ test_tmp }}/host"
+        unit_hardening_systemctl: "{{ playbook_dir }}/bin/systemctl"
+        unit_hardening_python: "{{ ansible_playbook_python }}"
+        unit_hardening_proc: "{{ test_tmp }}/proc"
+        unit_hardening_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        unit_hardening_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
+
+    - name: The role, in check mode
+      ansible.builtin.include_role:
+        name: unit_hardening
+      vars:
+        unit_hardening_units:
+          - {unit: svc-a.service, restart: true}
+          - {unit: job.service, restart: false}
+        unit_hardening_verify_settle: 0
+
+    - name: The preflight ran for real
+      ansible.builtin.assert:
+        that:
+          - uh_scan['svc-a.service'].scanned >= 4
+          - uh_dropins is changed
+        quiet: true

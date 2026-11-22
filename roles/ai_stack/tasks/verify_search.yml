@@ -1,0 +1,15 @@
+---
+# Document search settings (docs/CONTRACTS.md §12.22). Read-only, changed=0, skipped in check mode. No exec
+# of its own (Reviewer I R10-3): the settings exec in tasks/verify_extraction.yml already read these keys
+# (ai_stack_webui_settings_expected includes them when ai_embed_model is set). This always reports, and
+# fails the play only with ai_stack_verify_search_settings (false until the admin has saved the settings in the
+# Admin UI; README, "Search settings"). Not checked at all without ai_embed_model.
+
+# The report and check are their own file so tests/test_render.yml runs them against sample checker output.
+- name: Search | report and check the effective search settings
+  ansible.builtin.include_tasks: verify_search_assert.yml
+  vars:
+    ai_stack_webui_search: "{{ ai_stack_webui_extraction }}"
+  when:
+    - not ansible_check_mode
+    - ai_embed_model is defined

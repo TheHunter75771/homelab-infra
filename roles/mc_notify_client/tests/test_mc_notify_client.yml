@@ -1,0 +1,498 @@
+---
+# Offline test for role mc_notify_client (no root, no network, nothing applied to this machine, nothing sent). Run it
+# through tests/run.sh, which plants a canary token and greps the -vvv --diff output for it.
+#   roles/mc_notify_client/tests/run.sh
+# Play 1 (host sys): system scope into a scratch dir (owner overridden to the test user): the derived URL; 32
+#   preflight refusals; the config tasks' order; tasks/main.yml twice (idempotent: same checksums and mtimes); modes
+#   and contents; a drifted token file (mode and content) put back; the installed CLI's own loaders accept what the
+#   role wrote; a symlinked config directory is refused with nothing written through it.
+# Play 2 (host usr): user scope with a scratch home: the user paths, owner and group omitted, the user unit.
+# Play 3 (host render): both units with the role's REAL paths equal tests/expected/ literally; systemd-analyze verify.
+- name: Role mc_notify_client, system scope, in a scratch dir
+  hosts: sys
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  vars: &test_vars
+    ansible_managed: Ansible managed
+    # run.sh passes its scratch dir.
+    test_tmp: ""
+    test_me: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+    test_my_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
+    # A host on the test tailnet (the URL's default comes from it).
+    tailnet_fqdn: backup-box.example.ts.net
+    # run.sh's canary (random per run). The role's defaults (vars_files) outrank play vars, so the token is passed
+    # to each include as a task var; never through set_fact (that would print it).
+    test_token: "MCN-{{ lookup('ansible.builtin.file', test_tmp ~ '/token-canary') }}"
+    # Loads the installed CLI as a module and runs its own config and token checks on what the role wrote; prints
+    # "ok" or what's wrong, never the token. Nothing is sent.
+    test_cli_check: |
+      import importlib.machinery, importlib.util, sys
+      loader = importlib.machinery.SourceFileLoader("mc_notify", sys.argv[1])
+      spec = importlib.util.spec_from_loader("mc_notify", loader)
+      mc = importlib.util.module_from_spec(spec)
+      loader.exec_module(mc)
+      try:
+          cfg = mc.load_config(sys.argv[2])
+          token = mc.load_token(cfg["token_file"])
+      except mc.UsageError as exc:
+          print("refused: " + str(exc))
+          sys.exit(0)
+      want = "MCN-" + open(sys.argv[3]).read()
+      print("ok" if token == want and cfg["token_file"] == sys.argv[4] and cfg["url"] == sys.argv[5] else "mismatch")
+  handlers:
+    - name: Reload systemd for mc-notify
+      ansible.builtin.debug:
+        msg: reload requested
+  tasks:
+    - name: Run.sh passed a scratch dir
+      ansible.builtin.assert:
+        that: test_tmp is abs
+        fail_msg: Run this through roles/mc_notify_client/tests/run.sh.
+        quiet: true
+
+    - name: The default URL is ai-box on this host's tailnet, Mission Control's :8443
+      ansible.builtin.assert:
+        that: mc_notify_client_url == 'https://ai-box.example.ts.net:8443/api/notify'
+        fail_msg: "{{ mc_notify_client_url }}"
+        quiet: true
+
+    - name: Point the role at the scratch dir
+      ansible.builtin.set_fact:
+        mc_notify_client_role_dir: "{{ playbook_dir | dirname }}"
+        mc_notify_client_cli: "{{ test_tmp }}/sys/usr/local/bin/mc-notify"
+        mc_notify_client_config_dir: "{{ test_tmp }}/sys/etc/mc-notify"
+        mc_notify_client_unit_dir: "{{ test_tmp }}/sys/etc/systemd/system"
+        mc_notify_client_owner: "{{ test_me }}"
+        mc_notify_client_group: "{{ test_my_group }}"
+
+    - name: Scratch dirs (the system scope expects /usr/local/bin and /etc/systemd/system)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ test_tmp }}/sys/usr/local/bin"
+        - "{{ test_tmp }}/sys/etc/systemd/system"
+        - "{{ test_tmp }}/refused"
+
+    - name: Preflight refusals
+      ansible.builtin.include_tasks: expect_refusal.yml
+      loop:
+        - {name: scope bogus, vars: {mc_notify_client_scope: both}, task: "Preflight | role inputs"}
+        - {name: url over http, vars: {mc_notify_client_url: "http://ai-box.example.ts.net:8443/api/notify"}, task: "Preflight | role inputs"}
+        - {name: url off the tailnet, vars: {mc_notify_client_url: "https://ai-box.example.com:8443/api/notify"}, task: "Preflight | role inputs"}
+        - {name: url a lookalike, vars: {mc_notify_client_url: "https://ai-box.ts.net.example.com/api/notify"}, task: "Preflight | role inputs"}
+        - {name: url another route, vars: {mc_notify_client_url: "https://ai-box.example.ts.net:8443/api/cards"}, task: "Preflight | role inputs"}
+        - {name: url the origin only, vars: {mc_notify_client_url: "https://ai-box.example.ts.net:8443/"}, task: "Preflight | role inputs"}
+        - {name: url with user info, vars: {mc_notify_client_url: "https://u@ai-box.example.ts.net:8443/api/notify"}, task: "Preflight | role inputs"}
+        - {name: url with a query, vars: {mc_notify_client_url: "https://ai-box.example.ts.net:8443/api/notify?x=1"}, task: "Preflight | role inputs"}
+        - {name: url with a fragment, vars: {mc_notify_client_url: "https://ai-box.example.ts.net:8443/api/notify#x"}, task: "Preflight | role inputs"}
+        - {name: url port 99999, vars: {mc_notify_client_url: "https://ai-box.example.ts.net:99999/api/notify"}, task: "Preflight | role inputs"}
+        - {name: url port 0, vars: {mc_notify_client_url: "https://ai-box.example.ts.net:0/api/notify"}, task: "Preflight | role inputs"}
+        - {name: url in capitals, vars: {mc_notify_client_url: "https://AI-BOX.example.ts.net:8443/api/notify"}, task: "Preflight | role inputs"}
+        - name: url as the default renders it on a host without tailnet_fqdn
+          vars: {mc_notify_client_url: "https://ai-box.:8443/api/notify"}
+          task: "Preflight | role inputs"
+        - {name: url not a string, vars: {mc_notify_client_url: 8443}, task: "Preflight | role inputs"}
+        - {name: user scope without a home (no facts), vars: {mc_notify_client_scope: user, mc_notify_client_home: ""}, task: "Preflight | role inputs"}
+        - {name: user scope with home /, vars: {mc_notify_client_scope: user, mc_notify_client_home: /}, task: "Preflight | role inputs"}
+        - {name: user scope with a relative home, vars: {mc_notify_client_scope: user, mc_notify_client_home: home/noah}, task: "Preflight | role inputs"}
+        - {name: user scope with .. in the home, vars: {mc_notify_client_scope: user, mc_notify_client_home: /home/../root}, task: "Preflight | role inputs"}
+        - {name: user scope with a trailing slash, vars: {mc_notify_client_scope: user, mc_notify_client_home: /home/noah/}, task: "Preflight | role inputs"}
+        - {name: user scope with // in the home, vars: {mc_notify_client_scope: user, mc_notify_client_home: /home//noah}, task: "Preflight | role inputs"}
+        - {name: cli path with a space, vars: {mc_notify_client_cli: "/usr/local/bin/mc notify"}, task: "Preflight | role inputs"}
+        - {name: cli path relative, vars: {mc_notify_client_cli: "bin/mc-notify"}, task: "Preflight | role inputs"}
+        - {name: config dir with .., vars: {mc_notify_client_config_dir: "/etc/../tmp/mc-notify"}, task: "Preflight | role inputs"}
+        - {name: unit dir with //, vars: {mc_notify_client_unit_dir: "/etc//systemd/system"}, task: "Preflight | role inputs"}
+        - {name: token empty, vars: {mc_notify_client_token: ""}, task: "Preflight | the token is set and is 32-256 visible ASCII characters"}
+        - {name: token null, vars: {mc_notify_client_token: null}, task: "Preflight | the token is set and is 32-256 visible ASCII characters"}
+        - name: token of 31 characters
+          vars: {mc_notify_client_token: "{{ 'a' * 31 }}"}
+          task: "Preflight | the token is set and is 32-256 visible ASCII characters"
+        - name: token of 257 characters
+          vars: {mc_notify_client_token: "{{ 'a' * 257 }}"}
+          task: "Preflight | the token is set and is 32-256 visible ASCII characters"
+        - name: token with a space
+          vars: {mc_notify_client_token: "{{ 'a' * 20 ~ ' ' ~ 'a' * 20 }}"}
+          task: "Preflight | the token is set and is 32-256 visible ASCII characters"
+        - name: token with a newline
+          vars: {mc_notify_client_token: "{{ 'a' * 20 }}\n{{ 'a' * 20 }}"}
+          task: "Preflight | the token is set and is 32-256 visible ASCII characters"
+        - name: token non-ASCII
+          vars: {mc_notify_client_token: "{{ 'a' * 40 }}é"}
+          task: "Preflight | the token is set and is 32-256 visible ASCII characters"
+        - name: token a number
+          vars: {mc_notify_client_token: 123456789012345678901234567890123456}
+          task: "Preflight | the token is set and is 32-256 visible ASCII characters"
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+
+    - name: Nothing was written by a refused run
+      ansible.builtin.find:
+        paths: "{{ test_tmp }}/refused"
+        recurse: true
+        file_type: any
+      register: test_refused_files
+
+    - name: The refused runs left the scratch dir empty
+      ansible.builtin.assert:
+        that: test_refused_files.matched == 0
+        fail_msg: "{{ test_refused_files.files | map(attribute='path') | list }}"
+        quiet: true
+
+    # The token never goes in before the directory is checked and made 0700 (tasks/main.yml, "KEEP THIS ORDER").
+    - name: The config tasks run in order (guard, 0700 directory, config.json, token)
+      vars:
+        names: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../tasks/main.yml') | from_yaml | map(attribute='name') | list }}"
+        positions: "{{ dict(names | zip(range(names | length))) }}"
+        want:
+          - Config | the directory, before anything goes in
+          - Config | the directory is absent or a real directory (never a symlink)
+          - Config | directory (0700)
+          - "Config | config.json (url and token_file; 0600)"
+          - "Config | the token (vault; 0600)"
+      ansible.builtin.assert:
+        that:
+          - want | difference(names) == []
+          - (want | map('extract', positions) | list) == (want | map('extract', positions) | list | sort)
+        quiet: true
+
+    - name: First run
+      ansible.builtin.include_tasks: ../tasks/main.yml
+      vars:
+        mc_notify_client_token: "{{ test_token }}"
+
+    - name: What the first run wrote
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: sha256
+      loop: &test_sys_files
+        - "{{ test_tmp }}/sys/usr/local/bin/mc-notify"
+        - "{{ test_tmp }}/sys/etc/mc-notify"
+        - "{{ test_tmp }}/sys/etc/mc-notify/config.json"
+        - "{{ test_tmp }}/sys/etc/mc-notify/token"
+        - "{{ test_tmp }}/sys/etc/systemd/system/notify-failure@.service"
+      register: test_first
+
+    - name: Modes (CLI 0755, dir 0700, config and token 0600, unit 0644), owner, the CLI is the role's file
+      vars:
+        modes: "{{ test_first.results | map(attribute='stat.mode') | list }}"
+      ansible.builtin.assert:
+        that:
+          - modes == ['0755', '0700', '0600', '0600', '0644']
+          - test_first.results | map(attribute='stat.pw_name') | unique | list == [test_me]
+          - >-
+            test_first.results[0].stat.checksum
+            == (lookup('ansible.builtin.file', playbook_dir ~ '/../files/mc_notify.py', rstrip=false) | hash('sha256'))
+        fail_msg: "{{ modes }}"
+        quiet: true
+
+    - name: Config.json holds exactly url and token_file
+      vars:
+        cfg: "{{ lookup('ansible.builtin.file', test_tmp ~ '/sys/etc/mc-notify/config.json') | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - >-
+            cfg == {'url': 'https://ai-box.example.ts.net:8443/api/notify',
+                    'token_file': test_tmp ~ '/sys/etc/mc-notify/token'}
+        fail_msg: "{{ cfg | to_json }}"
+        quiet: true
+
+    - name: The token file is the token and a newline (compared without printing it)
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -I
+          - -c
+          - |
+            import sys
+            got = open(sys.argv[1], "rb").read()
+            print("ok" if got == ("MCN-" + open(sys.argv[2]).read() + "\n").encode() else "mismatch (%d bytes)" % len(got))
+          - "{{ test_tmp }}/sys/etc/mc-notify/token"
+          - "{{ test_tmp }}/token-canary"
+      register: test_token_file
+      changed_when: false
+
+    - name: The token file holds the token
+      ansible.builtin.assert:
+        that: test_token_file.stdout == 'ok'
+        fail_msg: "{{ test_token_file.stdout }}"
+        quiet: true
+
+    - name: The installed CLI ran (--help) and its own checks accept what the role wrote
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -I
+          - -c
+          - "{{ test_cli_check }}"
+          - "{{ test_tmp }}/sys/usr/local/bin/mc-notify"
+          - "{{ test_tmp }}/sys/etc/mc-notify/config.json"
+          - "{{ test_tmp }}/token-canary"
+          - "{{ test_tmp }}/sys/etc/mc-notify/token"
+          - https://ai-box.example.ts.net:8443/api/notify
+      register: test_cli_sys
+      changed_when: false
+
+    - name: The CLI's verdict
+      ansible.builtin.assert:
+        that:
+          - mc_notify_client_help.rc == 0
+          - test_cli_sys.stdout == 'ok'
+        fail_msg: "{{ test_cli_sys.stdout }}"
+        quiet: true
+
+    - name: Second run
+      ansible.builtin.include_tasks: ../tasks/main.yml
+      vars:
+        mc_notify_client_token: "{{ test_token }}"
+
+    - name: What the second run left
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: sha256
+      loop: *test_sys_files
+      register: test_second
+
+    - name: Idempotent (same checksums and mtimes)
+      ansible.builtin.assert:
+        that:
+          - >-
+            test_second.results | map(attribute='stat.checksum', default='dir') | list
+            == test_first.results | map(attribute='stat.checksum', default='dir') | list
+          - test_second.results | map(attribute='stat.mtime') | list == test_first.results | map(attribute='stat.mtime') | list
+        quiet: true
+
+    - name: Drift the token file (another token, 0644) and the config (0666)
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          printf 'someone-elses-token-0123456789abcdef\n' > "{{ test_tmp }}/sys/etc/mc-notify/token"
+          chmod 0644 "{{ test_tmp }}/sys/etc/mc-notify/token"
+          chmod 0666 "{{ test_tmp }}/sys/etc/mc-notify/config.json"
+      changed_when: true
+
+    - name: Third run (puts it back)
+      ansible.builtin.include_tasks: ../tasks/main.yml
+      vars:
+        mc_notify_client_token: "{{ test_token }}"
+
+    - name: After the third run
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: sha256
+      loop: *test_sys_files
+      register: test_third
+
+    - name: Token and config back to the role's content and 0600
+      ansible.builtin.assert:
+        that:
+          - >-
+            test_third.results | map(attribute='stat.checksum', default='dir') | list
+            == test_first.results | map(attribute='stat.checksum', default='dir') | list
+          - test_third.results | map(attribute='stat.mode') | list == ['0755', '0700', '0600', '0600', '0644']
+        quiet: true
+
+    - name: A symlinked config directory (pointing at a victim directory)
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          mkdir -p "{{ test_tmp }}/victim" "{{ test_tmp }}/linked/etc"
+          ln -sfn "{{ test_tmp }}/victim" "{{ test_tmp }}/linked/etc/mc-notify"
+      changed_when: true
+
+    - name: Run with the symlinked config directory
+      block:
+        - name: Main with the symlinked config directory
+          ansible.builtin.include_tasks: ../tasks/main.yml
+          vars:
+            mc_notify_client_token: "{{ test_token }}"
+            mc_notify_client_config_dir: "{{ test_tmp }}/linked/etc/mc-notify"
+        - name: Not reached
+          ansible.builtin.set_fact:
+            test_link_by: ""
+      rescue:
+        - name: Note which task refused
+          ansible.builtin.set_fact:
+            test_link_by: "{{ ansible_failed_task.name }}"
+
+    - name: What reached the victim directory
+      ansible.builtin.find:
+        paths: "{{ test_tmp }}/victim"
+        hidden: true
+        file_type: any
+      register: test_victim
+
+    - name: Refused by the directory guard; nothing written through the link, the victim's mode untouched
+      ansible.builtin.assert:
+        that:
+          - test_link_by == 'Config | the directory is absent or a real directory (never a symlink)'
+          - test_victim.matched == 0
+        fail_msg: "refused by '{{ test_link_by }}'; the victim holds {{ test_victim.files | map(attribute='path') | list }}"
+        quiet: true
+
+- name: Role mc_notify_client, user scope, with a scratch home
+  hosts: usr
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  vars:
+    <<: *test_vars
+  handlers:
+    - name: Reload systemd for mc-notify
+      ansible.builtin.debug:
+        msg: reload requested
+  tasks:
+    - name: User scope, home in the scratch dir (paths, owner and group come from vars/main.yml)
+      ansible.builtin.set_fact:
+        mc_notify_client_role_dir: "{{ playbook_dir | dirname }}"
+        mc_notify_client_scope: user
+        mc_notify_client_home: "{{ test_tmp }}/home/noah"
+
+    - name: The user scope's paths and owner
+      ansible.builtin.assert:
+        that:
+          - mc_notify_client_cli == test_tmp ~ '/home/noah/.local/bin/mc-notify'
+          - mc_notify_client_config_file == test_tmp ~ '/home/noah/.config/mc-notify/config.json'
+          - mc_notify_client_token_file == test_tmp ~ '/home/noah/.config/mc-notify/token'
+          - mc_notify_client_unit_dir == test_tmp ~ '/home/noah/.config/systemd/user'
+          - mc_notify_client_unit_src == 'user/notify-failure@.service.j2'
+        quiet: true
+
+    - name: User run
+      ansible.builtin.include_tasks: ../tasks/main.yml
+      vars:
+        mc_notify_client_token: "{{ test_token }}"
+
+    - name: What the user run wrote
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ test_tmp }}/home/noah/.local/bin/mc-notify"
+        - "{{ test_tmp }}/home/noah/.config/mc-notify"
+        - "{{ test_tmp }}/home/noah/.config/mc-notify/config.json"
+        - "{{ test_tmp }}/home/noah/.config/mc-notify/token"
+        - "{{ test_tmp }}/home/noah/.config/systemd/user/notify-failure@.service"
+      register: test_user
+
+    - name: User files are the connecting user's (owner omitted), same modes as the system scope
+      ansible.builtin.assert:
+        that:
+          - test_user.results | map(attribute='stat.mode') | list == ['0755', '0700', '0600', '0600', '0644']
+          - test_user.results | map(attribute='stat.pw_name') | unique | list == [test_me]
+        fail_msg: "{{ test_user.results | map(attribute='stat.mode') | list }}"
+        quiet: true
+
+    - name: The user unit runs the user's CLI with the user's config, without the system sandbox
+      vars:
+        unit: "{{ lookup('ansible.builtin.file', test_tmp ~ '/home/noah/.config/systemd/user/notify-failure@.service') }}"
+      ansible.builtin.assert:
+        that:
+          - unit is search('(?m)^ExecStart=' ~ (test_tmp | regex_escape) ~ '/home/noah/[.]local/bin/mc-notify --unit=%i$')
+          - >-
+            unit is search('(?m)^Environment="MC_NOTIFY_CONFIG=' ~ (test_tmp | regex_escape)
+            ~ '/home/noah/[.]config/mc-notify/config[.]json"$')
+          - unit is not search('(?m)^(ProtectSystem|CapabilityBoundingSet|After)=')
+        quiet: true
+
+    - name: The installed CLI's own checks accept what the user run wrote
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -I
+          - -c
+          - "{{ test_cli_check }}"
+          - "{{ test_tmp }}/home/noah/.local/bin/mc-notify"
+          - "{{ test_tmp }}/home/noah/.config/mc-notify/config.json"
+          - "{{ test_tmp }}/token-canary"
+          - "{{ test_tmp }}/home/noah/.config/mc-notify/token"
+          - https://ai-box.example.ts.net:8443/api/notify
+      register: test_cli_usr
+      changed_when: false
+
+    - name: The CLI's verdict (user scope)
+      ansible.builtin.assert:
+        that: test_cli_usr.stdout == 'ok'
+        fail_msg: "{{ test_cli_usr.stdout }}"
+        quiet: true
+
+- name: Role mc_notify_client renders its units with the real paths
+  hosts: render
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  vars:
+    <<: *test_vars
+    test_render: "{{ test_tmp }}/render"
+  tasks:
+    - name: Render dir
+      ansible.builtin.file:
+        path: "{{ test_render }}/user"
+        state: directory
+        mode: "0755"
+
+    - name: Render the system unit (real paths)
+      ansible.builtin.template:
+        src: "{{ playbook_dir | dirname }}/templates/notify-failure@.service.j2"
+        dest: "{{ test_render }}/notify-failure@.service"
+        mode: "0644"
+
+    - name: Render the user unit (home /home/noah)
+      ansible.builtin.template:
+        src: "{{ playbook_dir | dirname }}/templates/user/notify-failure@.service.j2"
+        dest: "{{ test_render }}/user/notify-failure@.service"
+        mode: "0644"
+      vars:
+        mc_notify_client_scope: user
+        mc_notify_client_home: /home/noah
+
+    - name: The renders equal tests/expected/ literally
+      ansible.builtin.command:
+        argv: [diff, -u, "{{ playbook_dir }}/expected/{{ item }}", "{{ test_render }}/{{ item }}"]
+      loop:
+        - notify-failure@.service
+        - user/notify-failure@.service
+      changed_when: false
+
+    - name: The system unit's contract settings, named
+      vars:
+        unit: "{{ lookup('ansible.builtin.file', test_render ~ '/notify-failure@.service') }}"
+      ansible.builtin.assert:
+        that:
+          - unit is search('(?m)^ExecStart=/usr/local/bin/mc-notify --unit=%i$')
+          - unit is search('(?m)^Type=oneshot$')
+          - unit is search('(?m)^Environment="MC_NOTIFY_CONFIG=/etc/mc-notify/config[.]json"$')
+          - unit is not search('(?m)^\[Install\]')
+          - unit is not search('(?m)^OnFailure=')
+          - unit is search('(?m)^CapabilityBoundingSet=$') and unit is search('(?m)^NoNewPrivileges=yes$')
+          - unit is search('(?m)^ProtectSystem=strict$') and unit is search('(?m)^ProtectHome=yes$')
+          - unit is not search('(?m)^User=')
+        quiet: true
+
+    # Instances of the templates (the name decides %i), with ExecStart swapped for /usr/bin/true, which exists here.
+    - name: Systemd-analyze verify (an instance of each unit)
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          mkdir -p "{{ test_render }}/verify"
+          sed 's#^ExecStart=/usr/local/bin/mc-notify #ExecStart=/usr/bin/true #' "{{ test_render }}/notify-failure@.service" \
+            > "{{ test_render }}/verify/notify-failure@backup.service.service"
+          sed 's#^ExecStart=/home/noah/.local/bin/mc-notify #ExecStart=/usr/bin/true #' "{{ test_render }}/user/notify-failure@.service" \
+            > "{{ test_render }}/verify/notify-failure-user@backup.service.service"
+          cd "{{ test_render }}/verify"
+          systemd-analyze verify notify-failure@backup.service.service notify-failure-user@backup.service.service
+      register: test_analyze
+      changed_when: false
+      # Any stderr line fails, except systemd's warnings about the machine's own unit files (ubuntu-latest's newer systemd:
+      # "<host unit dir>/x.service:26: Support for option CPUAccounting= has been removed") that name no unit verified here.
+      # Not caught: a host drop-in for a template or prefix of ours (foo@.service.d, foo-.service.d); a CI runner has none.
+      failed_when: >-
+        test_analyze.rc != 0
+        or test_analyze.stderr_lines | reject('match', '(/usr/lib|/lib|/etc|/run)/systemd/[^:]+:[0-9]+: ') | list | length > 0
+        or test_analyze.stderr_lines | select('search', ['notify-failure@backup.service.service',
+        'notify-failure-user@backup.service.service'] | map('regex_escape') | join('|')) | list | length > 0

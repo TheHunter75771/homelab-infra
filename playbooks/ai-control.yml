@@ -1,0 +1,51 @@
+---
+# AI Control P1 (docs/CONTRACTS.md §12.15, deploy §12.15.7). Run as the operator account `claude`.
+# Prerequisite: playbooks/gaming-pc-ai.yml has converged with ollama_rocm_policy_extra_ports: [11510]
+# (module G owns the firewalld policy that limits the agent port to ai-box).
+# The gaming PC may be off at the start: play 1 skips it, ai-box converges and keeps its existing agent token
+# (verify still fails if the agent rejects that token). If the PC drops off mid-play-1, the run stops before play 2.
+# A real failure in play 1 still fails the run (play 3), after ai-box has converged.
+- name: AI Control host agent (gaming PC)
+  hosts: workstations_root
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Is the gaming PC reachable
+      ansible.builtin.ping:
+      register: ai_control_pc_ping
+      ignore_unreachable: true
+    - name: PC off, so skip it (ai-box keeps its existing agent token)
+      ansible.builtin.meta: end_host
+      when: ai_control_pc_ping.unreachable | default(false)
+    - name: Host agent, then export its token
+      block:
+        - name: Host agent
+          ansible.builtin.include_role:
+            name: ai_host_agent
+        - name: Export the agent token for play 2
+          ansible.builtin.include_role:
+            name: ai_host_agent
+            tasks_from: export_token
+      rescue:
+        - name: Remember that play 1 failed (play 3 fails the run after ai-box converged)
+          ansible.builtin.set_fact:
+            ai_control_play1_failed: true
+            ai_host_agent_token: ""   # a partial export must never reach play 2
+
+- name: AI Control (ai-box)
+  hosts: ai_servers
+  become: true
+  gather_facts: false
+  roles:
+    - role: ai_control
+      vars:
+        ai_control_agent_token: "{{ hostvars[groups['workstations_root'][0]].ai_host_agent_token | default('') }}"
+
+- name: Report a failed play 1
+  hosts: workstations_root
+  gather_facts: false
+  tasks:
+    - name: Play 1 failed on the gaming PC
+      ansible.builtin.fail:
+        msg: Play 1 failed on {{ inventory_hostname }}; ai-box converged and kept its existing agent token.
+      when: ai_control_play1_failed | default(false)

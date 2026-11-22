@@ -1,0 +1,23 @@
+---
+# The script (Python stdlib only), on both hosts. Run as python3 -I -B, so it is a plain 0644 file.
+- name: Install | guard the script dir
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    ai_backup_guard_dirs:
+      - "{{ ai_backup_lib_dir }}"
+
+- name: Install | script dir
+  ansible.builtin.file:
+    path: "{{ ai_backup_lib_dir }}"
+    state: directory
+    owner: "{{ ai_backup_owner }}"
+    group: "{{ ai_backup_owner }}"
+    mode: "0755"
+
+- name: Install | script
+  ansible.builtin.copy:
+    src: "{{ ai_backup_files_dir }}/ai_backup.py"
+    dest: "{{ ai_backup_script }}"
+    owner: "{{ ai_backup_owner }}"
+    group: "{{ ai_backup_owner }}"
+    mode: "0644"

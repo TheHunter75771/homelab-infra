@@ -1,0 +1,13 @@
+{
+  "moneyhub_url": "http://moneyhub.invalid:8710",
+  "broker_url": "http://broker.invalid:11434",
+  "library_root": "/srv/ai-library",
+  "timezone": "America/New_York",
+  "ai_summary": true,
+  "model": "assistant",
+  "moneyhub_timeout_s": 10,
+  "broker_timeout_s": 120,
+  "notion_file": "/etc/finance-digest/notion.json",
+  "notion_timeout_s": 20,
+  "bills_window_days": 7
+}

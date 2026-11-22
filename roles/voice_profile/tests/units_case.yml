@@ -1,0 +1,156 @@
+---
+# Render voice-profile.service and verify it. Any systemd-analyze warning fails, except one about the machine's own unit files. Params: vp_case (name),
+# vp_expect_allow (the exact IPAddressAllow value).
+- name: Unit dir ({{ vp_case }})
+  ansible.builtin.file:
+    path: "{{ test_tmp }}/units-{{ vp_case }}"
+    state: directory
+    mode: "0755"
+
+- name: Render the unit ({{ vp_case }})
+  ansible.builtin.template:
+    src: voice-profile.service.j2
+    dest: "{{ test_tmp }}/units-{{ vp_case }}/voice-profile.service"
+    mode: "0644"
+
+- name: Systemd-analyze verify ({{ vp_case }})
+  ansible.builtin.command:
+    argv: [systemd-analyze, verify, "{{ test_tmp }}/units-{{ vp_case }}/voice-profile.service"]
+  register: vp_test_verify
+  changed_when: false
+  # Any stderr line fails, except systemd's warnings about the machine's own unit files (ubuntu-latest's newer systemd:
+  # "<host unit dir>/x.service:26: Support for option CPUAccounting= has been removed") that name no unit verified here.
+  # Not caught: a host drop-in for a template or prefix of ours (foo@.service.d, foo-.service.d); a CI runner has none.
+  failed_when: >-
+    vp_test_verify.rc != 0
+    or vp_test_verify.stderr_lines | reject('match', '(/usr/lib|/lib|/etc|/run)/systemd/[^:]+:[0-9]+: ') | list | length > 0
+    or vp_test_verify.stderr_lines | select('search', vp_test_verify.cmd[2:] | map('basename') | map('regex_escape') | join('|'))
+    | list | length > 0
+
+# Reviewer M (M-1): the expected unit is spelled out here, line by line and in order, NOT derived from the role's
+# vars, so deleting or changing any sandbox entry in vars/main.yml fails this test. Only the IPAddressAllow line
+# varies per case (vp_expect_allow, itself a literal in the caller).
+- name: The unit's [Unit] and [Service] lines are exactly the agreed ones, in order ({{ vp_case }})
+  vars:
+    unit: "{{ lookup('ansible.builtin.file', test_tmp ~ '/units-' ~ vp_case ~ '/voice-profile.service') }}"
+    unit_section: "{{ unit | regex_search('(?ms)^\\[Unit\\]$(.*)^\\[Service\\]$', '\\1') | first }}"
+    service_section: "{{ unit | regex_search('(?ms)^\\[Service\\]$(.*)\\Z', '\\1') | first }}"
+    got_unit: "{{ unit_section.splitlines() | reject('match', '^(#|$)') | list }}"
+    got_service: "{{ service_section.splitlines() | reject('match', '^(#|$)') | list }}"
+    want_unit:
+      - Description=Voice profile build (drafts Noah's writing-voice profile for his review)
+      - Documentation=file:///opt/voice-profile/voice-profile
+      - After=network-online.target
+      - Wants=network-online.target
+      - RequiresMountsFor=/srv/ai-library
+      - AssertPathExists=/srv/ai-library/.ai-library-sentinel
+      - AssertPathIsDirectory=/srv/ai-library/40-writing
+      - AssertPathIsDirectory=/srv/ai-library/90-archive/40-writing
+      - AssertPathIsSymbolicLink=!/srv/ai-library/40-writing
+      - AssertPathIsSymbolicLink=!/srv/ai-library/40-writing/samples
+      - AssertPathIsSymbolicLink=!/srv/ai-library/90-archive
+      - AssertPathIsSymbolicLink=!/srv/ai-library/90-archive/40-writing
+    want_service:
+      - Type=oneshot
+      - ExecStart=/usr/bin/python3 -I -B /opt/voice-profile/voice-profile --config /etc/voice-profile/config.json build
+      - TimeoutStartSec=40min
+      - SyslogIdentifier=voice-profile
+      - User=vprof
+      - Group=vprof
+      - WorkingDirectory=/opt/voice-profile
+      - Environment=AI_LIBRARY_CAP=500GB
+      - UMask=0027
+      - MemoryMax=256M
+      - TasksMax=32
+      - NoNewPrivileges=yes
+      - ProtectSystem=strict
+      - ProtectHome=yes
+      - PrivateTmp=yes
+      - ReadOnlyPaths=/run
+      - ReadWritePaths=/srv/ai-library/40-writing
+      - ReadWritePaths=/srv/ai-library/90-archive/40-writing
+      - ReadOnlyPaths=-/srv/ai-library/40-writing/samples
+      - ReadOnlyPaths=-/srv/ai-library/40-writing/include.txt
+      - InaccessiblePaths=/dev/shm
+      - RestrictAddressFamilies=AF_INET AF_UNIX
+      - CapabilityBoundingSet=
+      - AmbientCapabilities=
+      - SystemCallFilter=@system-service
+      - SystemCallFilter=~@privileged
+      - SystemCallErrorNumber=EPERM
+      - SystemCallArchitectures=native
+      - PrivateDevices=yes
+      - PrivateIPC=yes
+      - ProtectKernelTunables=yes
+      - ProtectKernelModules=yes
+      - ProtectKernelLogs=yes
+      - ProtectControlGroups=yes
+      - ProtectClock=yes
+      - ProtectHostname=yes
+      - ProtectProc=invisible
+      - RestrictNamespaces=yes
+      - RestrictRealtime=yes
+      - RestrictSUIDSGID=yes
+      - LockPersonality=yes
+      - MemoryDenyWriteExecute=yes
+      - RemoveIPC=yes
+      - IPAddressDeny=any
+  ansible.builtin.assert:
+    that:
+      - got_unit == want_unit
+      - got_service == want_service + ['IPAddressAllow=' ~ vp_expect_allow]
+    fail_msg: >-
+      [Unit] extra {{ got_unit | difference(want_unit) }} missing {{ want_unit | difference(got_unit) }};
+      [Service] extra {{ got_service | difference(want_service + ['IPAddressAllow=' ~ vp_expect_allow]) }}
+      missing {{ (want_service + ['IPAddressAllow=' ~ vp_expect_allow]) | difference(got_service) }};
+      {{ got_service | join(' | ') }}
+    quiet: true
+
+- name: The unit carries the contract's settings ({{ vp_case }})
+  vars:
+    unit: "{{ lookup('ansible.builtin.file', test_tmp ~ '/units-' ~ vp_case ~ '/voice-profile.service') }}"
+    lines: "{{ unit.splitlines() }}"
+    allow: "{{ unit | regex_search('(?m)^IPAddressAllow=(.*)$', '\\1') | first | split(' ') }}"
+    service_section: "{{ unit | regex_search('(?ms)^\\[Service\\]$(.*)\\Z', '\\1') | first }}"
+  ansible.builtin.assert:
+    that:
+      # Two sections only: [Unit] and [Service]. No [Install] (static: nothing can enable it, §12.21.1).
+      - unit | regex_findall('(?m)^\[[A-Za-z]+\]$') == ['[Unit]', '[Service]']
+      - unit is not search('(?m)^(WantedBy|RequiredBy|Alias|Also|UpheldBy)=')
+      # The rendered [Service] section is the role's sandbox list (the verify's systemd-run uses that list).
+      - voice_profile_sandbox | reject('in', lines) | list == []
+      - unit is search('(?m)^Type=oneshot$')
+      - unit is search('(?m)^ExecStart=/usr/bin/python3 -I -B /opt/voice-profile/voice-profile --config /etc/voice-profile/config.json build$')
+      - unit is search('(?m)^TimeoutStartSec=40min$')
+      - unit is not search('(?m)^(Restart|RemainAfterExit)=')
+      - unit is search('(?m)^User=vprof$') and unit is search('(?m)^Group=vprof$')
+      - unit is not search('(?m)^SupplementaryGroups=')
+      - unit is search('(?m)^ProtectSystem=strict$') and unit is search('(?m)^ProtectHome=yes$')
+      - unit is search('(?m)^PrivateTmp=yes$') and unit is search('(?m)^NoNewPrivileges=yes$')
+      - >-
+        unit | regex_findall('(?m)^ReadWritePaths=.*$')
+        == ['ReadWritePaths=/srv/ai-library/40-writing', 'ReadWritePaths=/srv/ai-library/90-archive/40-writing']
+      - >-
+        unit | regex_findall('(?m)^ReadOnlyPaths=.*$') == ['ReadOnlyPaths=/run', 'ReadOnlyPaths=-/srv/ai-library/40-writing/samples',
+        'ReadOnlyPaths=-/srv/ai-library/40-writing/include.txt']
+      - unit | regex_findall('(?m)^InaccessiblePaths=.*$') == ['InaccessiblePaths=/dev/shm']
+      - unit is search('(?m)^RequiresMountsFor=/srv/ai-library$')
+      - unit is search('(?m)^AssertPathExists=/srv/ai-library/.ai-library-sentinel$')
+      - >-
+        unit | regex_findall('(?m)^AssertPathIsDirectory=.*$')
+        == ['AssertPathIsDirectory=/srv/ai-library/40-writing', 'AssertPathIsDirectory=/srv/ai-library/90-archive/40-writing']
+      - unit is search('(?m)^CapabilityBoundingSet=$') and unit is search('(?m)^AmbientCapabilities=$')
+      - unit is not search('(?m)^(AmbientCapabilities|CapabilityBoundingSet)=.')
+      - unit is search('(?m)^RestrictAddressFamilies=AF_INET AF_UNIX$')
+      - unit is search('(?m)^ProtectProc=invisible$')
+      - unit is not search('(?m)^ProcSubset=')
+      # The only environment: the library cap.
+      - unit | regex_findall('(?m)^(?:Environment|EnvironmentFile|PassEnvironment)=.*$') == ['Environment=AI_LIBRARY_CAP=500GB']
+      # IP filter: exactly one of each line; deny any; the broker only (no resolver, M-5).
+      - unit | regex_findall('(?m)^IPAddressDeny=.*$') == ['IPAddressDeny=any']
+      - unit | regex_findall('(?m)^IPAddressAllow=') | length == 1
+      - unit is search('(?m)^IPAddressAllow=' ~ (vp_expect_allow | regex_escape) ~ '$')
+      - "'localhost' not in allow and 'any' not in allow and '127.0.0.1/32' not in allow and '127.0.0.53/32' not in allow"
+      - allow | select('search', '/0$') | list == []
+    fail_msg: "{{ unit }}"
+    quiet: true

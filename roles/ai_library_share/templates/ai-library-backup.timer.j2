@@ -1,0 +1,13 @@
+# {{ ansible_managed }}
+# Role ai_library_share (docs/CONTRACTS.md §12.17.2): nightly, catches up after the PC was off.
+[Unit]
+Description=Nightly AI Library backup
+
+[Timer]
+OnCalendar={{ ai_library_share_backup_calendar }}
+RandomizedDelaySec={{ ai_library_share_backup_random_delay }}
+Persistent=true
+Unit={{ ai_library_share_backup_service }}
+
+[Install]
+WantedBy=timers.target

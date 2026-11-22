@@ -1,0 +1,26 @@
+---
+# One case for test_render.yml: runs the role's tasks/broker_num_ctx_check.yml with a sample shared
+# ai_gpu_num_ctx (ai_stack_broker_gpu_num_ctx keeps its default, which follows it), and checks it passes or fails
+# as expected.
+- name: Num ctx case | the role's check
+  block:
+    - name: Num ctx case | tasks/broker_num_ctx_check.yml
+      ansible.builtin.include_tasks: "{{ ai_stack_test_role }}/tasks/broker_num_ctx_check.yml"
+      vars:
+        ai_gpu_num_ctx: "{{ num_ctx_case.value }}"
+
+    - name: Num ctx case | it passed
+      ansible.builtin.set_fact:
+        num_ctx_case_failed: false
+  rescue:
+    - name: Num ctx case | it failed
+      ansible.builtin.set_fact:
+        num_ctx_case_failed: true
+  always:
+    - name: Num ctx case | outcome is as expected
+      ansible.builtin.assert:
+        that:
+          - num_ctx_case_failed is defined
+          - (not num_ctx_case_failed) == (num_ctx_case.ok | bool)
+        fail_msg: "{{ num_ctx_case.name }}: expected {{ 'pass' if num_ctx_case.ok | bool else 'fail' }}."
+        quiet: true

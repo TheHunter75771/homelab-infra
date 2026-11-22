@@ -1,0 +1,3 @@
+{#- binds, port, token_file, ollama_url (http://<gaming_pc_tailnet_ip>:<ollama_rocm_port, default 11434>), sudo_exes,
+    plus ai_host_agent_config_extra: built in vars/main.yml. -#}
+{{ ai_host_agent_config | to_nice_json(indent=2) }}

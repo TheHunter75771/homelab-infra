@@ -1,0 +1,35 @@
+---
+# Enabled only (tasks/main.yml). The unit's AssertPathExists/RequiresMountsFor and R's own start-up checks have
+# passed when it is active and stays so without restarting; the functional checks (an approved query, a
+# ticked fetch, a private-IP refusal) are the Integrator's (README, "Host checks").
+- name: Verify | research-gate is active
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=ActiveState, --property=NRestarts, "{{ research_gate_service }}"]
+  register: research_gate_state1
+  changed_when: false
+  until: research_gate_state1.stdout is search('(?m)^ActiveState=active$')
+  retries: "{{ research_gate_verify_retries }}"
+  delay: "{{ research_gate_verify_delay }}"
+
+- name: Verify | let it run through a start-up and its first poll
+  ansible.builtin.wait_for:
+    timeout: "{{ research_gate_verify_delay | int * 5 }}"
+
+- name: Verify | read the state again
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=ActiveState, --property=NRestarts, "{{ research_gate_service }}"]
+  register: research_gate_state2
+  changed_when: false
+
+- name: Verify | still active, no restart in between
+  vars:
+    s1: "{{ dict(research_gate_state1.stdout_lines | map('split', '=', 1)) }}"
+    s2: "{{ dict(research_gate_state2.stdout_lines | map('split', '=', 1)) }}"
+  ansible.builtin.assert:
+    that:
+      - s2.ActiveState == 'active'
+      - s2.NRestarts == s1.NRestarts
+    fail_msg: >-
+      research-gate is {{ s2.ActiveState }} after {{ s2.NRestarts }} restarts (was {{ s1.NRestarts }}):
+      journalctl -u research-gate -n 50.
+    quiet: true

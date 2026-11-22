@@ -1,0 +1,14 @@
+#!/usr/bin/python3
+"""Launcher that works under `python3 -I`: adds its own directory (where research_gate, forge and
+library are installed side by side) and, in a repo checkout, ../skill-library."""
+import os
+import sys
+
+here = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, here)
+if not os.path.isdir(os.path.join(here, "forge")):
+    sys.path.insert(1, os.path.join(os.path.dirname(here), "skill-library"))
+
+from research_gate.__main__ import main  # noqa: E402
+
+sys.exit(main())

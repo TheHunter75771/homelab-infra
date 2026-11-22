@@ -1,0 +1,2 @@
+# Sourced by the fakes: knob NAME DEFAULT prints $FA_TEST_DIR/NAME's first line, or DEFAULT.
+knob() { if [ -f "$FA_TEST_DIR/$1" ]; then head -n1 "$FA_TEST_DIR/$1"; else echo "$2"; fi; }

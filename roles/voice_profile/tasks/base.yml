@@ -1,0 +1,56 @@
+---
+# The library package needs Python 3.12+ (§12.11); V is stdlib only. Ubuntu 26.04 ships newer.
+- name: Base | Python version
+  ansible.builtin.command:
+    argv:
+      - "{{ voice_profile_python }}"
+      - -I
+      - -c
+      - "import sys; print(sys.version_info >= (3, 12))"
+  register: voice_profile_py
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Base | Python is 3.12 or newer
+  ansible.builtin.assert:
+    that: voice_profile_py.rc == 0 and voice_profile_py.stdout | trim == 'True'
+    fail_msg: "Need Python >= 3.12 at {{ voice_profile_python }}: {{ voice_profile_py.stdout | default('') }} {{ voice_profile_py.stderr | default('') }}"
+    quiet: true
+
+# §12.21.1: system account, no login, no home, primary group vprof, supplementary group rgate (the library
+# mount), never docker. `groups` + `append: false` makes rgate the ONLY supplementary group: a converge removes
+# any other membership. The read-only check below proves the result.
+- name: Base | vprof group
+  ansible.builtin.group:
+    name: "{{ voice_profile_user }}"
+    system: true
+
+- name: Base | vprof system user (no login, no home, group rgate only)
+  ansible.builtin.user:
+    name: "{{ voice_profile_user }}"
+    group: "{{ voice_profile_user }}"
+    groups: ["{{ voice_profile_library_group }}"]
+    append: false
+    system: true
+    shell: /usr/sbin/nologin
+    home: /nonexistent
+    create_home: false
+  register: voice_profile_user_task
+
+- name: Base | vprof's groups
+  ansible.builtin.command:
+    argv: [id, -Gn, "{{ voice_profile_user }}"]
+  register: voice_profile_user_groups
+  changed_when: false
+  check_mode: false
+  when: not (ansible_check_mode and voice_profile_user_task is changed)
+
+- name: Base | vprof is in exactly its own group and the library's (never docker)
+  ansible.builtin.assert:
+    that: voice_profile_user_groups.stdout.split() == [voice_profile_user, voice_profile_library_group]
+    fail_msg: >-
+      {{ voice_profile_user }} is in groups '{{ voice_profile_user_groups.stdout }}'; it must be exactly
+      '{{ voice_profile_user }} {{ voice_profile_library_group }}' (never docker).
+    quiet: true
+  when: not (ansible_check_mode and voice_profile_user_task is changed)

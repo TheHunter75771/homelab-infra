@@ -1,0 +1,29 @@
+---
+# One case for test_render.yml: runs the role's tasks/hf_preflight.yml with sample pinned models, an expected
+# reranker and the seed and cache paths, and checks it passes or fails as expected.
+- name: HF case | the role's preflight
+  block:
+    - name: HF case | tasks/hf_preflight.yml
+      ansible.builtin.include_tasks: "{{ ai_stack_test_role }}/tasks/hf_preflight.yml"
+      vars:
+        ai_stack_hf_models: "{{ hf_case.models }}"
+        ai_stack_expect_reranker_model: "{{ hf_case.reranker }}"
+        ai_stack_expect_hybrid_search: "{{ hf_case.hybrid | default(false) }}"
+        ai_stack_hf_seed_dir: "{{ hf_case.seed_dir | default('/var/lib/homelab-ai/hf-models') }}"
+        ai_stack_hf_container_cache: "{{ hf_case.cache | default('/app/backend/data/cache/embedding/models') }}"
+
+    - name: HF case | it passed
+      ansible.builtin.set_fact:
+        hf_case_failed: false
+  rescue:
+    - name: HF case | it failed
+      ansible.builtin.set_fact:
+        hf_case_failed: true
+  always:
+    - name: HF case | outcome is as expected
+      ansible.builtin.assert:
+        that:
+          - hf_case_failed is defined
+          - (not hf_case_failed) == (hf_case.ok | bool)
+        fail_msg: "{{ hf_case.name }}: expected {{ 'pass' if hf_case.ok | bool else 'fail' }}."
+        quiet: true

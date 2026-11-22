@@ -1,0 +1,11 @@
+---
+# Param: mission_control_vapid_sign_out (vapid_sign_check.py's one line). tests/test_mission_control.yml runs this file
+# with canned outputs.
+- name: Verify | pushes can be signed
+  ansible.builtin.assert:
+    that: mission_control_vapid_sign_out == 'OK'
+    fail_msg: >-
+      Signing a VAPID token with {{ mission_control_vapid_file }} gave "{{ mission_control_vapid_sign_out }}": every push
+      would fail. A VapidException is almost always the subject (py_vapid wants https://<host> with no port or path, or
+      mailto:<address>); mission_control_vapid_subject is '{{ mission_control_vapid_subject }}'.
+    quiet: true

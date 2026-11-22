@@ -1,0 +1,526 @@
+[
+ {
+  "in": "Authorization: Bearer abcdef0123456789",
+  "out": "Authorization: Bearer [REDACTED]"
+ },
+ {
+  "in": "proxy-authorization: Basic dXNlcjpwYXNz",
+  "out": "proxy-authorization: Basic [REDACTED]"
+ },
+ {
+  "in": "authorization=rawvalue123",
+  "out": "authorization=[REDACTED]"
+ },
+ {
+  "in": "curl -H \"Authorization: token zzz-fake-123\" https://example.invalid/",
+  "out": "curl -H \"Authorization: token [REDACTED]\" https://example.invalid/"
+ },
+ {
+  "in": "got bearer abcd1234efgh from cache",
+  "out": "got bearer [REDACTED] from cache"
+ },
+ {
+  "in": "token=abc123&next=1",
+  "out": "token=[REDACTED]&next=1"
+ },
+ {
+  "in": "OLLAMA_API_KEY=k-123456 rest",
+  "out": "OLLAMA_API_KEY=[REDACTED] rest"
+ },
+ {
+  "in": "{\"password\": \"two words\", \"n\": 1}",
+  "out": "{\"password\": \"[REDACTED]\", \"n\": 1}"
+ },
+ {
+  "in": "api_key='x y' end",
+  "out": "api_key='[REDACTED]' end"
+ },
+ {
+  "in": "PASSWORD: hunter2",
+  "out": "PASSWORD: [REDACTED]"
+ },
+ {
+  "in": "client_secret = s3cr3t-value",
+  "out": "client_secret = [REDACTED]"
+ },
+ {
+  "in": "passphrase=correct-horse",
+  "out": "passphrase=[REDACTED]"
+ },
+ {
+  "in": "access_key: AKfake123 private-key=pk-fake auth_key=ak-fake",
+  "out": "access_key: [REDACTED] private-key=[REDACTED] auth_key=[REDACTED]"
+ },
+ {
+  "in": "db_passwd=pw-fake",
+  "out": "db_passwd=[REDACTED]"
+ },
+ {
+  "in": "WEBUI_SECRET_KEY=webui-fake-0123",
+  "out": "WEBUI_SECRET_KEY=[REDACTED]"
+ },
+ {
+  "in": "SECRET_KEY=django-fake-0123",
+  "out": "SECRET_KEY=[REDACTED]"
+ },
+ {
+  "in": "ansible_become_pass=Sup3rFake",
+  "out": "ansible_become_pass=[REDACTED]"
+ },
+ {
+  "in": "ansible_ssh_pass: Sup3rFake",
+  "out": "ansible_ssh_pass: [REDACTED]"
+ },
+ {
+  "in": "ansible_password: Sup3rFake",
+  "out": "ansible_password: [REDACTED]"
+ },
+ {
+  "in": "a quoted value with no end: password=\"unterminated",
+  "out": "a quoted value with no end: password=\"[REDACTED]\""
+ },
+ {
+  "in": "--password hunter2 --token=t1",
+  "out": "--password [REDACTED] --token=[REDACTED]"
+ },
+ {
+  "in": "tool --api-key abc123 --client-secret=cs1",
+  "out": "tool --api-key [REDACTED] --client-secret=[REDACTED]"
+ },
+ {
+  "in": "curl -u admin:pa55word https://example.invalid/",
+  "out": "curl -u admin:[REDACTED] https://example.invalid/"
+ },
+ {
+  "in": "curl -s --user=admin:pa55 http://example.invalid/",
+  "out": "curl -s --user=admin:[REDACTED] http://example.invalid/"
+ },
+ {
+  "in": "mysql -u root -pS3cretFake appdb",
+  "out": "mysql -u root -p[REDACTED] appdb"
+ },
+ {
+  "in": "mariadb -pS3cretFake",
+  "out": "mariadb -p[REDACTED]"
+ },
+ {
+  "in": "mysqldump --single-transaction -pS3cret appdb",
+  "out": "mysqldump --single-transaction -p[REDACTED] appdb"
+ },
+ {
+  "in": "https://user:pa55@example.invalid/x",
+  "out": "https://user:[REDACTED]@example.invalid/x"
+ },
+ {
+  "in": "postgres://app:s3cr3t@db.example.invalid:5432/app",
+  "out": "postgres://app:[REDACTED]@db.example.invalid:5432/app"
+ },
+ {
+  "in": "$ANSIBLE_VAULT;1.1;AES256 38366162 63646566 30313233",
+  "out": "$ANSIBLE_VAULT;1.1;AES256 [REDACTED]"
+ },
+ {
+  "in": "secret: !vault |\n  $ANSIBLE_VAULT;1.2;AES256;prod\n  6162636465666768\n  696a6b6c6d6e6f70\nnext: 1",
+  "out": "secret: !vault |\n  $ANSIBLE_VAULT;1.2;AES256;prod\n  [REDACTED]\n  [REDACTED]\nnext: 1"
+ },
+ {
+  "in": "TS_AUTHKEY=tskey-auth-kFAKE123456-abcdef",
+  "out": "TS_AUTHKEY=[REDACTED]"
+ },
+ {
+  "in": "key tskey-auth-kFAKE123456-abcdef",
+  "out": "key [REDACTED]"
+ },
+ {
+  "in": "openai sk-FAKEfake0123456789abcd",
+  "out": "openai [REDACTED]"
+ },
+ {
+  "in": "gh ghp_FAKEfakeFAKEfakeFAKEfake0123",
+  "out": "gh [REDACTED]"
+ },
+ {
+  "in": "gh github_pat_11FAKEFAKE0123456789_abcdefghijklmnop",
+  "out": "gh [REDACTED]"
+ },
+ {
+  "in": "gitlab glpat-FAKEfake0123456789abcd",
+  "out": "gitlab [REDACTED]"
+ },
+ {
+  "in": "hub hf_FAKEfakeFAKEfake01234567",
+  "out": "hub [REDACTED]"
+ },
+ {
+  "in": "slack xoxb-1234567890-FAKEfake",
+  "out": "slack [REDACTED]"
+ },
+ {
+  "in": "aws AKIAFAKEFAKEFAKE1234 done",
+  "out": "aws [REDACTED] done"
+ },
+ {
+  "in": "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJlXw",
+  "out": "jwt [REDACTED]"
+ },
+ {
+  "in": "x -----BEGIN OPENSSH PRIVATE KEY----- b3BlbnNzaC1rZXktdjEAAAAA AAAAFAKEFAKEFAKE -----END OPENSSH PRIVATE KEY----- y",
+  "out": "x [REDACTED] y"
+ },
+ {
+  "in": "x -----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\nAAAAFAKEFAKEFAKE\n-----END OPENSSH PRIVATE KEY----- y",
+  "out": "x [REDACTED]\n[REDACTED]\n[REDACTED]\n[REDACTED] y"
+ },
+ {
+  "in": "max_tokens: 512, tokenizer: llama",
+  "out": "max_tokens: 512, tokenizer: llama"
+ },
+ {
+  "in": "[sudo] password for claude:",
+  "out": "[sudo] password for claude:"
+ },
+ {
+  "in": "claude : TTY=pts/0 ; PWD=/home/claude ; USER=root ; COMMAND=/usr/bin/id",
+  "out": "claude : TTY=pts/0 ; PWD=/home/claude ; USER=root ; COMMAND=/usr/bin/id"
+ },
+ {
+  "in": "docker run -u 1000:1000 -p8080:80 img",
+  "out": "docker run -u 1000:1000 -p8080:80 img"
+ },
+ {
+  "in": "mysql -u root -p appdb",
+  "out": "mysql -u root -p appdb"
+ },
+ {
+  "in": "pip install sk-learn hf_hub_download",
+  "out": "pip install sk-learn hf_hub_download"
+ },
+ {
+  "in": "bypass=1 compass: north",
+  "out": "bypass=1 compass: north"
+ },
+ {
+  "in": "already token=[REDACTED] stays",
+  "out": "already token=[REDACTED] stays"
+ },
+ {
+  "in": "https://example.invalid/path?x=1",
+  "out": "https://example.invalid/path?x=1"
+ },
+ {
+  "in": "db:\n  password: |\n    s3cr3t-line-1\n    s3cr3t-line-2\n  user: app",
+  "out": "db:\n  password: |\n    [REDACTED]\n    [REDACTED]\n  user: app"
+ },
+ {
+  "in": "api_token: >-\n  folded-secret\n\n  more-secret\nnext: 1",
+  "out": "api_token: >-\n  [REDACTED]\n\n  [REDACTED]\nnext: 1"
+ },
+ {
+  "in": "users:\n  - password: |2\n      pw-fake\n  - name: bob",
+  "out": "users:\n  - password: |2\n      [REDACTED]\n  - name: bob"
+ },
+ {
+  "in": "\"client_secret\": |  # rotated\n  cs-fake\nx: 1",
+  "out": "\"client_secret\": |  # rotated\n  [REDACTED]\nx: 1"
+ },
+ {
+  "in": "WEBUI_SECRET_KEY: |+\n\tkey-fake-1\nother: 2",
+  "out": "WEBUI_SECRET_KEY: |+\n\t[REDACTED]\nother: 2"
+ },
+ {
+  "in": "script: |\n  echo hello\n  ls -la\nnext: 1",
+  "out": "script: |\n  echo hello\n  ls -la\nnext: 1"
+ },
+ {
+  "in": "tokenizer: |\n  some text\nnext: 1",
+  "out": "tokenizer: |\n  some text\nnext: 1"
+ },
+ {
+  "in": "password: |",
+  "out": "password: |"
+ },
+ {
+  "in": "password: |\nnot-indented: value",
+  "out": "password: |\nnot-indented: value"
+ },
+ {
+  "in": "- password: |\n    pw-fake\n  user: app\n- name: bob",
+  "out": "- password: |\n    [REDACTED]\n  user: app\n- name: bob"
+ },
+ {
+  "in": "password: | s3cret",
+  "out": "password: | [REDACTED]"
+ },
+ {
+  "in": "token: >- abc def",
+  "out": "token: >- [REDACTED]"
+ },
+ {
+  "in": "loaded: ansible_become_pass: |2 pw-fake more",
+  "out": "loaded: ansible_become_pass: |2 [REDACTED]"
+ },
+ {
+  "in": "script: | echo hi",
+  "out": "script: | echo hi"
+ },
+ {
+  "in": "password: | # rotated weekly",
+  "out": "password: | # rotated weekly"
+ },
+ {
+  "in": "DB_PASS=pw-fake-1 next",
+  "out": "DB_PASS=[REDACTED] next"
+ },
+ {
+  "in": "SMTP_PASS: mail-fake-2",
+  "out": "SMTP_PASS: [REDACTED]"
+ },
+ {
+  "in": "export MYSQL_PWD=my-fake-3",
+  "out": "export MYSQL_PWD=[REDACTED]"
+ },
+ {
+  "in": "PWD=/home/claude OLDPWD=/tmp passthrough=1 bypass=1",
+  "out": "PWD=/home/claude OLDPWD=/tmp passthrough=1 bypass=1"
+ },
+ {
+  "in": "app --pass pw-fake-4 --passphrase 'two words' --db-password dbpw-fake",
+  "out": "app --pass [REDACTED] --passphrase '[REDACTED]' --db-password [REDACTED]"
+ },
+ {
+  "in": "app --password-file /run/secrets/x --pass-through yes --token-file /run/t",
+  "out": "app --password-file /run/secrets/x --pass-through yes --token-file /run/t"
+ },
+ {
+  "in": "key: -----BEGIN PGP PRIVATE KEY BLOCK-----  lQOYBFAKEFAKEFAKE =AbCd -----END PGP PRIVATE KEY BLOCK----- done",
+  "out": "key: [REDACTED] done"
+ },
+ {
+  "in": "-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nlQOYBFAKEFAKEFAKE\n=AbCd\n-----END PGP PRIVATE KEY BLOCK-----\nafter",
+  "out": "[REDACTED]\n[REDACTED]\n[REDACTED]\n[REDACTED]\n[REDACTED]\nafter"
+ },
+ {
+  "in": "-----BEGIN PGP PUBLIC KEY BLOCK-----",
+  "out": "-----BEGIN PGP PUBLIC KEY BLOCK-----"
+ },
+ {
+  "in": "{\"password\": \"abc\\\"hunter2\", \"n\": 1}",
+  "out": "{\"password\": \"[REDACTED]\", \"n\": 1}"
+ },
+ {
+  "in": "{'secret': 'it\\'s-fake', 'n': 1}",
+  "out": "{'secret': '[REDACTED]', 'n': 1}"
+ },
+ {
+  "in": "{\"note\": \"say \\\"hi\\\"\", \"n\": 1}",
+  "out": "{\"note\": \"say \\\"hi\\\"\", \"n\": 1}"
+ },
+ {
+  "in": "sshpass -p ssh-fake-5 ssh host",
+  "out": "sshpass -p [REDACTED] ssh host"
+ },
+ {
+  "in": "sshpass -pssh-fake-6 scp a b",
+  "out": "sshpass -p[REDACTED] scp a b"
+ },
+ {
+  "in": "docker login -u bot -p dock-fake-7 registry.example.invalid",
+  "out": "docker login -u bot -p [REDACTED] registry.example.invalid"
+ },
+ {
+  "in": "docker login --password dock-fake-8 registry.example.invalid",
+  "out": "docker login --password [REDACTED] registry.example.invalid"
+ },
+ {
+  "in": "redis-cli -h cache -a redis-fake-9 ping",
+  "out": "redis-cli -h cache -a [REDACTED] ping"
+ },
+ {
+  "in": "docker run -p 8080:80 -a stdout img; ssh -p 2222 host",
+  "out": "docker run -p 8080:80 -a stdout img; ssh -p 2222 host"
+ },
+ {
+  "in": "curl a b c d e f g h i j -u admin:far-away",
+  "out": "curl a b c d e f g h i j -u admin:[REDACTED]"
+ },
+ {
+  "in": "curl -uadmin:pa55-fake https://example.invalid/",
+  "out": "curl -uadmin:[REDACTED] https://example.invalid/"
+ },
+ {
+  "in": "Cookie: session=abc123; theme=dark",
+  "out": "Cookie: [REDACTED]"
+ },
+ {
+  "in": "Set-Cookie: sid=xyz789; Path=/; HttpOnly",
+  "out": "Set-Cookie: [REDACTED]"
+ },
+ {
+  "in": "curl -H \"Cookie: sid=fake-10\" https://example.invalid/",
+  "out": "curl -H \"Cookie: [REDACTED]\" https://example.invalid/"
+ },
+ {
+  "in": "cookies: 3 accepted; set_cookie: true",
+  "out": "cookies: 3 accepted; set_cookie: true"
+ },
+ {
+  "in": "db:\n  password:\n    pw-fake-11\n  host: x",
+  "out": "db:\n  password:\n    [REDACTED]\n  host: x"
+ },
+ {
+  "in": "database:\n  host: x\n  port: 5432",
+  "out": "database:\n  host: x\n  port: 5432"
+ },
+ {
+  "in": "password:\nnext: 1",
+  "out": "password:\nnext: 1"
+ },
+ {
+  "in": "password=[REDACTED]secret-fake",
+  "out": "password=[REDACTED]"
+ },
+ {
+  "in": "token: [REDACTED]abc --password [REDACTED]def",
+  "out": "token: [REDACTED] --password [REDACTED]"
+ },
+ {
+  "in": "[REDACTED]glued-fake tail",
+  "out": "[REDACTED] tail"
+ },
+ {
+  "in": "already [REDACTED] here, and [REDACTED].",
+  "out": "already [REDACTED] here, and [REDACTED]."
+ },
+ {
+  "in": "password=[REDACTED].secret-fake and [REDACTED]x.",
+  "out": "password=[REDACTED] and [REDACTED]"
+ },
+ {
+  "in": "curl -s -S -L -u admin:pw-gap-3 http://x",
+  "out": "curl -s -S -L -u admin:[REDACTED] http://x"
+ },
+ {
+  "in": "curl -s -S -L -k -X POST -H 'Accept: x' -H 'X-Y: z' -u admin:pw-gap-9 http://x",
+  "out": "curl -s -S -L -k -X POST -H 'Accept: x' -H 'X-Y: z' -u admin:[REDACTED] http://x"
+ },
+ {
+  "in": "curl -d xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx -u admin:pw-long http://x",
+  "out": "curl -d xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx -u admin:[REDACTED] http://x"
+ },
+ {
+  "in": "mysql -h db -P 3306 -u root -pPW-gap-5 appdb",
+  "out": "mysql -h db -P 3306 -u root -p[REDACTED] appdb"
+ },
+ {
+  "in": "mysql a b c d e f g h i j -pPW-gap-10 db",
+  "out": "mysql a b c d e f g h i j -p[REDACTED] db"
+ },
+ {
+  "in": "mariadb --defaults-file=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx -pPW-long",
+  "out": "mariadb --defaults-file=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx -p[REDACTED]"
+ },
+ {
+  "in": "sshpass -e -v -o x -p pw-gap-4 ssh host",
+  "out": "sshpass -e -v -o x -p [REDACTED] ssh host"
+ },
+ {
+  "in": "sshpass a b c d e f g h i j -p pw-gap-10 ssh host",
+  "out": "sshpass a b c d e f g h i j -p [REDACTED] ssh host"
+ },
+ {
+  "in": "redis-cli -h cache -p 6380 --tls -n 2 -a redis-gap-6 ping",
+  "out": "redis-cli -h cache -p 6380 --tls -n 2 -a [REDACTED] ping"
+ },
+ {
+  "in": "redis-cli a b c d e f g h i j -a redis-gap-10 ping",
+  "out": "redis-cli a b c d e f g h i j -a [REDACTED] ping"
+ },
+ {
+  "in": "docker --config /x login --username bot -p dock-gap ghcr.example.invalid",
+  "out": "docker --config /x login --username bot -p [REDACTED] ghcr.example.invalid"
+ },
+ {
+  "in": "redis-cli -h cache ping; docker run -a stdout img",
+  "out": "redis-cli -h cache ping; docker run -a [REDACTED] img"
+ },
+ {
+  "in": "curl -s http://x; id -u alice:staff",
+  "out": "curl -s http://x; id -u alice:[REDACTED]"
+ },
+ {
+  "in": "mysql -u root -p appdb && curl -u alice https://x",
+  "out": "mysql -u root -p appdb && curl -u alice https://x"
+ },
+ {
+  "in": "sshpass -p 'two words' ssh host",
+  "out": "sshpass -p '[REDACTED]' ssh host"
+ },
+ {
+  "in": "redis-cli -a \"r e d is\" ping",
+  "out": "redis-cli -a \"[REDACTED]\" ping"
+ },
+ {
+  "in": "docker login -p 'dock er' reg.example.invalid",
+  "out": "docker login -p '[REDACTED]' reg.example.invalid"
+ },
+ {
+  "in": "mysql -p'my pw' db",
+  "out": "mysql -p'[REDACTED]' db"
+ },
+ {
+  "in": "set-cookie: a=\"PW with space\"; Path=/",
+  "out": "set-cookie: [REDACTED]"
+ },
+ {
+  "in": "Cookie: sid='single q'; x=1",
+  "out": "Cookie: [REDACTED]"
+ },
+ {
+  "in": "redis://:redis-pw@cache.example.invalid:6379/0",
+  "out": "redis://:[REDACTED]@cache.example.invalid:6379/0"
+ },
+ {
+  "in": "https://:pw-only@example.invalid/x",
+  "out": "https://:[REDACTED]@example.invalid/x"
+ },
+ {
+  "in": "https://example.invalid:8443/path@x",
+  "out": "https://example.invalid:8443/path@x"
+ },
+ {
+  "in": "İİİ İstanbul token=tok-fake-unicode tail",
+  "out": "İİİ İstanbul token=[REDACTED] tail"
+ },
+ {
+  "in": "ŞİFRE İ password: \"pw İ\" ok",
+  "out": "ŞİFRE İ password: \"[REDACTED]\" ok"
+ },
+ {
+  "in": "mysql --log=x-pnot-option db-ptoo",
+  "out": "mysql --log=x-pnot-option db-ptoo"
+ },
+ {
+  "in": "curl --data=a-uadmin:x http://x",
+  "out": "curl --data=a-uadmin:x http://x"
+ },
+ {
+  "in": "pipxhf_FAKEfakeFAKEfake01234567 and xAKIAFAKEFAKEFAKE1234 and zsk-FAKEfake0123456789abcd",
+  "out": "pipxhf_FAKEfakeFAKEfake01234567 and xAKIAFAKEFAKEFAKE1234 and zsk-FAKEfake0123456789abcd"
+ },
+ {
+  "in": "xbearer abcd1234 and my_authorization: v and x-cookie: v",
+  "out": "xbearer abcd1234 and my_authorization: v and x-cookie: v"
+ },
+ {
+  "in": "proxy-authorization: tok-xyz and Authorization=raw-1",
+  "out": "proxy-authorization: [REDACTED] and Authorization=[REDACTED]"
+ },
+ {
+  "in": "login -p -f alice",
+  "out": "login -p -f alice"
+ },
+ {
+  "in": "su - alice; login -p bob",
+  "out": "su - alice; login -p bob"
+ }
+]

@@ -1,0 +1,45 @@
+# {{ ansible_managed }}
+# Finance digest D (docs/CONTRACTS.md §12.18.2, deploy §12.18.3): a daily, read-only summary of Money Hub,
+# appended to the AI Library's 50-finance/log/ (and to Notion when notion.json exists). It never moves money,
+# marks bills or triggers a sync. User fdigest (supplementary group rgate for the library mount, never docker),
+# no capabilities, writes only 50-finance. Started by finance-digest.timer only (no [Install]).
+[Unit]
+Description=Finance digest (daily read-only Money Hub summary)
+Documentation=file://{{ finance_digest_launcher }}
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor={{ finance_digest_library_root }}
+# §12.11 mount safety: never run against an empty mount point.
+AssertPathExists={{ finance_digest_sentinel }}
+AssertPathIsDirectory={{ finance_digest_finance_dir }}
+
+[Service]
+Type=oneshot
+# D's launcher under -I (no PYTHON* variables, no user site, no working directory on sys.path): it puts its own
+# root-owned directory, which holds finance_digest and library, first on sys.path. -B: no bytecode there.
+ExecStart={{ finance_digest_argv | join(' ') }}
+TimeoutStartSec={{ finance_digest_timeout_start }}
+SyslogIdentifier=finance-digest
+# The sandbox: exactly vars/main.yml finance_digest_sandbox (the post-deploy dry run uses the same list).
+# - ReadWritePaths is 50-finance only (the log lives there); the rest of the library stays read-only.
+# - RestrictAddressFamilies has no AF_INET6: the IP literals are IPv4, and Python falls back to an A record
+#   when an AAAA socket can't be opened (Notion).
+# - /run read-only explicitly (found writable despite ProtectSystem=strict on the mediaserver, 2026-10-24).
+# - No ProcSubset=pid (Reviewer E, §12.17: it hides /proc/self/net); ProtectProc=invisible stays.
+# - IP filter (systemd checks the destination of outgoing packets and the source of incoming ones; an allow
+#   entry wins over a deny entry):
+#   - {{ finance_digest_moneyhub_ip }}/32: Money Hub (tailnet);
+#   - {{ tailnet_ip | default('') }}/32 and the container range{{ 's' if finance_digest_broker_ranges | length > 1 else '' }}: the broker is published on ai-box's tailnet address,
+#     Docker DNATs the request to the broker container (the egress filter sees that address) and the reply
+#     comes back from the tailnet address (the ingress filter sees that). SearXNG's subnet is cut out of the
+#     range: it would forward queries to the internet;
+#   - {{ finance_digest_dns_stub }}/32: systemd-resolved's stub;
+{% if finance_digest_notion_on | bool %}
+#   - Notion is configured: the deny list is the private and special ranges only, so the public internet
+#     (api.notion.com) is reachable; loopback, the LAN and the rest of the tailnet stay closed.
+{% else %}
+#   - Notion is not configured: everything else is denied (IPAddressDeny=any).
+{% endif %}
+{% for p in finance_digest_sandbox %}
+{{ p }}
+{% endfor %}

@@ -1,0 +1,24 @@
+---
+# Order matters: handlers run in this order, so units are reloaded before anything restarts.
+- name: Reload systemd for ai-control
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+# Re-applies the guard file (ExecReload = nft -f; it starts the unit if it isn't running). A reload, not a restart:
+# a restart would stop the server too (it requires the guard). Before the restarts, so S never comes back unguarded.
+- name: Reload ai-control guard
+  ansible.builtin.systemd_service:
+    name: "{{ ai_control_guard_unit }}"
+    state: reloaded
+
+# Only the listening socket. Running helper instances finish their one request; the next
+# connection already starts the new script (one process per connection).
+- name: Restart aictl-helper socket
+  ansible.builtin.systemd_service:
+    name: "{{ ai_control_helper_socket_unit }}"
+    state: restarted
+
+- name: Restart ai-control
+  ansible.builtin.systemd_service:
+    name: "{{ ai_control_service }}"
+    state: restarted

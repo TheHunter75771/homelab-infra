@@ -1,0 +1,29 @@
+---
+# One read-only share case for test_render.yml: runs the role's tasks/verify_skills_assert.yml against a
+# sample open-webui mount table for one share (case_share: skills by default, or writing) and checks it
+# passes or fails as expected.
+- name: Share ro case | the role's assert
+  block:
+    - name: Share ro case | tasks/verify_skills_assert.yml
+      ansible.builtin.include_tasks: "{{ ai_stack_test_role }}/tasks/verify_skills_assert.yml"
+      vars:
+        ai_stack_skills_mountinfo: {stdout_lines: "{{ case_lines }}"}
+        share_now:
+          rc: "{{ case_view_rc }}"
+          share: "{{ ai_stack_ro_shares | selectattr('name', 'equalto', case_share | default('skills')) | first }}"
+
+    - name: Share ro case | it passed
+      ansible.builtin.set_fact:
+        skills_case_failed: false
+  rescue:
+    - name: Share ro case | it failed
+      ansible.builtin.set_fact:
+        skills_case_failed: true
+  always:
+    - name: Share ro case | outcome is as expected
+      ansible.builtin.assert:
+        that:
+          - skills_case_failed is defined
+          - (not skills_case_failed) == (case_expect_ok | bool)
+        fail_msg: "{{ case_name }}: expected {{ 'pass' if case_expect_ok | bool else 'fail' }}."
+        quiet: true

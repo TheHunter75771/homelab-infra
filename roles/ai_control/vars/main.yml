@@ -1,0 +1,92 @@
+---
+# Fixed by the contract (§12.15.7) and the app READMEs.
+ai_control_app_dir: /opt/ai-control
+ai_control_server_dir: "{{ ai_control_app_dir }}/server"
+ai_control_web_dir: "{{ ai_control_app_dir }}/web"
+ai_control_config_dir: /etc/ai-control
+ai_control_config_file: "{{ ai_control_config_dir }}/config.json"
+ai_control_token_file: "{{ ai_control_config_dir }}/agent-token"
+ai_control_helper_config_file: "{{ ai_control_config_dir }}/helper.json"
+ai_control_state_dir: /var/lib/ai-control
+ai_control_helper_script: /usr/local/sbin/aictl-helper
+ai_control_helper_socket: /run/aictl-helper.sock
+ai_control_service: ai-control.service
+ai_control_helper_socket_unit: aictl-helper.socket
+ai_control_unit_dir: /etc/systemd/system
+ai_control_python: /usr/bin/python3
+# The local-access guard (Reviewer Q): its own nftables table, its rules file (root 0644) and the oneshot that loads it.
+ai_control_guard_unit: ai-control-guard.service
+ai_control_guard_table: ai_control_guard
+ai_control_guard_file: "{{ ai_control_config_dir }}/guard.nft"
+ai_control_nft: /usr/sbin/nft
+ai_control_iface_check_argv: [ip, -o, link, show, dev, "{{ ai_control_tailscale_iface }}"]
+# The guard's probe (files/guard_probe.py), run with `python3 -I -B -c` so nothing is installed for it.
+ai_control_guard_probe_src: "{{ role_path }}/files/guard_probe.py"
+# Read-only sysctl the preflight checks (the tests point it at a scratch file).
+ai_control_userns_sysctl: /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+# Owner/group of root-owned files that aictl must read (config.json, agent-token: root:aictl 0640).
+# The tests override them.
+ai_control_root_owner: root
+ai_control_group: "{{ ai_control_user }}"
+
+# Only these file types from W's public/ are deployed (web/README.md, "What gets deployed").
+ai_control_web_extensions: [html, js, css, svg, webmanifest]
+
+ai_control_config: >-
+  {{ {'listen_host': '127.0.0.1',
+      'listen_port': ai_control_listen_port | int,
+      'gate_url': ai_control_gate_url,
+      'broker_url': ai_control_broker_url,
+      'webui_url': ai_control_webui_url,
+      'helper_socket': ai_control_helper_socket,
+      'agent_url': ai_control_agent_url,
+      'agent_token_file': ai_control_token_file,
+      'static_dir': ai_control_web_dir,
+      'gate_samples_path': ai_control_state_dir ~ '/gate-samples.jsonl',
+      'disk_mounts': ai_control_disk_mounts,
+      'gate_threshold': ai_control_gate_threshold | int,
+      'gate_window': ai_control_gate_window | int,
+      'timezone': none}
+     | combine(ai_control_config_extra) }}
+
+ai_control_helper_config: >-
+  {{ {'user': ai_control_user,
+      'containers': ai_control_helper_containers,
+      'sudo_exes': ai_control_helper_sudo_exes}
+     | combine(ai_control_helper_config_extra) }}
+
+# Docker publishes the broker and Open WebUI on tailnet_ip with the userland proxy off, so S's
+# connections to them are DNATed in nat OUTPUT to the container's bridge address, and systemd's IP
+# filter sees that rewritten destination. So the allowlist carries Docker's container range, from
+# role docker (one source of truth): docker_address_pools_container, the range every pool must sit
+# in (it also covers docker0 and networks created before the pools were pinned). The inventory's
+# value wins; otherwise role docker's default, which preflight.yml loads with include_vars.
+ai_control_docker_pools: >-
+  {{ [docker_address_pools_container
+      | default(ai_control_docker_role_defaults.docker_address_pools_container | default(''))] }}
+# ai_control_container_allow (§12.23, R12-5), when set, replaces the range: just the broker's and Open
+# WebUI's pinned addresses, so S can't reach ollama-cpu (or anything else on a bridge) directly.
+# preflight.yml validates it.
+ai_control_container_ips: >-
+  {{ ai_control_docker_pools if ai_control_container_allow is none else ai_control_container_allow }}
+ai_control_ip_allow: >-
+  {{ (['localhost', tailnet_ip, gaming_pc_tailnet_ip] + ai_control_container_ips)
+     | select('string') | reject('equalto', '') | unique | list }}
+
+# The handler set role tailscale_serve applies on ai-box (its WHOLE serve config): AI Control's own origin first,
+# unchanged, then the other roles' handlers from ai_control_serve_extra_handlers (default [], so by default AI
+# Control alone, as before). Role mission_control declares exactly this set too (§12.29), so neither converge resets
+# the other's handler. preflight.yml checks the extras.
+ai_control_serve_backend: "http://127.0.0.1:{{ ai_control_listen_port }}"
+ai_control_serve_own_handler:
+  port: "{{ ai_control_serve_port | int }}"
+  mount: /
+  backend: "{{ ai_control_serve_backend }}"
+ai_control_serve_handlers: "{{ [ai_control_serve_own_handler] + ai_control_serve_extra_handlers }}"
+
+# The guard's live check (tasks/verify_guard.yml): serve's 443 on both tailnet addresses (refused for everyone on
+# ai-box, root included) and S's loopback port (only the allowed users). ai_control_guard_ip6 is preflight's fact.
+ai_control_guard_targets:
+  - {name: serve4, host: "{{ tailnet_ip }}", port: "{{ ai_control_serve_port | int }}"}
+  - {name: serve6, host: "{{ ai_control_guard_ip6 | default('') }}", port: "{{ ai_control_serve_port | int }}"}
+  - {name: server, host: 127.0.0.1, port: "{{ ai_control_listen_port | int }}"}

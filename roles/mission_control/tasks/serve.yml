@@ -1,0 +1,14 @@
+---
+# §12.29: `tailscale serve` https :8443 -> 127.0.0.1:8097, its own origin (service worker and push identity apart
+# from AI Control's 443). Role tailscale_serve is reused unchanged, only parameterised: it declares ai-box's WHOLE
+# serve config, so the handler list is AI Control's 443 handler (exactly as role ai_control declares it) plus the
+# shared ai_control_serve_extra_handlers, which preflight.yml requires to hold exactly Mission Control's handler.
+# Its one-origin guard stays on AI Control's 443. It reads `tailscale serve status --json` and touches nothing when
+# it matches; on drift it resets the node's serve config and applies every handler (AI Control's 443 included).
+- name: Serve | tailscale serve 443 (AI Control) and :8443 (Mission Control) through role tailscale_serve
+  ansible.builtin.include_role:
+    name: tailscale_serve
+  vars:
+    tailscale_serve_handlers: "{{ mission_control_serve_handlers }}"
+    tailscale_serve_dashboard_port: "{{ mission_control_aictl_serve_port | int }}"
+    tailscale_serve_dashboard_backend: "{{ mission_control_aictl_backend }}"

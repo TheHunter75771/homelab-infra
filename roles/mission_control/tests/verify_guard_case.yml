@@ -1,0 +1,47 @@
+---
+# verify_guard_assert.yml with canned answers. guard_case = {name, want, and optionally: nobody / root (3 answers
+# each in mission_control_guard_targets order; nobody: null = garbage), localapi (2 answers), rc (nft list's exit
+# code), after_changed (ufw reload changed the table), no_iif (the table has no interface rule)}. Anything not given
+# is the good answer.
+- name: Verify guard | outcome for {{ guard_case.name }}
+  vars:
+    test_names: "{{ mission_control_guard_targets | map(attribute='name') | list }}"
+    test_api_names: "{{ mission_control_localapi_targets | map(attribute='name') | list }}"
+    test_iif: "{{ '' if guard_case.no_iif | default(false) else 'iifname != \"tailscale0\" ' }}"
+    test_table: |
+      table inet mission_control_guard {
+        chain input {
+          ip daddr 100.64.0.10 tcp dport { 8443 } {{ test_iif }}counter packets 3 bytes 180 reject with tcp reset
+        }
+      }
+  block:
+    - name: Verify guard | verify_guard_assert.yml for {{ guard_case.name }}
+      ansible.builtin.include_tasks: ../tasks/verify_guard_assert.yml
+      vars:
+        test_nobody: "{{ guard_case.nobody if 'nobody' in guard_case else ['ECONNREFUSED', 'ECONNREFUSED', 'ECONNREFUSED'] }}"
+        mission_control_guard_list_rc: "{{ guard_case.rc | default(0) }}"
+        mission_control_guard_before: "{{ test_table }}"
+        mission_control_guard_after: >-
+          {{ (test_table | replace('reject', 'accept')) if guard_case.after_changed | default(false)
+             else (test_table | replace('packets 3 bytes 180', 'packets 9 bytes 540')) }}
+        mission_control_guard_ufw_reloaded: true
+        mission_control_guard_nobody_out: >-
+          {{ (dict(test_names | zip(test_nobody)) | to_json) if test_nobody is not none else 'Traceback' }}
+        mission_control_guard_root_out: >-
+          {{ dict(test_names | zip(guard_case.root | default(['ok', 'ECONNREFUSED', 'ECONNREFUSED']))) | to_json }}
+        mission_control_guard_localapi_out: >-
+          {{ dict(test_api_names | zip(guard_case.localapi | default(['reset', 'closed']))) | to_json }}
+    - name: Passed
+      ansible.builtin.set_fact:
+        test_guard_got: pass
+  rescue:
+    - name: Failed
+      ansible.builtin.set_fact:
+        test_guard_got: >-
+          {{ 'fail' if ansible_failed_task.name == "Verify | the guard's answers" else 'error: ' ~ ansible_failed_task.name }}
+
+- name: Verify guard | expected for {{ guard_case.name }}
+  ansible.builtin.assert:
+    that: test_guard_got == guard_case.want
+    fail_msg: "{{ guard_case.name }}: {{ test_guard_got }}, want {{ guard_case.want }}"
+    quiet: true

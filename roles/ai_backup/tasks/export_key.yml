@@ -1,0 +1,65 @@
+---
+# Hand the pull key and ai-box's host key to the PC play (like ai_library_share's export_credentials). The playbook
+# includes this after tasks_from: stage, on ai-box. It sets the host facts ai_backup_pull_private_key (no_log) and
+# ai_backup_host_pubkey (public: "ssh-ed25519 AAAA...", no comment); the PC play passes them to tasks_from: pull.
+# The slurped bytes are dropped as soon as the fact is set. In check mode before the first real run the key
+# doesn't exist yet: the facts are then "" and the PC keeps (or, in check mode only, skips) its files.
+- name: Export key | look at the key and the host key
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: false
+  loop:
+    - "{{ ai_backup_key_file }}"
+    - "{{ ai_backup_host_key_file }}"
+  register: ai_backup_export_stat
+
+- name: Export key | both exist (tasks_from stage creates the key)
+  ansible.builtin.assert:
+    that:
+      - item.stat.isreg | default(false) or ansible_check_mode
+    fail_msg: "{{ item.item }} is missing or not a regular file; run tasks_from: stage first."
+    quiet: true
+  loop: "{{ ai_backup_export_stat.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Export key | read the private half
+  ansible.builtin.slurp:
+    src: "{{ ai_backup_key_file }}"
+  register: ai_backup_export_slurp
+  no_log: true
+  when: ai_backup_export_stat.results[0].stat.isreg | default(false)
+
+- name: Export key | read the host key
+  ansible.builtin.slurp:
+    src: "{{ ai_backup_host_key_file }}"
+  register: ai_backup_export_hostkey
+  when: ai_backup_export_stat.results[1].stat.isreg | default(false)
+
+- name: Export key | set the facts
+  ansible.builtin.set_fact:
+    ai_backup_pull_private_key: >-
+      {{ (ai_backup_export_slurp.content | b64decode) if ai_backup_export_slurp is not skipped else '' }}
+    ai_backup_host_pubkey: >-
+      {{ (ai_backup_export_hostkey.content | b64decode).split()[:2] | join(' ') if ai_backup_export_hostkey is not skipped else '' }}
+    ai_backup_export_slurp: {}
+  no_log: true
+
+# no_log: a failure must not print the key.
+- name: Export key | the private half is an OpenSSH private key
+  ansible.builtin.assert:
+    that:
+      - ai_backup_pull_private_key is match('^-----BEGIN OPENSSH PRIVATE KEY-----\n')
+      - ai_backup_pull_private_key is search('\n-----END OPENSSH PRIVATE KEY-----\n?$')
+    quiet: true
+  no_log: true
+  when: ai_backup_pull_private_key | length > 0 or not ansible_check_mode
+
+- name: Export key | the host key is an ed25519 public key
+  ansible.builtin.assert:
+    that:
+      - ai_backup_host_pubkey is match('^ssh-ed25519 [A-Za-z0-9+/=]+$')
+    fail_msg: "{{ ai_backup_host_key_file }} is not an ed25519 public key."
+    quiet: true
+  when: ai_backup_host_pubkey | length > 0 or not ansible_check_mode

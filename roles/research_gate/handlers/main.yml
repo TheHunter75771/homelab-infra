@@ -1,0 +1,12 @@
+---
+# Order matters: handlers run in this order, so the unit is reloaded before anything restarts.
+- name: Reload systemd for research-gate
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+# Only when the gate is switched on; with research_gate_enabled false it stays stopped (tasks/service.yml).
+- name: Restart research-gate
+  ansible.builtin.systemd_service:
+    name: "{{ research_gate_service }}"
+    state: restarted
+  when: research_gate_enabled | bool

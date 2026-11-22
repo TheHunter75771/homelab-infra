@@ -1,0 +1,24 @@
+---
+- name: Service | research-gate unit
+  ansible.builtin.template:
+    src: research-gate.service.j2
+    dest: "{{ research_gate_unit_dir }}/{{ research_gate_service }}"
+    owner: "{{ research_gate_root_owner }}"
+    group: "{{ research_gate_root_owner }}"
+    mode: "0644"
+    follow: false
+  notify:
+    - Reload systemd for research-gate
+    - Restart research-gate
+
+# Reload the unit, then restart it if it is enabled and something changed.
+- name: Service | apply pending reloads and restarts
+  ansible.builtin.meta: flush_handlers
+
+# §12.16.4 switch. Off: installed only; a gate that was on is stopped and disabled.
+- name: Service | research-gate on (enabled, running) or off (installed only)
+  ansible.builtin.systemd_service:
+    name: "{{ research_gate_service }}"
+    enabled: "{{ research_gate_enabled | bool }}"
+    state: "{{ 'started' if research_gate_enabled | bool else 'stopped' }}"
+  ignore_errors: "{{ ansible_check_mode }}"

@@ -1,0 +1,64 @@
+---
+# Document extraction checks (docs/CONTRACTS.md §12.18b). All read-only, all changed=0. Skipped in check
+# mode: a check run starts nothing, so on a first run there is no container to ask.
+#   1. tika is healthy;
+#   2. from inside open-webui, Tika OCRs a freshly drawn PNG and the same picture as an image-only PDF
+#      (files/ocr_check.py, fed on stdin; nothing is copied into the container);
+#   3. Open WebUI's EFFECTIVE document settings are the configured ones (files/webui_extraction_config.py
+#      reads its database read-only). Open WebUI 0.12.4 lets a stored value beat the environment, so after
+#      the first start only the admin panel (or a fresh volume) changes them. A mismatch fails the play with
+#      what the admin sets in Admin Panel > Settings > Documents; the role never writes Open WebUI's database.
+
+- name: Extraction | tika is healthy
+  community.docker.docker_container_info:
+    name: tika
+  register: ai_stack_tika_info
+  until: >-
+    ai_stack_tika_info.exists
+    and ai_stack_tika_info.container.State.Health.Status | default('') == 'healthy'
+  retries: 12
+  delay: 10
+  when: not ansible_check_mode
+
+- name: Extraction | Tika OCRs an image and a scanned PDF (from inside open-webui)
+  community.docker.docker_container_exec:
+    container: open-webui
+    argv: [python3, "-", "{{ ai_stack_tika_url }}"]
+    stdin: "{{ lookup('ansible.builtin.file', 'ocr_check.py') }}"
+  register: ai_stack_ocr_check
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Extraction | OCR result
+  vars:
+    # The script prints one JSON object; anything else (a traceback goes to stderr) reads as {}.
+    ai_stack_ocr: "{{ ai_stack_ocr_check.stdout | default('') | regex_search('^\\{.*\\}$') | default('{}', true) | from_json }}"
+  ansible.builtin.assert:
+    that:
+      - ai_stack_ocr_check.rc | default(-1) == 0
+      - ai_stack_ocr.ok | default(false)
+    fail_msg: >-
+      Tika did not return the drawn words (rc {{ ai_stack_ocr_check.rc | default("none") }}, {{ ai_stack_ocr_check.msg | default("") }}):
+      {{ ai_stack_ocr_check.stdout | default('') }} {{ ai_stack_ocr_check.stderr | default('') }}.
+      Check `docker logs tika` (tika-config.xml at {{ ai_stack_tika_config_file }}).
+    success_msg: "OCR ok: {{ ai_stack_ocr.words | default([]) | join(' ') }} read back from PNG and PDF."
+  when: not ansible_check_mode
+
+# ONE exec for every settings check of the converge (Reviewer I R10-3: open-webui runs close to its memory
+# limit): the extraction keys, plus the search keys (§12.22, tasks/verify_search.yml reads this same
+# result) when ai_embed_model is set.
+- name: Extraction | Open WebUI's effective document and search settings (read-only, one exec)
+  community.docker.docker_container_exec:
+    container: open-webui
+    argv: [python3, "-", "{{ ai_stack_webui_settings_expected | to_json }}"]
+    stdin: "{{ lookup('ansible.builtin.file', 'webui_extraction_config.py') }}"
+  register: ai_stack_webui_extraction
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+# The two checks on that result are their own file so tests/test_render.yml runs them against sample output.
+- name: Extraction | the settings could be read, and the extraction ones are as configured
+  ansible.builtin.include_tasks: verify_extraction_assert.yml
+  when: not ansible_check_mode

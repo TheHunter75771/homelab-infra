@@ -1,0 +1,203 @@
+---
+# Pinned release tarballs -> a staged tree under <prefix>/lib, then atomic swaps (layout: vars/main.yml).
+#   1. download both tarballs (sha256 verified) into the cache;
+#   2. extract them into a new tree <prefix>/lib/.ollama-<version>-<random> (only the listed members,
+#      --no-same-owner), drop the unused CUDA backends, write the marker;
+#   3. rename the tree's bin/ollama over <prefix>/bin/ollama (copy: temp file + rename, default
+#      SELinux context), then swap the <prefix>/lib/ollama symlink to the tree (temp link + rename);
+#   4. the caller's handler restarts ollama; older trees are removed.
+# Runs only when something differs from the pin. No root needed by itself, so
+# tests/test_install.yml runs it unprivileged against fixture tarballs in a scratch prefix.
+- name: Ollama release pin is set
+  ansible.builtin.assert:
+    that:
+      - ollama_release.version | default('') | length > 0
+      - ollama_rocm_assets | map(attribute='name') | difference(ollama_release.assets | default({}) | list) | length == 0
+    fail_msg: Needs ollama_release.version and a sha256 for every asset in inventory/group_vars/all/versions.yml.
+    quiet: true
+
+# [3] resolves through the symlink to the tree's own bin/ollama (the reference copy).
+- name: Look at the installed release
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ ollama_rocm_lib }}"
+    - "{{ ollama_rocm_marker }}"
+    - "{{ ollama_rocm_bin }}"
+    - "{{ ollama_rocm_lib }}/../../bin/ollama"
+  register: ollama_rocm_install_stat
+
+- name: Read the install marker
+  ansible.builtin.slurp:
+    src: "{{ ollama_rocm_marker }}"
+  register: ollama_rocm_marker_read
+  when: ollama_rocm_install_stat.results[1].stat.exists
+
+# Installed = lib/ollama is our symlink, its marker names the pin, and bin/ollama is byte-identical to
+# the tree's copy (so a half-finished swap or an edited binary is redone).
+- name: Decide whether the pinned release must be installed
+  vars:
+    s: "{{ ollama_rocm_install_stat.results | map(attribute='stat') | list }}"
+  ansible.builtin.set_fact:
+    ollama_rocm_install_needed: >-
+      {{ not (s[0].islnk | default(false)
+              and s[1].exists and (ollama_rocm_marker_read.content | b64decode | trim) == ollama_release.version
+              and s[2].exists and s[3].exists
+              and s[2].checksum == s[3].checksum) }}
+
+- name: Install the pinned release
+  when: ollama_rocm_install_needed | bool
+  block:
+    - name: Download cache and prefix directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ ollama_rocm_owner }}"
+        mode: "{{ '0700' if item == ollama_rocm_cache_dir else '0755' }}"
+      loop:
+        - "{{ ollama_rocm_cache_dir }}"
+        - "{{ ollama_rocm_prefix }}/bin"
+        - "{{ ollama_rocm_tree_parent }}"
+
+    - name: Download the release tarballs (sha256 verified)
+      ansible.builtin.get_url:
+        url: "{{ ollama_rocm_download_base }}/{{ ollama_release.version }}/{{ item.name }}"
+        dest: "{{ ollama_rocm_cache_dir }}/{{ ollama_release.version }}-{{ item.name }}"
+        checksum: "sha256:{{ ollama_release.assets[item.name] }}"
+        owner: "{{ ollama_rocm_owner }}"
+        mode: "0600"
+        timeout: 60
+      loop: "{{ ollama_rocm_assets }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # Nothing below runs in check mode: nothing was downloaded to stage.
+    - name: Stage, swap and clean up
+      when: not ansible_check_mode
+      block:
+        # Under <prefix>/lib, so the tree is created lib_t (never var_t from the cache).
+        - name: Create the staging tree
+          ansible.builtin.tempfile:
+            state: directory
+            path: "{{ ollama_rocm_tree_parent }}"
+            prefix: "{{ ollama_rocm_tree_prefix }}{{ ollama_release.version }}-"
+          register: ollama_rocm_stage
+
+        - name: Staging tree is world-readable like the rest of the prefix
+          ansible.builtin.file:
+            path: "{{ ollama_rocm_stage.path }}"
+            state: directory
+            owner: "{{ ollama_rocm_owner }}"
+            mode: "0755"
+
+        - name: Extract the release into the staging tree (only bin/ollama and lib/ollama)
+          ansible.builtin.unarchive:
+            src: "{{ ollama_rocm_cache_dir }}/{{ ollama_release.version }}-{{ item.name }}"
+            dest: "{{ ollama_rocm_stage.path }}"
+            remote_src: true
+            include: "{{ item.members }}"
+            extra_opts:
+              - --no-same-owner
+          loop: "{{ ollama_rocm_assets }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: Find the unused backends
+          ansible.builtin.find:
+            paths: "{{ ollama_rocm_stage.path }}/lib/ollama"
+            patterns: "{{ ollama_rocm_prune_backends }}"
+            file_type: directory
+          register: ollama_rocm_unused_backends
+
+        - name: Remove the unused backends
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop: "{{ ollama_rocm_unused_backends.files | map(attribute='path') | sort }}"
+
+        - name: The staged binary is in place
+          ansible.builtin.stat:
+            path: "{{ ollama_rocm_stage.path }}/bin/ollama"
+            get_checksum: false
+          register: ollama_rocm_staged_bin
+
+        - name: Fail when the tarball layout changed
+          ansible.builtin.assert:
+            that:
+              - ollama_rocm_staged_bin.stat.exists
+              - ollama_rocm_staged_bin.stat.executable
+            fail_msg: bin/ollama is missing or not executable after extraction; check the release's tarball layout.
+            quiet: true
+
+        - name: Record the release in the staged tree
+          ansible.builtin.copy:
+            content: "{{ ollama_release.version }}\n"
+            dest: "{{ ollama_rocm_stage.path }}/lib/ollama/.homelab-release"
+            owner: "{{ ollama_rocm_owner }}"
+            mode: "0644"
+
+        # copy writes a temp file next to the destination and renames it over: atomic, and it gets
+        # bin/ollama's default SELinux context (bin_t).
+        - name: Swap in the binary
+          ansible.builtin.copy:
+            src: "{{ ollama_rocm_stage.path }}/bin/ollama"
+            dest: "{{ ollama_rocm_bin }}"
+            remote_src: true
+            owner: "{{ ollama_rocm_owner }}"
+            mode: "0755"
+          notify: Restart ollama
+
+        # One-time migration from a plain directory (the upstream installer's layout). A directory
+        # can't be replaced by a symlink atomically; afterwards every swap is.
+        - name: Remove a plain lib/ollama directory left by another installer
+          ansible.builtin.file:
+            path: "{{ ollama_rocm_lib }}"
+            state: absent
+          when:
+            - ollama_rocm_install_stat.results[0].stat.exists
+            - not ollama_rocm_install_stat.results[0].stat.islnk
+
+        # file writes a temp link and renames it over the old one: atomic.
+        - name: Swap in the libraries
+          ansible.builtin.file:
+            src: "{{ ollama_rocm_stage.path | basename }}/lib/ollama"
+            dest: "{{ ollama_rocm_lib }}"
+            state: link
+            force: true
+          notify: Restart ollama
+
+        - name: Delete the downloaded tarballs (about 2.5 GB)
+          ansible.builtin.file:
+            path: "{{ ollama_rocm_cache_dir }}/{{ ollama_release.version }}-{{ item.name }}"
+            state: absent
+          loop: "{{ ollama_rocm_assets }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+# --- Every run: name the live tree, remove any other (older releases, an interrupted staging).
+- name: Resolve the live tree
+  ansible.builtin.stat:
+    path: "{{ ollama_rocm_lib }}"
+    get_checksum: false
+  register: ollama_rocm_lib_stat
+
+- name: Remember the live tree
+  ansible.builtin.set_fact:
+    ollama_rocm_tree: "{{ ollama_rocm_lib_stat.stat.lnk_source | dirname | dirname }}"
+  when: ollama_rocm_lib_stat.stat.islnk | default(false)
+
+- name: Find release trees
+  ansible.builtin.find:
+    paths: "{{ ollama_rocm_tree_parent }}"
+    patterns: "{{ ollama_rocm_tree_prefix }}*"
+    file_type: directory
+    hidden: true
+  register: ollama_rocm_trees
+  when: ollama_rocm_tree is defined
+
+- name: Remove trees that aren't live
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ ollama_rocm_trees.files | map(attribute='path') | reject('eq', ollama_rocm_tree) | sort }}"
+  when: ollama_rocm_tree is defined

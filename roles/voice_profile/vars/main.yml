@@ -1,0 +1,118 @@
+---
+# Fixed by the contract (§12.21.1) and module V.
+voice_profile_user: vprof
+# §12.21.1: supplementary group rgate (the library mount is uid/gid rgate, dir_mode 0770), never docker. Roles
+# research_gate and ai_library_share own the rgate account; this role only joins its group.
+voice_profile_library_group: rgate
+voice_profile_app_dir: /opt/voice-profile
+voice_profile_config_dir: /etc/voice-profile
+voice_profile_config_file: "{{ voice_profile_config_dir }}/config.json"
+voice_profile_service: voice-profile.service
+voice_profile_unit_dir: /etc/systemd/system
+voice_profile_python: /usr/bin/python3
+# Owner/group of the root-owned files vprof must read (config.json: root:vprof 0640). The tests override them.
+voice_profile_root_owner: root
+voice_profile_group: "{{ voice_profile_user }}"
+# V's launcher (it puts its own directory first on sys.path, so it works under `python3 -I`, and finds library
+# beside it) and the packages beside it: the only entries kept under /opt/voice-profile.
+voice_profile_launcher: "{{ voice_profile_app_dir }}/voice-profile"
+voice_profile_packages:
+  - {name: voice_profile, src: "{{ voice_profile_pkg_src }}"}
+  - {name: library, src: "{{ voice_profile_library_src_dir }}/library"}
+voice_profile_app_entries: "{{ voice_profile_packages | map(attribute='name') | list + ['voice-profile'] }}"
+# §12.11: the share carries this sentinel. 40-writing/ is the main writable path (§12.21.2: samples-text/,
+# MANIFEST.md, style-stats.md, voice-profile.md or voice-profile.next.md, and the library's temp files beside
+# them). Inside it, samples/ (Noah's originals) is read-only again: V only reads them. The rest of the library
+# (walked for the cap) is read-only through ProtectSystem=strict.
+voice_profile_sentinel: "{{ voice_profile_library_root }}/.ai-library-sentinel"
+voice_profile_writing_dir: "{{ voice_profile_library_root }}/40-writing"
+voice_profile_samples_dir: "{{ voice_profile_writing_dir }}/samples"
+# Noah's override list (§12.21.2): V reads it, never writes it (Reviewer M, M-6: read-only in the unit).
+voice_profile_include_file: "{{ voice_profile_writing_dir }}/include.txt"
+# The Lead's H7 decision (§12.21, from V's report): when a sample is removed or newly excluded, V moves its stale
+# cleaned text to 90-archive/40-writing/samples-text/ with Library.archive, so W3 never serves it. That folder
+# is the second (and last) writable path. The role creates it (a fresh library has only 90-archive/), owned
+# like everything on the mount: rgate:rgate 0770 (the CIFS client's uid/gid/dir_mode, so a converge on the
+# share changes nothing). The tests override the owner.
+voice_profile_archive_root: "{{ voice_profile_library_root }}/90-archive"
+voice_profile_archive_dir: "{{ voice_profile_archive_root }}/40-writing"
+voice_profile_library_owner: "{{ voice_profile_library_group }}"
+voice_profile_library_dir_mode: "0770"
+# Paths ProtectHome/ProtectSystem hide or make read-only in ways ReadWritePaths can't fix, plus system dirs.
+voice_profile_library_forbidden_re: '^/(home|root|run|proc|sys|dev|etc|usr|boot|bin|sbin|lib|lib64|opt|var|tmp)(/|$)'
+
+voice_profile_broker_url: "http://{{ tailnet_ip | default('') }}:{{ voice_profile_broker_port }}"
+
+# §12.21 / the Lead's H7 brief: an IP allow for the broker only. Allowed: ai-box's tailnet address (the broker's
+# published address, where the replies come from) and the `ai` network /24 (the broker's DNAT target). No
+# resolver stub (Reviewer M, M-5): the broker URL is an IPv4 literal. Everything else is denied.
+voice_profile_ip_allow: "{{ [(tailnet_ip | default('')) ~ '/32'] + voice_profile_broker_ranges }}"
+voice_profile_ip_deny: [any]
+
+# /etc/voice-profile/config.json: V's settings plus the library root and the broker URL (the role's own values
+# win). V's loader (apps/voice-profile/voice_profile/config.py) refuses unknown keys.
+voice_profile_config: >-
+  {{ voice_profile_settings
+     | combine({'library_root': voice_profile_library_root, 'broker_url': voice_profile_broker_url}) }}
+
+# config.json's deploy-time check (`validate`; %s is the candidate file): V's own loader from the installed
+# code. -I -B: nothing from the environment or the working directory, no bytecode in the root-owned install.
+voice_profile_config_validate: >-
+  {{ voice_profile_python }} -I -B -c
+  "import sys; sys.path.insert(0, sys.argv[2]); from voice_profile.config import load; load(sys.argv[1])"
+  %s {{ voice_profile_app_dir }}
+
+# The unit's [Service] sandbox, one `Key=Value` per entry. The unit template renders exactly these, and the
+# post-install `status` check (tasks/verify.yml) runs under the same list through systemd-run, so it proves the
+# real sandbox (the DNAT and ProcSubset lessons of §12.15/§12.17 were both found live).
+voice_profile_sandbox:
+  - "User={{ voice_profile_user }}"
+  - "Group={{ voice_profile_user }}"
+  - "WorkingDirectory={{ voice_profile_app_dir }}"
+  - "Environment=AI_LIBRARY_CAP={{ voice_profile_library_cap }}"
+  - "UMask=0027"
+  - "MemoryMax={{ voice_profile_memory_max }}"
+  - "TasksMax={{ voice_profile_tasks_max }}"
+  - "NoNewPrivileges=yes"
+  - "ProtectSystem=strict"
+  - "ProtectHome=yes"
+  - "PrivateTmp=yes"
+  - "ReadOnlyPaths=/run"
+  - "ReadWritePaths={{ voice_profile_writing_dir }}"
+  - "ReadWritePaths={{ voice_profile_archive_dir }}"
+  - "ReadOnlyPaths=-{{ voice_profile_samples_dir }}"
+  - "ReadOnlyPaths=-{{ voice_profile_include_file }}"
+  - "InaccessiblePaths=/dev/shm"
+  - "RestrictAddressFamilies=AF_INET AF_UNIX"
+  - "CapabilityBoundingSet="
+  - "AmbientCapabilities="
+  - "SystemCallFilter=@system-service"
+  - "SystemCallFilter=~@privileged"
+  - "SystemCallErrorNumber=EPERM"
+  - "SystemCallArchitectures=native"
+  - "PrivateDevices=yes"
+  - "PrivateIPC=yes"
+  - "ProtectKernelTunables=yes"
+  - "ProtectKernelModules=yes"
+  - "ProtectKernelLogs=yes"
+  - "ProtectControlGroups=yes"
+  - "ProtectClock=yes"
+  - "ProtectHostname=yes"
+  - "ProtectProc=invisible"
+  - "RestrictNamespaces=yes"
+  - "RestrictRealtime=yes"
+  - "RestrictSUIDSGID=yes"
+  - "LockPersonality=yes"
+  - "MemoryDenyWriteExecute=yes"
+  - "RemoveIPC=yes"
+  - "IPAddressDeny={{ voice_profile_ip_deny | join(' ') }}"
+  - "IPAddressAllow={{ voice_profile_ip_allow | join(' ') }}"
+
+# V's command without its subcommand (the unit adds `build`, the verify `status`).
+voice_profile_argv:
+  - "{{ voice_profile_python }}"
+  - -I
+  - -B
+  - "{{ voice_profile_launcher }}"
+  - --config
+  - "{{ voice_profile_config_file }}"

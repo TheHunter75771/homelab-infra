@@ -1,0 +1,25 @@
+---
+# Mutants for tests/check_no_log.py (run.sh feeds it this file and expects the three FAIL lines). Never included by
+# a play.
+- name: Mutant | an assert whose message prints the token
+  ansible.builtin.assert:
+    that: mc_notify_client_token_ok | bool
+    fail_msg: "the token {{ mc_notify_client_token }} is too short"
+    quiet: true
+
+- name: Mutant | an assert that checks the token itself
+  ansible.builtin.assert:
+    that: mc_notify_client_token | length >= 32
+    quiet: true
+
+- name: Mutant | writes the token without no_log
+  ansible.builtin.copy:
+    content: "{{ mc_notify_client_token }}\n"
+    dest: /nonexistent/token
+    mode: "0600"
+
+- name: Mutant | an assert whose prose names the token (allowed)
+  ansible.builtin.assert:
+    that: mc_notify_client_token_ok | bool
+    fail_msg: mc_notify_client_token comes from the vault
+    quiet: true

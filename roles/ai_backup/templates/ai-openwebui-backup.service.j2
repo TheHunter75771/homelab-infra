@@ -1,0 +1,20 @@
+# {{ ansible_managed }}
+# Role ai_backup (docs/CONTRACTS.md §12.28): Open WebUI's nightly backup on ai-box. Writes
+# {{ ai_backup_stage_dir }}/owui-<UTC stamp>.tar (integrity-checked SQLite copies, uploads, vector_db, the stack .env,
+# MANIFEST.sha256 last) + LAST_OK, keeps {{ ai_backup_stage_keep }}. Reads the volume from the HOST path, read-only;
+# never touches the container. A failure fails this unit. Started by {{ ai_backup_stage_timer }} only (no [Install]);
+# by hand: systemctl start {{ ai_backup_stage_service }}
+[Unit]
+Description=Open WebUI nightly backup (staged for the gaming PC's pull)
+Documentation=file://{{ ai_backup_script }}
+RequiresMountsFor={{ ai_backup_stage_dir }} {{ ai_backup_volume_dir }}
+AssertPathIsDirectory={{ ai_backup_volume_dir }}
+
+[Service]
+Type=oneshot
+ExecStart={{ ai_backup_stage_argv | join(' ') }}
+TimeoutStartSec=1h
+SyslogIdentifier=ai-openwebui-backup
+{% for p in ai_backup_stage_sandbox %}
+{{ p }}
+{% endfor %}

@@ -1,0 +1,26 @@
+---
+# One search-settings case for test_render.yml: runs the role's tasks/verify_search_assert.yml against a
+# sample checker result with the gate on or off, and checks it passes or fails as expected.
+- name: Search case | the role's report and check
+  block:
+    - name: Search case | tasks/verify_search_assert.yml
+      ansible.builtin.include_tasks: "{{ ai_stack_test_role }}/tasks/verify_search_assert.yml"
+      vars:
+        ai_stack_webui_search: {rc: "{{ case_rc }}", stdout: "{{ case_stdout }}", stderr: ""}
+        ai_stack_verify_search_settings: "{{ case_gate }}"
+
+    - name: Search case | it passed
+      ansible.builtin.set_fact:
+        search_case_failed: false
+  rescue:
+    - name: Search case | it failed
+      ansible.builtin.set_fact:
+        search_case_failed: true
+  always:
+    - name: Search case | outcome is as expected
+      ansible.builtin.assert:
+        that:
+          - search_case_failed is defined
+          - (not search_case_failed) == (case_expect_ok | bool)
+        fail_msg: "{{ case_name }}: expected {{ 'pass' if case_expect_ok | bool else 'fail' }}."
+        quiet: true

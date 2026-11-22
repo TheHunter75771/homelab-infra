@@ -1,0 +1,49 @@
+---
+# Role ai_library_share (docs/CONTRACTS.md §12.17; module L2). Two entry points, no main:
+#   tasks_from: server   gaming PC (Fedora, SELinux enforcing): Samba share of /mnt/share/ai-library to
+#                        ai-box only, the ailib account, the nightly backup timer.
+#   tasks_from: client   ai-box (Ubuntu): CIFS automount at /srv/ai-library as rgate.
+#   tasks_from: export_credentials   after server, in the same play: hands the ailib password to the
+#                        client play as the host fact ai_library_share_password (no_log).
+# Host vars: gaming_pc_tailnet_ip and ai_box_tailnet_ip (server; plus the *_ip6 forms when set),
+# tailnet_ip and gaming_pc_tailnet_ip (client). The firewall for 445 is module G's
+# (ollama_rocm_policy_privileged_ports), never this role's.
+
+# ---- server ------------------------------------------------------------------------------------
+# The ntfs3 share drive and the library folder on it (§12.11).
+ai_library_share_share_mount: /mnt/share
+ai_library_share_share_fstypes: [ntfs3]
+ai_library_share_dir: /mnt/share/ai-library
+# The backup drive and the snapshot folder on it (current/ and prev/ live inside).
+ai_library_share_backup_mount: /mnt/backup
+ai_library_share_backup_fstypes: [ext4]
+ai_library_share_backup_dir: /mnt/backup/ai-library
+# Samba's force user / force group: Noah's account, the owner of the ntfs3 mount (uid=, gid=). No
+# default on purpose: the inventory names it, and preflight checks it owns the mount.
+ai_library_share_force_user: ""
+ai_library_share_force_group: ""
+# Nightly backup: systemd OnCalendar and RandomizedDelaySec.
+ai_library_share_backup_calendar: "*-*-* 03:30:00"
+ai_library_share_backup_random_delay: 45min
+
+# ---- both --------------------------------------------------------------------------------------
+# The library package (module L) and this role's helper scripts, installed on both hosts. The dir is
+# pruned of anything else, so it must end in /ai-library-share.
+ai_library_share_lib_src_dir: "{{ role_path }}/../../apps/skill-library/library"
+ai_library_share_lib_dir: /usr/local/lib/ai-library-share
+# This role's own files/ (the tests run the task files outside the role).
+ai_library_share_files_dir: "{{ role_path }}/files"
+ai_library_share_owner: root
+# How long the boot-time wait for the tailnet address may take (seconds).
+ai_library_share_tailnet_wait_timeout: 120
+
+# ---- client ------------------------------------------------------------------------------------
+ai_library_share_mount_point: /srv/ai-library
+# The local owner of everything on the mount (uid=, gid=). research_gate creates the same account.
+ai_library_share_mount_user: rgate
+# Extra CIFS options appended to the contract's list (e.g. symlink=none if the verify finds the kernel
+# can create symlinks). Options that weaken the contract are refused by preflight.
+ai_library_share_mount_options_extra: []
+# The ailib password from play 1 (hostvars[<pc>].ai_library_share_password | default('')). Empty:
+# the credentials file already on ai-box is kept (it must exist). Never set in inventory.
+ai_library_share_client_password: ""

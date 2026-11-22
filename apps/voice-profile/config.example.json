@@ -1,0 +1,17 @@
+{
+  "library_root": "/srv/ai-library",
+  "broker_url": "http://broker.invalid:11434",
+  "model": "assistant",
+  "num_ctx": 16384,
+  "timeout": 1800,
+  "max_samples": 200,
+  "max_docx_bytes": 5242880,
+  "max_zip_entries": 2000,
+  "max_uncompressed_bytes": 209715200,
+  "max_xml_bytes": 8388608,
+  "max_ratio": 200,
+  "min_words": 150,
+  "dedupe_jaccard": 0.6,
+  "excerpts": 6,
+  "excerpt_chars": 1200
+}

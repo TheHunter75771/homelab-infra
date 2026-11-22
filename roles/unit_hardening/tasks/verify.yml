@@ -1,0 +1,101 @@
+---
+# Live checks after the change: two reads of each unit's state around a settle pause, a look into each running
+# process's namespace (/proc/<MainPID>/root, as root), this role's drop-ins on disk and the tmpfiles.d entry.
+# The assertions live in verify_assert.yml so the tests can feed them canned data.
+- name: Verify | first read of each unit and tailscaled
+  ansible.builtin.command:
+    argv: &uh_show_argv
+      - "{{ unit_hardening_systemctl }}"
+      - show
+      - --property=LoadState
+      - --property=ActiveState
+      - --property=SubState
+      - --property=Type
+      - --property=MainPID
+      - --property=NRestarts
+      - --property=DropInPaths
+      - --property=InaccessiblePaths
+      - --property=RuntimeDirectoryPreserve
+      - --property=PrivatePIDs
+      - --property=Environment
+      - --property=TemporaryFileSystem
+      - --property=BindPaths
+      - --property=BindReadOnlyPaths
+      - "{{ item }}"
+  loop: "{{ unit_hardening_units | map(attribute='unit') | list + [unit_hardening_tailscaled_unit] }}"
+  register: uh_v1
+  changed_when: false
+  check_mode: false
+
+# Plus the same-uid sweep (Q6-3): every process of each hardened non-root unit's user, host-wide.
+- name: Verify | look into each running unit's namespace, and every process of their users
+  vars:
+    uh_units: "{{ unit_hardening_units | map(attribute='unit') | list }}"
+  ansible.builtin.command:
+    argv: ["{{ unit_hardening_python }}", -I, -B, -c, "{{ lookup('ansible.builtin.file', 'ns_probe.py') }}"]
+    stdin: >-
+      {{ {'proc': unit_hardening_proc, 'root': unit_hardening_root, 'dir': unit_hardening_tailscale_dir,
+          'socket': unit_hardening_socket,
+          'pids': dict(uh_units | zip(uh_v1.results[:uh_units | length] | map(attribute='stdout')
+                  | map('unit_hardening_props') | map(attribute='MainPID') | map('int'))),
+          'users': uh_pre | dict2items | rejectattr('value.root') | map(attribute='value.user') | unique | sort,
+          'passwd': unit_hardening_passwd,
+          'run_allow': dict(uh_pre | dict2items | selectattr('value.root') | map(attribute='key')
+                            | zip(uh_pre | dict2items | selectattr('value.root') | map(attribute='value.run_allow')))} | to_json }}
+  register: uh_v_probe
+  changed_when: false
+  check_mode: false
+
+- name: Verify | let a crash loop show, seconds {{ unit_hardening_verify_settle }}
+  ansible.builtin.pause:
+    seconds: "{{ unit_hardening_verify_settle | int }}"
+  when: unit_hardening_verify_settle | int > 0
+
+- name: Verify | second read of each unit and tailscaled
+  ansible.builtin.command:
+    argv: *uh_show_argv
+  loop: "{{ unit_hardening_units | map(attribute='unit') | list + [unit_hardening_tailscaled_unit] }}"
+  register: uh_v2
+  changed_when: false
+  check_mode: false
+
+- name: Verify | find this role's drop-ins on every unit
+  ansible.builtin.find:
+    paths: "{{ unit_hardening_root }}{{ unit_hardening_unit_dir }}"
+    patterns: "{{ unit_hardening_dropin_name }}"
+    recurse: true
+    depth: 2
+    file_type: any
+  register: uh_v_found
+
+- name: Verify | read the tmpfiles.d entry
+  ansible.builtin.slurp:
+    src: "{{ unit_hardening_root }}{{ unit_hardening_tmpfiles }}"
+  register: uh_v_tmpfiles
+
+- name: Verify | collect the readings
+  vars:
+    uh_probe: "{{ uh_v_probe.stdout | from_json }}"
+    uh_n: "{{ unit_hardening_units | length }}"
+  ansible.builtin.set_fact:
+    uh_v:
+      units: >-
+        {% set ns = namespace(out=[]) %}{% for u in unit_hardening_units %}{% set ns.out = ns.out + [{
+          'unit': u.unit, 'restart': u.restart,
+          'root': uh_pre[u.unit].root, 'via_bus': uh_pre[u.unit].via_bus, 'user': uh_pre[u.unit].user,
+          'run_allow': uh_pre[u.unit].run_allow, 'advisory': uh_pre[u.unit].advisory,
+          'pre': uh_pre[u.unit].props,
+          's1': uh_v1.results[loop.index0].stdout | unit_hardening_props,
+          's2': uh_v2.results[loop.index0].stdout | unit_hardening_props,
+          'probe': uh_probe.units[u.unit]}] %}{% endfor %}{{ ns.out }}
+      tailscaled: "{{ uh_v2.results[uh_n | int].stdout | unit_hardening_props }}"
+      host: "{{ uh_probe.host }}"
+      sweep: "{{ uh_probe.sweep }}"
+      found: >-
+        {{ uh_v_found.files | map(attribute='path')
+           | map('regex_replace', '^' ~ (unit_hardening_root ~ unit_hardening_unit_dir) | regex_escape ~ '/', '')
+           | sort }}
+      tmpfiles: "{{ uh_v_tmpfiles.content | b64decode }}"
+
+- name: Verify | assertions
+  ansible.builtin.include_tasks: verify_assert.yml

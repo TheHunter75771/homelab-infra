@@ -1,0 +1,53 @@
+---
+# AI Library share (docs/CONTRACTS.md §12.17). Run as the operator account `claude`.
+# Prerequisite: playbooks/gaming-pc-ai.yml has converged with ollama_rocm_policy_privileged_ports: [445]
+# (tailscale0 is firewalld-trusted on the gaming PC; module G's policy limits 445 to ai-box).
+# If the PC is off at the start, play 1 skips it and ai-box keeps its existing credentials file.
+- name: AI Library share (gaming PC)
+  hosts: workstations_root
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Is the gaming PC reachable
+      ansible.builtin.ping:
+      register: ai_library_pc_ping
+      ignore_unreachable: true
+    - name: PC off, so skip it (ai-box keeps its existing credentials)
+      ansible.builtin.meta: end_host
+      when: ai_library_pc_ping.unreachable | default(false)
+    - name: Share, then export the credentials
+      block:
+        - name: Share
+          ansible.builtin.include_role:
+            name: ai_library_share
+            tasks_from: server
+        - name: Export the credentials for play 2
+          ansible.builtin.include_role:
+            name: ai_library_share
+            tasks_from: export_credentials
+      rescue:
+        - name: Remember that play 1 failed (play 3 fails the run after ai-box converged)
+          ansible.builtin.set_fact:
+            ai_library_play1_failed: true
+            ai_library_share_password: ""   # a partial export must never reach play 2
+
+- name: AI Library mount (ai-box)
+  hosts: ai_servers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Mount
+      ansible.builtin.include_role:
+        name: ai_library_share
+        tasks_from: client
+      vars:
+        ai_library_share_client_password: "{{ hostvars[groups['workstations_root'][0]].ai_library_share_password | default('') }}"
+
+- name: Report a failed play 1
+  hosts: workstations_root
+  gather_facts: false
+  tasks:
+    - name: Play 1 failed on the gaming PC
+      ansible.builtin.fail:
+        msg: Play 1 failed on {{ inventory_hostname }}; ai-box converged and kept its existing credentials.
+      when: ai_library_play1_failed | default(false)

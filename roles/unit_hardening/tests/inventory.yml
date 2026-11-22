@@ -1,0 +1,6 @@
+---
+# Synthetic inventory for tests/test_unit_hardening.yml: localhost plays a host with the declared units.
+all:
+  hosts:
+    localhost:
+      ansible_connection: local

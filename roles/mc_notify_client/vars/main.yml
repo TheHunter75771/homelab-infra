@@ -1,0 +1,33 @@
+---
+# Fixed by B2-CONTRACT.md §5 (system scope) and the house layout for user units (role backup_pull, user scope).
+# This role's own directory (its files/ and templates/ are named through it; the offline test points it at the role).
+mc_notify_client_role_dir: "{{ role_path }}"
+mc_notify_client_system: "{{ mc_notify_client_scope == 'system' }}"
+# User scope: the connecting user's home (facts).
+mc_notify_client_home: "{{ ansible_facts['user_dir'] | default('') }}"
+mc_notify_client_cli: >-
+  {{ '/usr/local/bin/mc-notify' if mc_notify_client_system | bool else mc_notify_client_home ~ '/.local/bin/mc-notify' }}
+mc_notify_client_config_dir: >-
+  {{ '/etc/mc-notify' if mc_notify_client_system | bool else mc_notify_client_home ~ '/.config/mc-notify' }}
+mc_notify_client_config_file: "{{ mc_notify_client_config_dir }}/config.json"
+mc_notify_client_token_file: "{{ mc_notify_client_config_dir }}/token"
+mc_notify_client_unit_dir: >-
+  {{ '/etc/systemd/system' if mc_notify_client_system | bool else mc_notify_client_home ~ '/.config/systemd/user' }}
+mc_notify_client_unit: notify-failure@.service
+# The user manager's copy leaves out the system copy's sandbox (README "systemd --user").
+mc_notify_client_unit_src: "{{ '' if mc_notify_client_system | bool else 'user/' }}notify-failure@.service.j2"
+# Owner of everything written: root in system scope; in user scope the connecting user (owner and group omitted).
+mc_notify_client_owner: "{{ 'root' if mc_notify_client_system | bool else omit }}"
+mc_notify_client_group: "{{ 'root' if mc_notify_client_system | bool else omit }}"
+# The user manager's bus for the daemon-reload (role backup_pull's pattern).
+mc_notify_client_systemd_env: >-
+  {{ {} if mc_notify_client_system | bool else {'XDG_RUNTIME_DIR': '/run/user/' ~ ansible_facts['user_uid']} }}
+# Preflight's rule for mc_notify_client_url: https, lowercase tailnet labels ending in .ts.net, an optional port
+# (1-65535, checked with mc_notify_client_url_port), the route itself; no user info, query or fragment.
+mc_notify_client_url_re: >-
+  ^https://[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?([.][a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*[.]ts[.]net(:[1-9][0-9]{0,4})?/api/notify\Z
+mc_notify_client_url_port: "{{ mc_notify_client_url | regex_replace('^https://[^/:]+:?([0-9]*)/.*$', '\\1') or '443' }}"
+# What config.json holds (mc-notify refuses any other key).
+mc_notify_client_config:
+  url: "{{ mc_notify_client_url }}"
+  token_file: "{{ mc_notify_client_token_file }}"

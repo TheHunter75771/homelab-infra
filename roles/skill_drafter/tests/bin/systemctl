@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Fake systemctl for tests/test_skill_drafter.yml (verify.yml): only
+# `show --property=ActiveState --property=NRestarts skill-drafter.service`. The unit's behaviour comes from the
+# mode file $SD_TEST_SYSTEMCTL: steady (active, never restarts), flapping (active, one more restart per call),
+# failed (never active). The call count is kept beside it.
+set -euo pipefail
+: "${SD_TEST_SYSTEMCTL:?}"
+[ "$*" = "show --property=ActiveState --property=NRestarts skill-drafter.service" ] \
+  || { echo "fake systemctl: unexpected arguments: $*" >&2; exit 2; }
+mode="$(cat "$SD_TEST_SYSTEMCTL")"
+n=0; [ -f "$SD_TEST_SYSTEMCTL.calls" ] && n="$(cat "$SD_TEST_SYSTEMCTL.calls")"
+n=$((n + 1)); echo "$n" >"$SD_TEST_SYSTEMCTL.calls"
+case "$mode" in
+  steady) printf 'ActiveState=active\nNRestarts=0\n' ;;
+  flapping) printf 'ActiveState=active\nNRestarts=%s\n' "$n" ;;
+  failed) printf 'ActiveState=failed\nNRestarts=5\n' ;;
+  *) echo "fake systemctl: bad mode $mode" >&2; exit 2 ;;
+esac

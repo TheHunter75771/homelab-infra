@@ -1,0 +1,849 @@
+---
+# Offline test for role voice_profile (no root, no systemd changes, nothing applied to this machine). Run it
+# through tests/run.sh (it loads the role's filter plugins and puts the fake systemd-run and systemctl first on
+# PATH). It runs the role's own task files against a scratch dir:
+#   0. the defaults (the config equals V's config.example.json apart from the broker URL), the vprof account
+#      task's exact attributes (groups: rgate only, never docker), and no task or handler that can start,
+#      restart, stop or enable the unit;
+#   1. preflight.yml: passes against a scratch library on the scratch dir's real mount; the IP allow/deny lists;
+#      refuses bad inputs (tailnet address, broker port, V's config ranges via V's loader, the cap, the start
+#      timeout, the IP filter, broker ranges reaching SearXNG, library paths and mount, sentinel, 40-writing,
+#      sources, the library group) and a running build;
+#   2. install.yml: V's launcher and package plus library, from scratch copies with junk planted, run twice with
+#      strays in between (pruned), a third time changing nothing; symlinked directories refused;
+#   3. config.yml: exactly V's keys, 0640 in a 0750 dir, validated with V's loader (which refuses bad configs);
+#      a symlinked config dir refused;
+#   4. the unit: rendered with the real paths, systemd-analyze verify clean, the sandbox list exactly, no
+#      [Install], the IP filter (default and a narrowed broker range); service.yml twice: one daemon-reload;
+#   5. verify.yml with the fakes: the real installed voice-profile runs `status` against the scratch library; a
+#      static, untriggered unit passes; an enabled unit, a timer-triggered unit, a missing unit and a status that
+#      exits non-zero are refused.
+- name: Role voice_profile deploys a sandboxed, broker-only, on-demand voice profile builder
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  vars:
+    ansible_managed: Ansible managed
+    test_tmp: ""
+    test_repo: "{{ playbook_dir }}/../../.."
+    # A synthetic tailnet address (inside 100.64.0.0/10; not a real host).
+    tailnet_ip: 100.64.0.2
+    vp_test_reloads: 0
+  # A stub handler with the role's name: nothing touches systemd; reload requests are counted.
+  handlers:
+    - name: Reload systemd for voice-profile
+      ansible.builtin.set_fact:
+        vp_test_reloads: "{{ vp_test_reloads | int + 1 }}"
+  tasks:
+    - name: The test runs through tests/run.sh
+      ansible.builtin.assert:
+        that: test_tmp is abs
+        fail_msg: Run this through roles/voice_profile/tests/run.sh.
+        quiet: true
+
+    - name: Read role ai_stack's and role searxng's defaults (as preflight does)
+      ansible.builtin.include_vars:
+        file: "{{ item.file }}"
+        name: "{{ item.name }}"
+      loop:
+        - {file: "{{ test_repo }}/roles/ai_stack/defaults/main.yml", name: voice_profile_ai_stack_role_defaults}
+        - {file: "{{ test_repo }}/roles/searxng/defaults/main.yml", name: voice_profile_searxng_role_defaults}
+
+    - name: The role's defaults (before any test override)
+      ansible.builtin.assert:
+        that:
+          - voice_profile_user == 'vprof' and voice_profile_library_group == 'rgate'
+          - voice_profile_app_dir == '/opt/voice-profile'
+          - voice_profile_launcher == '/opt/voice-profile/voice-profile'
+          - voice_profile_config_file == '/etc/voice-profile/config.json'
+          - voice_profile_service == 'voice-profile.service'
+          - voice_profile_library_root == '/srv/ai-library'
+          - voice_profile_writing_dir == '/srv/ai-library/40-writing'
+          - voice_profile_samples_dir == '/srv/ai-library/40-writing/samples'
+          - voice_profile_include_file == '/srv/ai-library/40-writing/include.txt'
+          - voice_profile_archive_root == '/srv/ai-library/90-archive'
+          - voice_profile_archive_dir == '/srv/ai-library/90-archive/40-writing'
+          - voice_profile_library_owner == 'rgate' and voice_profile_library_dir_mode == '0770'
+          - voice_profile_sentinel == '/srv/ai-library/.ai-library-sentinel'
+          - voice_profile_library_cap == '500GB'
+          - voice_profile_timeout_start == '40min'
+          - voice_profile_broker_port | int == 11434
+          - voice_profile_broker_url == 'http://100.64.0.2:11434'
+          - voice_profile_ip_deny == ['any']
+          - voice_profile_app_entries | sort == ['library', 'voice-profile', 'voice_profile']
+          - voice_profile_config.library_root == '/srv/ai-library'
+          - voice_profile_config.broker_url == 'http://100.64.0.2:11434'
+        fail_msg: "{{ voice_profile_config | to_json }} {{ voice_profile_ip_deny | to_json }} {{ voice_profile_broker_url }}"
+        quiet: true
+
+    - name: The role's config defaults are V's own (config.example.json)
+      vars:
+        example: "{{ lookup('ansible.builtin.file', test_repo ~ '/apps/voice-profile/config.example.json') | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - example.keys() | sort == voice_profile_config.keys() | sort
+          - (example | dict2items | rejectattr('key', 'in', ['library_root', 'broker_url']) | items2dict)
+            == voice_profile_settings
+          - example.library_root == voice_profile_config.library_root
+          # Same JSON types as V's example (an int stays an int, a float a float).
+          - >-
+            (example | dict2items | map(attribute='value') | map('type_debug') | list)
+            == (example | dict2items | map(attribute='key') | map('extract', voice_profile_config) | map('type_debug') | list)
+        fail_msg: "{{ example | to_json }} vs {{ voice_profile_config | to_json }}"
+        quiet: true
+
+    # ---- 0. the account, and nothing starts the unit ------------------------------------------------------
+    - name: Read the role's account tasks
+      ansible.builtin.set_fact:
+        vp_test_base: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../tasks/base.yml') | from_yaml }}"
+
+    - name: The vprof user and group tasks set exactly the agreed attributes (§12.21.1)
+      vars:
+        my_user: "{{ (vp_test_base | select('contains', 'ansible.builtin.user') | first)['ansible.builtin.user'] }}"
+        my_group: "{{ (vp_test_base | select('contains', 'ansible.builtin.group') | first)['ansible.builtin.group'] }}"
+        groups_check: "{{ (vp_test_base | selectattr('name', 'search', 'exactly its own group') | first)['ansible.builtin.assert'] }}"
+      ansible.builtin.assert:
+        that:
+          - vp_test_base | select('contains', 'ansible.builtin.user') | list | length == 1
+          - my_user.keys() | sort == ['append', 'create_home', 'group', 'groups', 'home', 'name', 'shell', 'system']
+          # The raw task text names the role's variables (built here so the test itself holds no template).
+          - my_user.name == ('{' ~ '{ voice_profile_user }' ~ '}') and my_user.group == my_user.name
+          - my_user.groups == [('{' ~ '{ voice_profile_library_group }' ~ '}')]
+          - my_user.append is sameas false
+          - my_user.system is sameas true and my_user.create_home is sameas false
+          - my_user.shell == '/usr/sbin/nologin' and my_user.home == '/nonexistent'
+          - my_group.keys() | sort == ['name', 'system'] and my_group.system is sameas true
+          - my_group.name == my_user.name
+          # The read-only check: `id -Gn vprof` split must equal exactly [vprof, rgate].
+          - groups_check.that == 'voice_profile_user_groups.stdout.split() == [voice_profile_user, voice_profile_library_group]'
+        fail_msg: "{{ my_user }} / {{ my_group }}"
+        quiet: true
+
+    - name: Read every task and handler file of the role (parsed, and as text without comments)
+      ansible.builtin.set_fact:
+        vp_test_all_tasks: "{{ vp_test_all_tasks | default([]) + (lookup('ansible.builtin.file', item) | from_yaml) }}"
+        vp_test_texts: >-
+          {{ vp_test_texts | default('') ~ '\n'
+             ~ (lookup('ansible.builtin.file', item) | regex_replace('(?m)^\s*#.*$', '')) }}
+      loop: >-
+        {{ query('ansible.builtin.fileglob', playbook_dir ~ '/../tasks/*.yml')
+           + query('ansible.builtin.fileglob', playbook_dir ~ '/../handlers/*.yml') }}
+
+    # §12.21.1: on demand only. The role's only systemd action is a daemon-reload; no task or handler can start,
+    # restart, stop, enable or mask the unit, and no file of the role installs a timer.
+    - name: No task or handler starts, restarts, stops or enables anything; the only systemd action is a daemon-reload
+      vars:
+        sd_tasks: >-
+          {{ vp_test_all_tasks | select('contains', 'ansible.builtin.systemd_service') | map('dict2items')
+             | map('selectattr', 'key', 'equalto', 'ansible.builtin.systemd_service') | map('first')
+             | map(attribute='value') | list }}
+      ansible.builtin.assert:
+        that:
+          - vp_test_all_tasks | length > 40
+          - vp_test_all_tasks | selectattr('block', 'defined') | list == []
+          - "sd_tasks == [{'daemon_reload': true}]"
+          - vp_test_texts is not search('(builtin|general)[.](service|systemd|shell|raw|script):')
+          - vp_test_texts is not search('(?m)^\s*(state:\s*(started|restarted|stopped|reloaded)|enabled:|masked:)')
+          - vp_test_texts is not search('systemctl\W+(start|restart|reload-or-restart|enable|unmask|try-restart)')
+          - vp_test_texts is not search('[.]timer')
+          - query('ansible.builtin.fileglob', playbook_dir ~ '/../templates/*') | map('basename') | sort
+            == ['config.json.j2', 'voice-profile.service.j2']
+        fail_msg: "{{ sd_tasks | to_json }}"
+        quiet: true
+
+    - name: The role's entry point runs every step in order (the archive folder before the code; verify last, never in check mode)
+      vars:
+        main: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../tasks/main.yml') | from_yaml }}"
+      ansible.builtin.assert:
+        that:
+          - >-
+            main | map('dict2items') | map('selectattr', 'key', 'search', '^ansible[.]builtin[.](import|include)_tasks$')
+            | map('first') | map(attribute='value') | list
+            == ['preflight.yml', 'base.yml', 'library.yml', 'install.yml', 'config.yml', 'service.yml', 'verify.yml']
+          - main | select('contains', 'ansible.builtin.import_tasks') | list | length == 6
+          - (main | last).when == ['voice_profile_verify | bool', 'not ansible_check_mode']
+        fail_msg: "{{ main | to_json }}"
+        quiet: true
+
+    # ---- scratch sources and library ------------------------------------------------------------------------
+    - name: Scratch sources with never-deployed junk, and a scratch library
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          s="{{ test_tmp }}/src"
+          mkdir -p "$s/voice-profile" "$s/skill-library"
+          cp -r "{{ test_repo }}/apps/voice-profile/." "$s/voice-profile/"
+          # A nested package, so the install covers a subdirectory (guards, pruning).
+          mkdir -p "$s/voice-profile/voice_profile/sub"
+          echo '"""nested"""' > "$s/voice-profile/voice_profile/sub/__init__.py"
+          cp -r "{{ test_repo }}/apps/skill-library/library" "$s/skill-library/"
+          for p in "$s/voice-profile/voice_profile" "$s/skill-library/library"; do
+            mkdir -p "$p/__pycache__" "$p/tests" "$p/test" "$p/node_modules/x"
+            echo junk > "$p/__pycache__/m.cpython-314.pyc"
+            echo junk > "$p/tests/test_m.py"
+            echo junk > "$p/test/test_n.py"
+            echo junk > "$p/node_modules/x/y.py"
+            echo junk > "$p/README.md"
+            echo junk > "$p/notes.txt"
+          done
+          l="{{ test_tmp }}/lib"
+          lib="$l/ai-library"
+          mkdir -p "$lib"
+          cd "{{ test_repo }}/apps/skill-library"
+          python3 -B -m library --root "$lib" init >/dev/null
+          echo sentinel > "$lib/.ai-library-sentinel"
+          ln -s "$lib" "$l/link"
+          mkdir -p "$l/nosentinel/40-writing"
+          mkdir -p "$l/linksentinel/40-writing" && ln -s "$lib/.ai-library-sentinel" "$l/linksentinel/.ai-library-sentinel"
+          mkdir -p "$l/nowriting" && echo sentinel > "$l/nowriting/.ai-library-sentinel"
+          mkdir -p "$l/linkwriting" && echo sentinel > "$l/linkwriting/.ai-library-sentinel" && ln -s "$lib/40-writing" "$l/linkwriting/40-writing"
+          mkdir -p "$l/noarchive/40-writing" && echo sentinel > "$l/noarchive/.ai-library-sentinel"
+          mkdir -p "$l/linkarchive/40-writing" && echo sentinel > "$l/linkarchive/.ai-library-sentinel" && ln -s "$lib/90-archive" "$l/linkarchive/90-archive"
+          # An uninitialized "library" (sentinel, 40-writing and 90-archive only): V's status refuses it.
+          mkdir -p "$l/bare/40-writing" "$l/bare/90-archive" && echo sentinel > "$l/bare/.ai-library-sentinel"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Where the scratch library lives (its real mount; tests/run.sh checks it isn't /)
+      ansible.builtin.command:
+        argv: [findmnt, --noheadings, --first-only, --output, TARGET, --target, "{{ test_tmp }}"]
+      register: vp_test_mount
+      changed_when: false
+
+    - name: Point the role at the scratch dir, and the good values every refusal case starts from
+      ansible.builtin.set_fact:
+        voice_profile_src_dir: "{{ test_tmp }}/src/voice-profile"
+        voice_profile_pkg_src: "{{ test_tmp }}/src/voice-profile/voice_profile"
+        voice_profile_launcher_src: "{{ test_tmp }}/src/voice-profile/voice-profile"
+        voice_profile_library_src_dir: "{{ test_tmp }}/src/skill-library"
+        voice_profile_ai_stack_defaults_file: "{{ test_repo }}/roles/ai_stack/defaults/main.yml"
+        voice_profile_searxng_defaults_file: "{{ test_repo }}/roles/searxng/defaults/main.yml"
+        voice_profile_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        voice_profile_root_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        voice_profile_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
+        voice_profile_library_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
+        voice_profile_library_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        voice_profile_app_dir: "{{ test_tmp }}/opt/voice-profile"
+        voice_profile_config_dir: "{{ test_tmp }}/etc/voice-profile"
+        voice_profile_config_file: "{{ test_tmp }}/etc/voice-profile/config.json"
+        voice_profile_unit_dir: "{{ test_tmp }}/systemd"
+        voice_profile_library_root: "{{ test_tmp }}/lib/ai-library"
+        voice_profile_library_mount: "{{ vp_test_mount.stdout | trim }}"
+        # The scratch dir is under /tmp (or /dev/shm in CI): allow /tmp and /dev here (the default forbids them).
+        voice_profile_library_forbidden_re: '^/(home|root|run|proc|sys|etc|usr|boot|bin|sbin|lib|lib64|opt|var)(/|$)'
+
+    # ---- 1. preflight -----------------------------------------------------------------------------------
+    - name: Preflight passes against the scratch library on its real mount
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+
+    - name: The IP filter (deny any; ai-box's tailnet address and the pinned ai /24 only, no resolver)
+      ansible.builtin.assert:
+        that:
+          - voice_profile_ai_subnet | trim == '172.20.0.0/24'
+          - voice_profile_searxng_subnet | trim == '172.29.16.0/28'
+          - voice_profile_broker_ranges == ['172.20.0.0/24']
+          - voice_profile_ip_allow == ['100.64.0.2/32', '172.20.0.0/24']
+          - voice_profile_ip_deny == ['any']
+        fail_msg: "{{ voice_profile_broker_ranges }} / {{ voice_profile_ip_allow }} / {{ voice_profile_ip_deny }}"
+        quiet: true
+
+    - name: The ai /24 follows the inventory's ai_stack_network_subnet over role ai_stack's default
+      vars:
+        ai_stack_network_subnet: 172.21.0.0/24
+      ansible.builtin.assert:
+        that: voice_profile_ip_allow == ['100.64.0.2/32', '172.21.0.0/24']
+        fail_msg: "{{ voice_profile_ip_allow }}"
+        quiet: true
+
+    # §12.23: ai-box's host_vars pin the range to the gpu-broker's /32. Preflight accepts it, and the role still
+    # puts tailnet_ip/32 first itself.
+    - name: Preflight passes with the pinned broker /32 (§12.23)
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+      vars:
+        voice_profile_broker_ranges: [172.20.0.3/32]
+
+    - name: The allow list with the pinned /32 is the tailnet address plus the broker only
+      vars:
+        voice_profile_broker_ranges: [172.20.0.3/32]
+      ansible.builtin.assert:
+        that: voice_profile_ip_allow == ['100.64.0.2/32', '172.20.0.3/32']
+        fail_msg: "{{ voice_profile_ip_allow }}"
+        quiet: true
+
+    - name: The good values the refusal cases start from
+      ansible.builtin.set_fact:
+        test_good:
+          tailnet_ip: "{{ tailnet_ip }}"
+          settings: "{{ voice_profile_settings }}"
+          broker_ranges: "{{ voice_profile_broker_ranges }}"
+          library_root: "{{ voice_profile_library_root }}"
+          library_mount: "{{ voice_profile_library_mount }}"
+          forbidden_re: "{{ voice_profile_library_forbidden_re }}"
+          library_group: "{{ voice_profile_library_group }}"
+          pkg_src: "{{ voice_profile_pkg_src }}"
+          launcher_src: "{{ voice_profile_launcher_src }}"
+          library_src_dir: "{{ voice_profile_library_src_dir }}"
+
+    - name: Preflight passes with a failed last build (a failed oneshot is not running)
+      ansible.builtin.include_tasks: expect_preflight_refusal.yml
+      vars:
+        case: {name: a failed last build, vars: {}, active: failed, task: ""}
+
+    - name: Preflight refuses bad inputs
+      ansible.builtin.include_tasks: expect_preflight_refusal.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        # The broker and the unit's settings.
+        - name: no tailnet address
+          vars: {tailnet_ip: ""}
+          task: Preflight | the broker's address and the unit's settings
+        - name: a tailnet address that isn't on the tailnet
+          vars: {tailnet_ip: 192.0.2.20}
+          task: Preflight | the broker's address and the unit's settings
+        - name: a tailnet address in a short form
+          vars: {tailnet_ip: 100.64.2}
+          task: Preflight | the broker's address and the unit's settings
+        - name: a tailnet hostname
+          vars: {tailnet_ip: ai-box.example}
+          task: Preflight | the broker's address and the unit's settings
+        - name: broker port 0
+          vars: {voice_profile_broker_port: 0}
+          task: Preflight | the broker's address and the unit's settings
+        - name: broker port 65536
+          vars: {voice_profile_broker_port: 65536}
+          task: Preflight | the broker's address and the unit's settings
+        - name: a library cap with a space (it goes into the unit)
+          vars: {voice_profile_library_cap: "500 GB"}
+          task: Preflight | the broker's address and the unit's settings
+        - name: a MemoryMax without a unit
+          vars: {voice_profile_memory_max: "256"}
+          task: Preflight | the broker's address and the unit's settings
+        - name: a start timeout with a space
+          vars: {voice_profile_timeout_start: "40 min"}
+          task: Preflight | the broker's address and the unit's settings
+        - name: a start timeout of infinity
+          vars: {voice_profile_timeout_start: infinity}
+          task: Preflight | the broker's address and the unit's settings
+        - name: the account named after the library's group
+          vars: {voice_profile_user: rgate, voice_profile_library_group: rgate}
+          task: Preflight | the broker's address and the unit's settings
+        # The start timeout against V's broker timeout.
+        - name: a start timeout shorter than one broker call plus the margin
+          vars: {voice_profile_timeout_start: 30min}
+          task: Preflight | the unit's start timeout outlives V's broker timeout
+        - name: a broker timeout raised past the start timeout
+          vars: {settings: {timeout: 2400}}
+          task: Preflight | the unit's start timeout outlives V's broker timeout
+        # V's settings (Reviewer M, M-7).
+        - name: a broker timeout as a string
+          vars: {settings: {timeout: "1800"}}
+          task: Preflight | V's settings are a dict with a numeric broker timeout
+          msg: must be a dict that sets timeout
+        - name: a broker timeout as a boolean
+          vars: {settings: {timeout: true}}
+          task: Preflight | V's settings are a dict with a numeric broker timeout
+          msg: must be a dict that sets timeout
+        - name: an overridden settings dict without timeout
+          vars: {settings_whole: {model: assistant, num_ctx: 16384}}
+          task: Preflight | V's settings are a dict with a numeric broker timeout
+          msg: must be a dict that sets timeout
+        - name: settings that aren't a dict
+          vars: {settings_whole: "timeout=1800"}
+          task: Preflight | V's settings are a dict with a numeric broker timeout
+          msg: must be a dict that sets timeout
+        # V's loader and the library's size parser (on the controller, before anything is written).
+        - name: a model name V refuses
+          vars: {settings: {model: "assistant; rm"}}
+          task: Preflight | V's loader accepts the config, and the cap parses
+        - name: a context window above V's range
+          vars: {settings: {num_ctx: 1000000}}
+          task: Preflight | V's loader accepts the config, and the cap parses
+        - name: too few excerpts for the prompt
+          vars: {settings: {excerpts: 3}}
+          task: Preflight | V's loader accepts the config, and the cap parses
+        - name: a key V doesn't know
+          vars: {settings: {proxy: "http://192.0.2.1:3128"}}
+          task: Preflight | V's loader accepts the config, and the cap parses
+        - name: a library cap the library can't parse
+          vars: {voice_profile_library_cap: "500XB"}
+          task: Preflight | V's loader accepts the config, and the cap parses
+        # The IP filter.
+        - name: a broker range that allows everything
+          vars: {voice_profile_broker_ranges: ["0.0.0.0/0"]}
+          task: Preflight | the IP filter (deny any; allow the broker only)
+        - name: a broker range that isn't a network
+          vars: {voice_profile_broker_ranges: ["172.20.0.1/16"]}
+          task: Preflight | the IP filter (deny any; allow the broker only)
+        - name: no broker range
+          vars: {voice_profile_broker_ranges: []}
+          task: Preflight | the IP filter (deny any; allow the broker only)
+        - name: a deny list that isn't any
+          vars: {voice_profile_ip_deny: ["10.0.0.0/8"]}
+          task: Preflight | the IP filter (deny any; allow the broker only)
+        - name: a broker range override that covers SearXNG's subnet (H5-1)
+          vars: {voice_profile_broker_ranges: ["172.16.0.0/12"]}
+          task: Preflight | no broker range reaches SearXNG's subnet
+        - name: a broker range override that is a host inside SearXNG's subnet (H5-1)
+          vars: {voice_profile_broker_ranges: ["172.20.0.0/24", "172.29.16.2/32"]}
+          task: Preflight | no broker range reaches SearXNG's subnet
+        - name: SearXNG moved into the ai /24 (H5-1)
+          vars: {searxng_subnet: 172.20.0.16/28}
+          task: Preflight | no broker range reaches SearXNG's subnet
+        - name: SearXNG's subnet resolving to empty (the overlap check can't pass on nothing; H5-1)
+          vars: {searxng_subnet: ""}
+          task: Preflight | no broker range reaches SearXNG's subnet
+        # The library paths and mount.
+        - name: a library under /home (ProtectHome hides it)
+          vars: {voice_profile_library_root: /home/someone/library, voice_profile_library_mount: /home/someone/library}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a library path with a space
+          vars: {voice_profile_library_root: /mnt/ai library, voice_profile_library_mount: /mnt/ai library}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a library path with a dot-dot
+          vars: {voice_profile_library_root: /mnt/x/../etc, voice_profile_library_mount: /mnt/x/../etc}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a library root that is only a name prefix of its mount
+          vars: {voice_profile_library_root: /srv/ai-library2, voice_profile_library_mount: /srv/ai-library, voice_profile_library_forbidden_re: '^$'}
+          task: Preflight | the library root is the mount or below it
+        - name: the library root missing
+          vars: {voice_profile_library_root: "{{ test_tmp }}/lib/missing"}
+          task: Preflight | the library root is a real directory
+        - name: the library root a symlink
+          vars: {voice_profile_library_root: "{{ test_tmp }}/lib/link"}
+          task: Preflight | the library root is a real directory
+        - name: the library root an empty mount point (not on the declared mount)
+          vars: {voice_profile_library_mount: "{{ test_tmp }}/lib/ai-library"}
+          task: Preflight | the library root is on the declared mount (not the disk under an empty mount point)
+        - name: no sentinel
+          vars: {voice_profile_library_root: "{{ test_tmp }}/lib/nosentinel"}
+          task: Preflight | the sentinel is a regular file, 40-writing and 90-archive real folders (an initialized library)
+        - name: the sentinel a symlink
+          vars: {voice_profile_library_root: "{{ test_tmp }}/lib/linksentinel"}
+          task: Preflight | the sentinel is a regular file, 40-writing and 90-archive real folders (an initialized library)
+        - name: no 40-writing
+          vars: {voice_profile_library_root: "{{ test_tmp }}/lib/nowriting"}
+          task: Preflight | the sentinel is a regular file, 40-writing and 90-archive real folders (an initialized library)
+        - name: 40-writing a symlink
+          vars: {voice_profile_library_root: "{{ test_tmp }}/lib/linkwriting"}
+          task: Preflight | the sentinel is a regular file, 40-writing and 90-archive real folders (an initialized library)
+        - name: no 90-archive
+          vars: {voice_profile_library_root: "{{ test_tmp }}/lib/noarchive"}
+          task: Preflight | the sentinel is a regular file, 40-writing and 90-archive real folders (an initialized library)
+        - name: 90-archive a symlink
+          vars: {voice_profile_library_root: "{{ test_tmp }}/lib/linkarchive"}
+          task: Preflight | the sentinel is a regular file, 40-writing and 90-archive real folders (an initialized library)
+        # Sources and the library's group.
+        - name: V's package missing on the controller
+          vars: {voice_profile_pkg_src: "{{ test_tmp }}/src/nothing-here"}
+          task: Preflight | require the app sources
+        - name: the launcher missing on the controller
+          vars: {voice_profile_launcher_src: "{{ test_tmp }}/src/nope"}
+          task: Preflight | require the app sources
+        - name: the library sources missing on the controller
+          vars: {voice_profile_library_src_dir: "{{ test_tmp }}/src/nope"}
+          task: Preflight | require the app sources
+        - name: the library's group missing
+          vars: {voice_profile_library_group: vp-test-no-such-group}
+          task: Preflight | require the library's group
+        # A build in progress (a oneshot is "activating" while it runs).
+        - name: a build running
+          vars: {}
+          active: running
+          task: Preflight | no build is running
+
+    # ---- 1b. the archive folder (90-archive/40-writing) ---------------------------------------------------
+    - name: Library, first run (creates 90-archive/40-writing)
+      ansible.builtin.include_tasks: ../tasks/library.yml
+
+    - name: Stat the archive folder
+      ansible.builtin.stat:
+        path: "{{ voice_profile_archive_dir }}"
+        follow: false
+      register: vp_test_arch1
+
+    - name: Library, second run (no change)
+      ansible.builtin.include_tasks: ../tasks/library.yml
+
+    - name: Stat the archive folder again
+      ansible.builtin.stat:
+        path: "{{ voice_profile_archive_dir }}"
+        follow: false
+      register: vp_test_arch2
+
+    - name: The archive folder is a real 0770 directory owned like the library, untouched by run 2
+      ansible.builtin.assert:
+        that:
+          - vp_test_arch1.stat.isdir and not vp_test_arch1.stat.islnk
+          - vp_test_arch1.stat.mode == '0770'
+          - vp_test_arch1.stat.pw_name == voice_profile_library_owner
+          - vp_test_arch1.stat.gr_name == voice_profile_library_group
+          - vp_test_arch2.stat.inode == vp_test_arch1.stat.inode and vp_test_arch2.stat.mtime == vp_test_arch1.stat.mtime
+          - vp_test_arch2.stat.mode == '0770'
+        fail_msg: "{{ vp_test_arch1.stat | to_json }} {{ vp_test_arch2.stat | to_json }}"
+        quiet: true
+
+    - name: Library refuses a symlinked archive folder (systemd would make its target writable)
+      ansible.builtin.include_tasks: expect_archive_refusal.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - {name: archive-subdir, link: 40-writing}
+        - {name: archive-root, link: ""}
+
+    # ---- 2. install -------------------------------------------------------------------------------------
+    - name: Install, first run
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Plant strays in the install (top level, inside packages, a cache dir)
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          a="{{ voice_profile_app_dir }}"
+          echo stray > "$a/stray.py"
+          echo stray > "$a/config.example.json"
+          mkdir -p "$a/tests" && echo stray > "$a/tests/test_profile.py"
+          mkdir -p "$a/old_pkg" "$a/library/__pycache__" "$a/voice_profile/sub/tests"
+          echo stray > "$a/old_pkg/__init__.py"
+          echo stray > "$a/library/__pycache__/core.cpython-314.pyc"
+          echo stray > "$a/library/removed.py"
+          echo stray > "$a/voice_profile/removed.py"
+          echo stray > "$a/voice_profile/sub/tests/t.py"
+          echo stray > "$a/.hidden"
+          ln -s /etc/passwd "$a/voice_profile/link.py"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Install, second run (prunes the strays)
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: List the installed tree with inodes and mtimes
+      ansible.builtin.command:
+        argv: [find, "{{ voice_profile_app_dir }}", -mindepth, "1", -printf, "%P|%i|%T@\n"]
+      register: vp_test_tree_before
+      changed_when: false
+
+    - name: Install, third run (no change)
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: List the installed tree
+      ansible.builtin.command:
+        argv: [find, "{{ voice_profile_app_dir }}", -mindepth, "1", -printf, "%P|%m|%y\n"]
+      register: vp_test_tree
+      changed_when: false
+
+    - name: List the installed tree with inodes and mtimes again
+      ansible.builtin.command:
+        argv: [find, "{{ voice_profile_app_dir }}", -mindepth, "1", -printf, "%P|%i|%T@\n"]
+      register: vp_test_tree_after
+      changed_when: false
+
+    - name: List what should be there (every *.py of the two sources, minus the never-deployed dirs)
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          s="{{ test_tmp }}/src"
+          echo "voice-profile|755|f"
+          { cd "$s/voice-profile" && find voice_profile | sed 's|^|V:|'; cd "$s/skill-library" && find library | sed 's|^|L:|'; } \
+            | grep -Ev '(^|/)(__pycache__|tests?|node_modules)(/|$)' \
+            | while read -r e; do
+                case "$e" in V:*) base="$s/voice-profile" ;; *) base="$s/skill-library" ;; esac
+                p="${e#?:}"
+                if [ -d "$base/$p" ]; then echo "$p|755|d"
+                else case "$p" in *.py) echo "$p|644|f" ;; esac; fi
+              done
+        executable: /bin/bash
+      register: vp_test_want
+      changed_when: false
+
+    - name: The install holds exactly the two packages' code plus the launcher, and run 3 touched nothing
+      ansible.builtin.assert:
+        that:
+          - vp_test_tree.stdout_lines | sort == vp_test_want.stdout_lines | sort
+          - vp_test_tree.stdout_lines | select('search', '(^|/)(__pycache__|tests?|node_modules|old_pkg)(/|$)|stray|removed|hidden|link') | list == []
+          - "'voice_profile/sub/__init__.py|644|f' in vp_test_tree.stdout_lines"
+          - "'voice_profile/config.py|644|f' in vp_test_tree.stdout_lines and 'library/core.py|644|f' in vp_test_tree.stdout_lines"
+          - "'voice-profile|755|f' in vp_test_tree.stdout_lines"
+          - vp_test_tree.stdout_lines | select('search', '^(config[.]example[.]json|README[.]md|tests|forge)') | list == []
+          - vp_test_tree_before.stdout_lines | sort == vp_test_tree_after.stdout_lines | sort
+        fail_msg: >-
+          extra {{ vp_test_tree.stdout_lines | difference(vp_test_want.stdout_lines) }},
+          missing {{ vp_test_want.stdout_lines | difference(vp_test_tree.stdout_lines) }},
+          run 3 changed {{ vp_test_tree_after.stdout_lines | difference(vp_test_tree_before.stdout_lines) }}
+        quiet: true
+
+    - name: The installed launcher imports the installed copies only (library found beside it, nothing from the repo)
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -I
+          - -B
+          - -c
+          - |
+            import os, runpy, sys
+            app = sys.argv[1]
+            sys.argv = [os.path.join(app, "voice-profile"), "--help"]
+            try:
+                runpy.run_path(sys.argv[0], run_name="__main__")
+            except SystemExit:
+                pass
+            for name in ("voice_profile", "library"):
+                path = os.path.realpath(sys.modules[name].__file__)
+                assert path.startswith(os.path.realpath(app) + os.sep), (name, path)
+            assert os.path.join(os.path.dirname(app), "skill-library") not in sys.path
+          - "{{ voice_profile_app_dir }}"
+      changed_when: false
+
+    - name: Install refuses symlinked directories
+      ansible.builtin.include_tasks: expect_guard_refusal.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - {name: app-dir, root: "{{ test_tmp }}/g1/voice-profile", link: "{{ test_tmp }}/g1/voice-profile"}
+        - {name: profile-package, root: "{{ test_tmp }}/g2/voice-profile", link: "{{ test_tmp }}/g2/voice-profile/voice_profile"}
+        - {name: library-package, root: "{{ test_tmp }}/g3/voice-profile", link: "{{ test_tmp }}/g3/voice-profile/library"}
+        - {name: profile-subpackage, root: "{{ test_tmp }}/g4/voice-profile", link: "{{ test_tmp }}/g4/voice-profile/voice_profile/sub"}
+
+    # ---- 3. config ---------------------------------------------------------------------------------------
+    - name: Config, first run
+      ansible.builtin.include_tasks: ../tasks/config.yml
+
+    - name: Stat config.json and the config dir
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: ["{{ voice_profile_config_file }}", "{{ voice_profile_config_dir }}"]
+      register: vp_test_cfg
+
+    - name: Config, second run (no change)
+      ansible.builtin.include_tasks: ../tasks/config.yml
+
+    - name: Stat config.json again
+      ansible.builtin.stat:
+        path: "{{ voice_profile_config_file }}"
+      register: vp_test_cfg2
+
+    - name: Config.json holds exactly V's keys with the role's values, 0640 in 0750, unchanged by run 2
+      vars:
+        c: "{{ lookup('ansible.builtin.file', voice_profile_config_file) | from_json }}"
+        example: "{{ lookup('ansible.builtin.file', test_repo ~ '/apps/voice-profile/config.example.json') | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - c.keys() | sort == example.keys() | sort
+          - c.library_root == voice_profile_library_root
+          - c.broker_url == 'http://100.64.0.2:11434'
+          - c.model == 'assistant' and c.timeout == 1800 and c.num_ctx == 16384
+          - (c | dict2items | rejectattr('key', 'in', ['library_root', 'broker_url']) | items2dict) == voice_profile_settings
+          # JSON numbers, not strings or booleans (V's loader refuses those).
+          - c.num_ctx is integer and c.timeout is integer and c.excerpts is integer
+          - vp_test_cfg.results[0].stat.mode == '0640'
+          - vp_test_cfg.results[1].stat.mode == '0750'
+          - vp_test_cfg.results[0].stat.inode == vp_test_cfg2.stat.inode
+          - vp_test_cfg.results[0].stat.mtime == vp_test_cfg2.stat.mtime
+        fail_msg: "{{ c | to_json }}"
+        quiet: true
+
+    - name: Bad configs for the deploy-time validator (V's loader)
+      ansible.builtin.copy:
+        content: >-
+          {{ (lookup('ansible.builtin.file', voice_profile_config_file) | from_json | dict2items
+              | rejectattr('key', 'equalto', item.drop | default('')) | items2dict)
+             | combine(item.patch | default({})) | to_json }}
+        dest: "{{ test_tmp }}/bad-{{ item.name }}.json"
+        mode: "0644"
+      loop:
+        - {name: extra-key, patch: {proxy: "http://192.0.2.1:3128"}}
+        - {name: no-broker, drop: broker_url}
+        - {name: no-root, drop: library_root}
+        - {name: broker-path, patch: {broker_url: "http://100.64.0.2:11434/api"}}
+        - {name: broker-userinfo, patch: {broker_url: "http://u:p@100.64.0.2:11434"}}
+        - {name: file-broker, patch: {broker_url: "file:///etc/passwd"}}
+        - {name: relative-root, patch: {library_root: "srv/ai-library"}}
+        - {name: timeout-string, patch: {timeout: "1800"}}
+        - {name: excerpts-bool, patch: {excerpts: true}}
+        - {name: zip-entries-huge, patch: {max_zip_entries: 10000000}}
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: The validator refuses each bad config
+      ansible.builtin.command:
+        cmd: "{{ voice_profile_config_validate | replace('%s', test_tmp ~ '/bad-' ~ item ~ '.json') }}"
+      loop: [extra-key, no-broker, no-root, broker-path, broker-userinfo, file-broker, relative-root, timeout-string, excerpts-bool, zip-entries-huge]
+      register: vp_test_bad
+      changed_when: false
+      failed_when: vp_test_bad.rc == 0
+
+    - name: The validator accepts the rendered config
+      ansible.builtin.command:
+        cmd: "{{ voice_profile_config_validate | replace('%s', voice_profile_config_file) }}"
+      changed_when: false
+
+    - name: Config refuses a symlinked config directory
+      block:
+        - name: Config guard | a victim dir and the link
+          ansible.builtin.shell:
+            cmd: |
+              set -eu
+              v="{{ test_tmp }}/victim-config"
+              mkdir -p "$v" "{{ test_tmp }}/c1"
+              echo keep > "$v/sentinel"
+              chmod 0644 "$v/sentinel"
+              chmod 0700 "$v"
+              ln -sfn "$v" "{{ test_tmp }}/c1/voice-profile"
+            executable: /bin/bash
+          changed_when: true
+
+        - name: Config guard | config.yml through the link
+          ansible.builtin.include_tasks: ../tasks/config.yml
+          vars:
+            voice_profile_config_dir: "{{ test_tmp }}/c1/voice-profile"
+            voice_profile_config_file: "{{ test_tmp }}/c1/voice-profile/config.json"
+
+        - name: Config guard | not reached
+          ansible.builtin.set_fact:
+            vp_test_config_guard_by: ""
+      rescue:
+        - name: Config guard | note which task refused
+          ansible.builtin.set_fact:
+            vp_test_config_guard_by: "{{ ansible_failed_task.name }}"
+
+    - name: Config guard | read the victim
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          v="{{ test_tmp }}/victim-config"
+          find "$v" -printf '%P|%m|%y\n' | LC_ALL=C sort
+          cat "$v/sentinel"
+        executable: /bin/bash
+      register: vp_test_config_victim
+      changed_when: false
+
+    - name: Config guard | refused by the guard, victim untouched
+      ansible.builtin.assert:
+        that:
+          - vp_test_config_guard_by == 'Guard | each pruned directory is absent or a real directory (never a symlink)'
+          - vp_test_config_victim.stdout_lines == ['sentinel|644|f', '|700|d', 'keep']
+        fail_msg: "refused by '{{ vp_test_config_guard_by }}'; victim: {{ vp_test_config_victim.stdout_lines }}"
+        quiet: true
+
+    # ---- 4. the unit -------------------------------------------------------------------------------------
+    - name: Unit, default broker ranges
+      ansible.builtin.include_tasks: units_case.yml
+      vars:
+        voice_profile_app_dir: /opt/voice-profile
+        voice_profile_config_dir: /etc/voice-profile
+        voice_profile_config_file: /etc/voice-profile/config.json
+        voice_profile_library_root: /srv/ai-library
+        vp_case: default
+        vp_expect_allow: 100.64.0.2/32 172.20.0.0/24
+
+    - name: Unit, a narrowed broker range and another tailnet address (the allow line follows the inventory)
+      ansible.builtin.include_tasks: units_case.yml
+      vars:
+        voice_profile_app_dir: /opt/voice-profile
+        voice_profile_config_dir: /etc/voice-profile
+        voice_profile_config_file: /etc/voice-profile/config.json
+        voice_profile_library_root: /srv/ai-library
+        tailnet_ip: 100.64.0.9
+        voice_profile_broker_ranges: [172.20.0.3/32]
+        vp_case: narrowed
+        vp_expect_allow: 100.64.0.9/32 172.20.0.3/32
+
+    - name: The scratch unit directory (exists on a host)
+      ansible.builtin.file:
+        path: "{{ voice_profile_unit_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Service, first run (installs the unit, one daemon-reload)
+      ansible.builtin.include_tasks: ../tasks/service.yml
+
+    - name: Count the reloads after the first run
+      ansible.builtin.set_fact:
+        vp_test_reloads_1: "{{ vp_test_reloads }}"
+
+    - name: Service, second run (no change, no reload)
+      ansible.builtin.include_tasks: ../tasks/service.yml
+
+    - name: Stat the installed unit
+      ansible.builtin.stat:
+        path: "{{ voice_profile_unit_dir }}/voice-profile.service"
+      register: vp_test_unit_stat
+
+    - name: One reload for a new unit, none for an unchanged one; the unit 0644
+      ansible.builtin.assert:
+        that:
+          - vp_test_reloads_1 | int == 1
+          - vp_test_reloads | int == 1
+          - vp_test_unit_stat.stat.mode == '0644'
+          - query('ansible.builtin.fileglob', voice_profile_unit_dir ~ '/*') | map('basename') | list == ['voice-profile.service']
+        fail_msg: "reloads {{ vp_test_reloads_1 }}/{{ vp_test_reloads }}"
+        quiet: true
+
+    # ---- 5. verify ---------------------------------------------------------------------------------------
+    # status opens a TCP connection to the broker (up to 10 s): point it at a closed local port so the test never
+    # reaches out (the rendered config's broker is the synthetic tailnet address).
+    - name: Status configs (the scratch library, and a folder that isn't an initialized library), broker on a closed local port
+      ansible.builtin.copy:
+        content: >-
+          {{ lookup('ansible.builtin.file', voice_profile_config_file) | from_json
+             | combine({'broker_url': 'http://127.0.0.1:9'}, item.patch) | to_json }}
+        dest: "{{ test_tmp }}/{{ item.name }}-config.json"
+        mode: "0644"
+      loop:
+        - {name: status, patch: {}}
+        - {name: bare, patch: {library_root: "{{ test_tmp }}/lib/bare"}}
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Verify cases
+      ansible.builtin.include_tasks: verify_case.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - name: a static, untriggered unit and a good status
+          unit: static
+          config: "{{ test_tmp }}/status-config.json"
+          refused_by: ""
+        - name: an enabled unit
+          unit: enabled
+          config: "{{ test_tmp }}/status-config.json"
+          refused_by: Verify | loaded, static (never enabled) and triggered by nothing (no timer)
+        - name: a unit a timer triggers
+          unit: timer
+          config: "{{ test_tmp }}/status-config.json"
+          refused_by: Verify | loaded, static (never enabled) and triggered by nothing (no timer)
+        - name: a unit that isn't loaded
+          unit: missing
+          config: "{{ test_tmp }}/status-config.json"
+          refused_by: Verify | loaded, static (never enabled) and triggered by nothing (no timer)
+        - name: a status that exits non-zero (not an initialized library)
+          unit: static
+          config: "{{ test_tmp }}/bare-config.json"
+          refused_by: Verify | the status check exited 0
+
+    - name: The scratch library is untouched by the status checks (status never writes)
+      ansible.builtin.command:
+        argv: [find, "{{ voice_profile_library_root }}/40-writing", -mindepth, "1", -printf, "%P|%y\n"]
+      register: vp_test_writing
+      changed_when: false
+
+    - name: The archive folder after the status checks
+      ansible.builtin.command:
+        argv: [find, "{{ voice_profile_archive_dir }}", -mindepth, "1"]
+      register: vp_test_archive_after
+      changed_when: false
+
+    - name: 40-writing still holds only what the library's init made, and the archive folder is empty
+      ansible.builtin.assert:
+        that:
+          - vp_test_writing.stdout_lines | sort == ['drafts|d', 'samples|d']
+          - vp_test_archive_after.stdout_lines == []
+        fail_msg: "{{ vp_test_writing.stdout_lines }}"
+        quiet: true

@@ -1,0 +1,62 @@
+---
+# Keys an operator_accounts entry may carry (typos must fail, not silently do nothing).
+operator_account_keys: [name, comment, shell, home, sudo, ssh_login, ssh_pubkey, ssh_from, sshd_loopback_only, sshd_deny, groups]
+operator_account_sudo_modes: [none, full_logged]
+operator_account_nologin_shells: [nologin, "false"]
+# Root-equivalent or log-reading groups. full_logged accounts reach root only through logged sudo, and
+# localai gets nothing implicit; a later phase that really needs one of these changes this list via the Lead.
+operator_account_forbidden_groups:
+  [root, sudo, admin, wheel, empower, docker, lxd, incus, incus-admin, libvirt, kvm, disk, shadow, adm, systemd-journal]
+operator_account_loopback: ["127.0.0.1", "::1"]
+operator_account_defaults:
+  sudo: none
+  ssh_login: false
+  ssh_pubkey: ""
+  ssh_from: []
+  sshd_loopback_only: false
+  sshd_deny: false
+  groups: []
+  comment: ""
+
+# Classic sudo (Todd Miller's, "Sudo version 1.x") and its visudo. Ubuntu 25.10+ ships them as *.ws next to sudo-rs.
+operator_account_sudo_candidates: [/usr/bin/sudo.ws, /usr/bin/sudo]
+operator_account_visudo_candidates: [/usr/sbin/visudo.ws, /usr/sbin/visudo]
+# Where sudo-rs is looked for. The guarded set is every setuid regular file of these packages (resolved),
+# plus any of the candidate paths that doesn't answer as classic sudo.
+operator_account_sudo_rs_packages: [sudo-rs]
+operator_account_sudo_rs_candidates: [/usr/lib/cargo/bin/sudo, /usr/bin/sudo-rs, /usr/bin/sudo]
+# Polkit rules naming these groups (unix-group:<name>) grant admin; no operator account may be in one.
+operator_account_polkit_rule_dirs: [/usr/share/polkit-1/rules.d, /etc/polkit-1/rules.d]
+# Accounts at or above this UID are people; an entry may never take one over.
+operator_account_uid_min: 1000
+
+operator_account_sshd: /usr/sbin/sshd
+operator_account_os_family: "{{ ansible_facts.os_family }}"
+operator_account_sshd_service: "{{ 'ssh.service' if operator_account_os_family == 'Debian' else 'sshd.service' }}"
+operator_account_sshd_dropin_dir: /etc/ssh/sshd_config.d
+operator_account_iolog_root: /var/log/sudo-io
+# A documentation address (RFC 5737): any non-loopback source must be refused.
+operator_account_probe_addr: 192.0.2.1
+# '' on a host. The offline test sets a scratch dir (and a validate wrapper with its own host key).
+operator_account_render_root: ""
+operator_account_sshd_validate: "{{ operator_account_sshd }} -t -f %s"
+operator_account_template_dir: "{{ role_path }}/templates"
+# sudo-rs --version output: "sudo-rs 0.2.x" for sudo; su/visudo print their own name with "-rs".
+operator_account_sudo_rs_version_re: '(^|\s)(sudo|su|visudo)-rs(\s|$)|sudo-rs'
+operator_account_sudo_rs_sudo_re: '^sudo-rs\s'
+# Classic sudo's banner is fixed text; classic visudo prints its own program name (visudo or visudo.ws).
+# visudo-rs prints "visudo-rs 0.x" (no "version"), so it never matches.
+operator_account_sudo_classic_re: '^Sudo version 1\.'
+operator_account_visudo_classic_re: '^visudo(\.[A-Za-z0-9]+)? version 1\.'
+# sudo -l output checks (verify_sudo_rules.yml). An entry in the "Matching Defaults" list is preceded by
+# start, space or comma and followed by comma, space or end; "!log_input" (negated) must not count.
+operator_account_log_input_re: '(^|[\s,])log_input(,|\s|$)'
+operator_account_log_output_re: '(^|[\s,])log_output(,|\s|$)'
+operator_account_iolog_dir_re_prefix: '(^|[\s,])iolog_dir='
+operator_account_list_end_re: '(,|\s|$)'
+operator_account_sudo_rule_re: '\(ALL\) NOPASSWD: ALL(\s|$)'
+# Logging switched off again for the account: a negated Default, or a NOLOG_INPUT:/NOLOG_OUTPUT: rule tag.
+operator_account_log_negated_re: '(^|[\s,])!log_(input|output)(,|\s|$)'
+operator_account_nolog_tag_re: 'NOLOG_(INPUT|OUTPUT):'
+# How verify runs a command as an account ('%u' = account name). The offline test swaps in `env`.
+operator_account_runas_prefix: [runuser, -u, "%u", --]

@@ -1,0 +1,65 @@
+---
+# The pull key pair is generated on ai-box, once (§12.28). The private half never reaches a log: ssh-keygen -q
+# prints nothing, and every task that could see it is no_log. It grants nothing root on ai-box doesn't already
+# have (a read-only copy of ai-box's own backups), so ai-box keeps it to hand it to the PC on each run.
+- name: Key | root-only key dir
+  ansible.builtin.file:
+    path: "{{ ai_backup_key_dir }}"
+    state: directory
+    owner: "{{ ai_backup_owner }}"
+    group: "{{ ai_backup_owner }}"
+    mode: "0700"
+
+- name: Key | look at the key files (no links followed)
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: false
+  loop:
+    - "{{ ai_backup_key_file }}"
+    - "{{ ai_backup_key_file }}.pub"
+  register: ai_backup_key_stat
+
+- name: Key | both key files are absent or regular files (never symlinks)
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isreg and not item.stat.islnk)
+      # Half a pair (one file only) is never "fixed" by overwriting: remove both by hand to rotate.
+      - ai_backup_key_stat.results | map(attribute='stat.exists') | unique | length == 1
+    fail_msg: "{{ item.item }}: not a regular file, or only one half of the key pair exists. Fix it by hand."
+    quiet: true
+  loop: "{{ ai_backup_key_stat.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Key | generate the pull key once (ed25519, never printed)
+  ansible.builtin.command:
+    argv:
+      - ssh-keygen
+      - -q
+      - -t
+      - ed25519
+      - -N
+      - ""
+      - -C
+      - "{{ ai_backup_key_comment }}"
+      - -f
+      - "{{ ai_backup_key_file }}"
+    creates: "{{ ai_backup_key_file }}"
+  no_log: true
+
+- name: Key | private half root 0600, public half 0644
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: file
+    follow: false
+    owner: "{{ ai_backup_owner }}"
+    group: "{{ ai_backup_owner }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ ai_backup_key_file }}", mode: "0600"}
+    - {path: "{{ ai_backup_key_file }}.pub", mode: "0644"}
+  loop_control:
+    label: "{{ item.path }}"
+  # On a first check run the key doesn't exist yet.
+  ignore_errors: "{{ ansible_check_mode }}"

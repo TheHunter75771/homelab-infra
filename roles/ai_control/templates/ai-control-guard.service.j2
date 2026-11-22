@@ -1,0 +1,28 @@
+# {{ ansible_managed }}
+# AI Control's local-access guard (Reviewer Q): loads {{ ai_control_guard_file }}, which replaces only the table
+# inet {{ ai_control_guard_table }} (never `flush ruleset`). {{ ai_control_service }} requires it, so S never listens unguarded,
+# and it loads before tailscaled at boot, so serve never answers a local connection unguarded. After nftables.service:
+# if that unit is ever enabled, its /etc/nftables.conf (`flush ruleset`) runs first and the guard is loaded on top.
+# Reload re-applies the file.
+[Unit]
+Description=AI Control local-access guard (nftables table inet {{ ai_control_guard_table }})
+Documentation=file://{{ ai_control_guard_file }}
+After=nftables.service
+Before={{ ai_control_service }} tailscaled.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={{ ai_control_nft }} -f {{ ai_control_guard_file }}
+ExecReload={{ ai_control_nft }} -f {{ ai_control_guard_file }}
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_NETLINK AF_UNIX
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,64 @@
+---
+# /opt/forge-api holds exactly what F's README lists ("Deploying", Layout), all root-owned: the launcher
+# `forge-api` (0755) and three packages (0755 dirs, 0644 *.py): F's forge_api and apps/skill-library's forge and
+# library (installed beside it, read-only, as the research gate does). The launcher puts its own directory first
+# on sys.path, so under `python3 -I` the API imports exactly these copies. Anything else (a removed file, a
+# stray, a test dir, F's tests, README and example config) is pruned.
+- name: Install | the code directories are real directories (before any write)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    forge_api_guard_dirs: "{{ [forge_api_app_dir] + (forge_api_packages | map('regex_replace', '^', forge_api_app_dir ~ '/') | list) }}"
+
+- name: Install | code directory
+  ansible.builtin.file:
+    path: "{{ forge_api_app_dir }}"
+    state: directory
+    owner: "{{ forge_api_owner }}"
+    group: "{{ forge_api_owner }}"
+    mode: "0755"
+
+- name: Install | packages
+  ansible.builtin.include_tasks: tree.yml
+  vars:
+    forge_api_tree_src: "{{ forge_api_pkg.src }}"
+    forge_api_tree_dest: "{{ forge_api_app_dir }}/{{ forge_api_pkg.name }}"
+    forge_api_tree_name: "{{ forge_api_pkg.name }}"
+  loop:
+    - {name: forge_api, src: "{{ forge_api_pkg_src }}"}
+    - {name: forge, src: "{{ forge_api_library_src_dir }}/forge"}
+    - {name: library, src: "{{ forge_api_library_src_dir }}/library"}
+  # Not `item`: the included file's own loops would shadow it (its vars are evaluated lazily).
+  loop_control:
+    loop_var: forge_api_pkg
+    label: "{{ forge_api_pkg.name }}"
+
+- name: Install | launcher
+  ansible.builtin.copy:
+    src: "{{ forge_api_launcher_src }}"
+    dest: "{{ forge_api_launcher }}"
+    owner: "{{ forge_api_owner }}"
+    group: "{{ forge_api_owner }}"
+    mode: "0755"
+    follow: false
+  notify: Restart forge-api
+
+- name: Install | the code directory is still a real directory (before the find and prune)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    forge_api_guard_dirs: ["{{ forge_api_app_dir }}"]
+
+- name: Install | entries of the code directory
+  ansible.builtin.find:
+    paths: "{{ forge_api_app_dir }}"
+    file_type: any
+    hidden: true
+  register: forge_api_app_found
+
+- name: Install | anything but the launcher and the three packages is removed
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: >-
+    {{ forge_api_app_found.files | map(attribute='path')
+       | reject('in', forge_api_app_entries | map('regex_replace', '^', forge_api_app_dir ~ '/') | list) | sort }}
+  notify: Restart forge-api

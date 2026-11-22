@@ -1,0 +1,69 @@
+---
+# verify_journal.yml with the fake journalctl (run.sh exports its file paths): journal_case = {name, journal | leak, rc, want}. `leak` writes the
+# real VAPID private key into the fake journal (privateKey: as stored; hex / b64: other encodings). CANARY in
+# `journal` is replaced by run.sh's canary (the planted subscription and HA token carry it).
+- name: Verify journal | the fake journal (text) for {{ journal_case.name }}
+  ansible.builtin.copy:
+    content: "{{ journal_case.journal | replace('CANARY', lookup('ansible.builtin.file', test_tmp ~ '/canary')) }}"
+    dest: "{{ test_tmp }}/journal.txt"
+    mode: "0600"
+  no_log: true
+  when: journal_case.leak is not defined
+
+- name: Verify journal | the fake journal holding the real VAPID key for {{ journal_case.name }}
+  ansible.builtin.command:
+    argv:
+      - "{{ test_crypto_python }}"
+      - -I
+      - -c
+      - |
+        import base64, json, sys
+        k = json.load(open(sys.argv[1]))["privateKey"]
+        raw = base64.urlsafe_b64decode(k + "=" * (-len(k) % 4))
+        forms = {"privateKey": k, "hex": raw.hex(), "b64": base64.b64encode(raw).decode()}
+        open(sys.argv[3], "w").write("push: signing with %s\n" % forms[sys.argv[2]])
+      - "{{ test_tmp }}/etc/mission-control/vapid.json"
+      - "{{ journal_case.leak | default('') }}"
+      - "{{ test_tmp }}/journal.txt"
+  changed_when: true
+  no_log: true
+  when: journal_case.leak is defined
+
+- name: Verify journal | the fake journalctl's exit code for {{ journal_case.name }}
+  ansible.builtin.copy:
+    content: "{{ journal_case.rc | default(0) }}\n"
+    dest: "{{ test_tmp }}/journal.txt.rc"
+    mode: "0600"
+
+- name: Verify journal for {{ journal_case.name }}
+  block:
+    - name: Verify journal | verify_journal.yml for {{ journal_case.name }}
+      ansible.builtin.include_tasks: ../tasks/verify_journal.yml
+      vars:
+        mission_control_python: "{{ test_crypto_python }}"
+        mission_control_vapid_file: >-
+          {{ test_tmp ~ '/missing/vapid.json' if journal_case.missing | default(false)
+             else test_tmp ~ '/etc/mission-control/vapid.json' }}
+        mission_control_ha_token_file: >-
+          {{ test_tmp ~ '/missing/ha-token' if journal_case.missing | default(false)
+             else test_tmp ~ '/etc/mission-control/ha-token' }}
+        mission_control_subscriptions_file: >-
+          {{ test_tmp ~ '/missing/subscriptions.json' if journal_case.missing | default(false)
+             else test_tmp ~ '/var/lib/mission-control/subscriptions.json' }}
+    - name: Passed
+      ansible.builtin.set_fact:
+        test_journal_got: pass
+  rescue:
+    - name: Failed
+      ansible.builtin.set_fact:
+        test_journal_got: "{{ 'fail' if ansible_failed_task.name == 'Verify | the journal holds none of them' else 'error: ' ~ ansible_failed_task.name }}"
+
+- name: Verify journal | outcome, and journalctl was asked for both units for {{ journal_case.name }}
+  vars:
+    jargs: "{{ lookup('ansible.builtin.file', test_tmp ~ '/journalctl.args').splitlines() }}"
+  ansible.builtin.assert:
+    that:
+      - test_journal_got == journal_case.want
+      - jargs == ['-q', '--no-pager', '-o', 'cat', '-u', 'mission-control.service', '-u', 'mission-control-briefing.service']
+    fail_msg: "{{ journal_case.name }}: {{ test_journal_got }}, want {{ journal_case.want }}; args {{ jargs }}"
+    quiet: true

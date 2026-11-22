@@ -1,0 +1,15 @@
+---
+# The unit only: no [Install] section (static: nothing can enable it), no timer, never started, restarted or
+# stopped here. A build runs only when Noah or Claude starts it (`systemctl start voice-profile`).
+- name: Service | voice-profile unit
+  ansible.builtin.template:
+    src: voice-profile.service.j2
+    dest: "{{ voice_profile_unit_dir }}/{{ voice_profile_service }}"
+    owner: "{{ voice_profile_root_owner }}"
+    group: "{{ voice_profile_root_owner }}"
+    mode: "0644"
+    follow: false
+  notify: Reload systemd for voice-profile
+
+- name: Service | apply a pending daemon-reload
+  ansible.builtin.meta: flush_handlers

@@ -1,0 +1,262 @@
+---
+# Role inputs, checked before anything is written; then the library mount (the root on its mount, the
+# sentinel, 40-writing), and no build in progress.
+- name: Preflight | role ai_stack's and role searxng's defaults (the ai network's subnet, SearXNG's subnet)
+  ansible.builtin.include_vars:
+    file: "{{ item.file }}"
+    name: "{{ item.name }}"
+  loop:
+    - {file: "{{ voice_profile_ai_stack_defaults_file }}", name: voice_profile_ai_stack_role_defaults}
+    - {file: "{{ voice_profile_searxng_defaults_file }}", name: voice_profile_searxng_role_defaults}
+  loop_control:
+    label: "{{ item.name }}"
+
+# Plain absolute paths: they go into the unit (ReadWritePaths, RequiresMountsFor, Assert*) unescaped.
+- name: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+  ansible.builtin.assert:
+    that:
+      - item is string
+      - item is match('^/[A-Za-z0-9._/-]+$')
+      - item is not search('//|/$|(^|/)[.]{1,2}(/|$)')
+      - item is not match(voice_profile_library_forbidden_re)
+    fail_msg: >-
+      {{ item }} must be an absolute path of plain characters (A-Z a-z 0-9 . _ - /), with no //, trailing /, . or ..
+      components, and not under {{ voice_profile_library_forbidden_re }} (the unit's ProtectHome/ProtectSystem/PrivateTmp
+      hide or lock those).
+    quiet: true
+  loop:
+    - "{{ voice_profile_library_root }}"
+    - "{{ voice_profile_library_mount }}"
+
+- name: Preflight | the library root is the mount or below it
+  ansible.builtin.assert:
+    that:
+      - >-
+        voice_profile_library_root == voice_profile_library_mount
+        or voice_profile_library_root.startswith(voice_profile_library_mount ~ '/')
+    fail_msg: >-
+      voice_profile_library_root ({{ voice_profile_library_root }}) must be voice_profile_library_mount
+      ({{ voice_profile_library_mount }}) or inside it.
+    quiet: true
+
+- name: Preflight | the broker's address and the unit's settings
+  ansible.builtin.assert:
+    that:
+      - tailnet_ip | default('') | voice_profile_ip_in(voice_profile_tailnet_range)
+      - voice_profile_broker_port | string is match('^[0-9]{1,5}$')
+      - voice_profile_broker_port | int > 0 and voice_profile_broker_port | int < 65536
+      - voice_profile_library_cap is string and voice_profile_library_cap is match('^[0-9]+([.][0-9]+)?[A-Za-z]{0,3}$')
+      - voice_profile_memory_max | string is match('^[0-9]+[KMG]$')
+      - voice_profile_tasks_max | string is match('^[0-9]{1,5}$')
+      - voice_profile_timeout_start | string is match('^[0-9]+(s|min|h)$')
+      - voice_profile_user is match('^[a-z_][a-z0-9_-]*$') and voice_profile_user not in ['root', 'docker', voice_profile_library_group]
+    fail_msg: >-
+      Check the voice_profile inputs: tailnet_ip (ai-box's tailnet IPv4, inside {{ voice_profile_tailnet_range }}), the
+      broker port (ai_stack_broker_port), the library cap like 500GB or 750GiB
+      (no spaces: it goes into the unit), MemoryMax / TasksMax, TimeoutStartSec like 40min, and a plain account name.
+    quiet: true
+
+# Reviewer M (M-7): an inventory override of voice_profile_settings must still be a dict with a numeric
+# timeout (V's default would otherwise apply unseen, and the start-timeout check below would compare nothing).
+- name: Preflight | V's settings are a dict with a numeric broker timeout
+  ansible.builtin.assert:
+    that:
+      - voice_profile_settings is mapping
+      - "'timeout' in voice_profile_settings"
+      - voice_profile_settings['timeout'] is number and voice_profile_settings['timeout'] is not boolean
+    fail_msg: >-
+      voice_profile_settings must be a dict that sets timeout (V's broker timeout in seconds, a number; the
+      default is 1800). Override with voice_profile_settings | combine({...}) to keep the other keys.
+    quiet: true
+
+# The whole build must outlive one broker call (the CPU model drafts slowly): systemd would kill the build
+# mid-call otherwise, and the profile would never be written. A 5-minute margin covers extraction and stats.
+- name: Preflight | the unit's start timeout outlives V's broker timeout
+  vars:
+    voice_profile_start_s: >-
+      {{ (voice_profile_timeout_start | regex_replace('[a-z]+$', '') | int)
+         * {'s': 1, 'min': 60, 'h': 3600}[voice_profile_timeout_start | regex_replace('^[0-9]+', '')] }}
+  ansible.builtin.assert:
+    that: voice_profile_start_s | int >= voice_profile_settings['timeout'] | int + 300
+    fail_msg: >-
+      TimeoutStartSec {{ voice_profile_timeout_start }} ({{ voice_profile_start_s }} s) must be at least V's broker
+      timeout ({{ voice_profile_settings['timeout'] }} s) plus 300 s, or systemd kills a build mid-call.
+    quiet: true
+
+- name: Preflight | the IP filter (deny any; allow the broker only)
+  vars:
+    voice_profile_ip_issues: "{{ voice_profile_ip_allow | voice_profile_ip_problems(voice_profile_ip_deny) }}"
+  ansible.builtin.assert:
+    that:
+      - voice_profile_broker_ranges | length > 0
+      - voice_profile_ip_issues | length == 0
+    fail_msg: >-
+      IP filter: allow {{ voice_profile_ip_allow }}, deny {{ voice_profile_ip_deny }}, broker ranges
+      {{ voice_profile_broker_ranges }}: {{ voice_profile_ip_issues | join('; ') }}
+    quiet: true
+
+# Reviewer H (H5-1, as finance_digest and skill_drafter): SearXNG forwards query strings to public search
+# engines, so no broker range may reach its subnet, whether the range is the computed default or an override.
+- name: Preflight | no broker range reaches SearXNG's subnet
+  vars:
+    voice_profile_searxng_hits: "{{ voice_profile_broker_ranges | voice_profile_overlapping(voice_profile_searxng_subnet) }}"
+  ansible.builtin.assert:
+    that:
+      - voice_profile_searxng_subnet | length > 0
+      - voice_profile_searxng_hits | length == 0
+    fail_msg: >-
+      voice_profile_broker_ranges {{ voice_profile_searxng_hits }} overlap SearXNG's subnet
+      '{{ voice_profile_searxng_subnet }}' (searxng_subnet, or role searxng's default): the build must never reach
+      SearXNG, which forwards queries to the internet. Narrow the ranges around it.
+    quiet: true
+
+- name: Preflight | the app sources exist on the controller (modules V and L)
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ voice_profile_launcher_src }}"
+    - "{{ voice_profile_pkg_src }}/__init__.py"
+    - "{{ voice_profile_pkg_src }}/config.py"
+    - "{{ voice_profile_library_src_dir }}/library/__init__.py"
+  register: voice_profile_src_stat
+  delegate_to: localhost
+  become: false
+
+- name: Preflight | require the app sources
+  ansible.builtin.assert:
+    that: voice_profile_src_stat.results | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      Missing on the controller:
+      {{ voice_profile_src_stat.results | rejectattr('stat.exists') | map(attribute='item') | join(', ') }}
+    quiet: true
+
+# V's own loader and the library's own size parser, on the controller, before anything is written (the host
+# re-checks config.json with the installed loader at `validate:`).
+- name: Preflight | V's loader and the library's size parser on the role's config and cap
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -I
+      - -B
+      - -c
+      - |
+        import json, sys
+        sys.path[:0] = [sys.argv[1], sys.argv[2]]
+        from voice_profile.config import validate
+        from library.naming import parse_size
+        validate(json.loads(sys.argv[3]))
+        parse_size(sys.argv[4])
+      - "{{ voice_profile_src_dir }}"
+      - "{{ voice_profile_library_src_dir }}"
+      - "{{ voice_profile_config | to_json }}"
+      - "{{ voice_profile_library_cap }}"
+  register: voice_profile_cfg_check
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  delegate_to: localhost
+  become: false
+
+- name: Preflight | V's loader accepts the config, and the cap parses
+  ansible.builtin.assert:
+    that: voice_profile_cfg_check.rc == 0
+    fail_msg: >-
+      The voice profile config or the library cap ({{ voice_profile_library_cap }}) is refused:
+      {{ voice_profile_cfg_check.stderr_lines | last | default('') }}
+    quiet: true
+
+# The account the library mount maps to (roles ai_library_share and research_gate create it). This role only
+# joins its group, it never creates it.
+- name: Preflight | the library's group exists
+  ansible.builtin.getent:
+    database: group
+    key: "{{ voice_profile_library_group }}"
+    fail_key: false
+
+- name: Preflight | require the library's group
+  ansible.builtin.assert:
+    that: (ansible_facts.getent_group | default({})).get(voice_profile_library_group) is not none
+    fail_msg: >-
+      Group {{ voice_profile_library_group }} doesn't exist: converge the AI Library share first
+      (playbooks/ai-library.yml), which creates it with the mount.
+    quiet: true
+
+# --- The library must really be mounted (§12.11 mount safety). ---
+- name: Preflight | stat the library root without following links
+  ansible.builtin.stat:
+    path: "{{ voice_profile_library_root }}"
+    follow: false
+    get_checksum: false
+  register: voice_profile_root_stat
+
+- name: Preflight | the library root is a real directory
+  ansible.builtin.assert:
+    that:
+      - voice_profile_root_stat.stat.exists
+      - voice_profile_root_stat.stat.isdir and not voice_profile_root_stat.stat.islnk
+    fail_msg: "{{ voice_profile_library_root }} is missing, or is a symlink or a file. Is the AI Library share mounted?"
+    quiet: true
+
+- name: Preflight | which mount holds the library root
+  ansible.builtin.command:
+    argv: [findmnt, --noheadings, --first-only, --output, TARGET, --target, "{{ voice_profile_library_root }}"]
+  register: voice_profile_findmnt
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# An unmounted share leaves an empty directory on the parent filesystem: findmnt then names that parent.
+- name: Preflight | the library root is on the declared mount (not the disk under an empty mount point)
+  ansible.builtin.assert:
+    that:
+      - voice_profile_findmnt.rc == 0
+      - voice_profile_findmnt.stdout | trim == voice_profile_library_mount
+      - voice_profile_library_mount != '/'
+    fail_msg: >-
+      {{ voice_profile_library_root }} is on mount '{{ voice_profile_findmnt.stdout | default('') | trim }}', not on
+      voice_profile_library_mount ({{ voice_profile_library_mount }}). Is the AI Library share mounted?
+    quiet: true
+
+- name: Preflight | stat the sentinel, the writing folder and the archive without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: false
+  loop:
+    - "{{ voice_profile_sentinel }}"
+    - "{{ voice_profile_writing_dir }}"
+    - "{{ voice_profile_archive_root }}"
+  register: voice_profile_lib_stat
+
+- name: Preflight | the sentinel is a regular file, 40-writing and 90-archive real folders (an initialized library)
+  vars:
+    sentinel: "{{ voice_profile_lib_stat.results[0].stat }}"
+    writing: "{{ voice_profile_lib_stat.results[1].stat }}"
+    archive: "{{ voice_profile_lib_stat.results[2].stat }}"
+  ansible.builtin.assert:
+    that:
+      - sentinel.exists and sentinel.isreg and not sentinel.islnk
+      - writing.exists and writing.isdir and not writing.islnk
+      - archive.exists and archive.isdir and not archive.islnk
+    fail_msg: >-
+      {{ voice_profile_sentinel }} must be a regular file (§12.11), {{ voice_profile_writing_dir }} and
+      {{ voice_profile_archive_root }} real folders (ReadWritePaths needs them; python3 -m library --root ... init
+      creates them). This isn't the mounted AI Library.
+    quiet: true
+
+# A converge replaces the code and config a running build reads. The unit is a oneshot, so a build in progress
+# is "activating"; refuse rather than change anything under it (wait, or `systemctl stop voice-profile`).
+- name: Preflight | the build's state
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=ActiveState, "{{ voice_profile_service }}"]
+  register: voice_profile_state
+  changed_when: false
+  check_mode: false
+
+- name: Preflight | no build is running
+  ansible.builtin.assert:
+    that: voice_profile_state.stdout | trim in ['ActiveState=inactive', 'ActiveState=failed']
+    fail_msg: >-
+      voice-profile is '{{ voice_profile_state.stdout | trim }}': a build is running (it may take up to
+      {{ voice_profile_timeout_start }}). Wait for it (journalctl -u voice-profile -f) or stop it, then converge again.
+    quiet: true

@@ -1,0 +1,47 @@
+---
+# Reviewer Q (Q-F3): socket activation. forge-api.socket (enabled with the switch) binds the port; the service is
+# static (no [Install]) and requires the socket.
+# A changed socket is restarted (which stops the service too, Requires=) and the service then restarted.
+- name: Service | forge-api.socket
+  ansible.builtin.template:
+    src: forge-api.socket.j2
+    dest: "{{ forge_api_unit_dir }}/{{ forge_api_socket }}"
+    owner: "{{ forge_api_root_owner }}"
+    group: "{{ forge_api_root_owner }}"
+    mode: "0644"
+    follow: false
+  notify:
+    - Reload systemd for forge-api
+    - Restart forge-api socket
+    - Restart forge-api
+
+- name: Service | forge-api.service
+  ansible.builtin.template:
+    src: forge-api.service.j2
+    dest: "{{ forge_api_unit_dir }}/{{ forge_api_service }}"
+    owner: "{{ forge_api_root_owner }}"
+    group: "{{ forge_api_root_owner }}"
+    mode: "0644"
+    follow: false
+  notify:
+    - Reload systemd for forge-api
+    - Restart forge-api
+
+# Reload the units, then restart what changed (switched on only).
+- name: Service | apply pending reloads and restarts
+  ansible.builtin.meta: flush_handlers
+
+# The switch. On: the socket enabled and listening, then the service started (so the verify sees it run). Off: the
+# socket stopped and disabled first (no connection can start the service again), then the service stopped.
+- name: Service | the socket on (enabled, listening) or off (stopped, disabled)
+  ansible.builtin.systemd_service:
+    name: "{{ forge_api_socket }}"
+    enabled: "{{ forge_api_enabled | bool }}"
+    state: "{{ 'started' if forge_api_enabled | bool else 'stopped' }}"
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Service | the service running (switched on) or stopped
+  ansible.builtin.systemd_service:
+    name: "{{ forge_api_service }}"
+    state: "{{ 'started' if forge_api_enabled | bool else 'stopped' }}"
+  ignore_errors: "{{ ansible_check_mode }}"

@@ -1,0 +1,10 @@
+---
+# Mission Control (docs/CONTRACTS.md §12.29): Noah's home-screen app and 05:30 briefing push on ai-box,
+# https :8443 through tailscale serve. Run as the operator account `claude`, after playbooks/ai-control.yml
+# (role ai_control declares the :8443 handler through ai_control_serve_extra_handlers, so the two plays agree).
+- name: Mission Control
+  hosts: ai_servers
+  become: true
+  gather_facts: false
+  roles:
+    - mission_control

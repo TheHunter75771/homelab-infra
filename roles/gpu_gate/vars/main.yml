@@ -1,0 +1,12 @@
+---
+# Fixed by the reviewed unit (apps/gpu-gate/gpu-gate.service), which is installed verbatim.
+gpu_gate_config_dir: /etc/gpu-gate
+gpu_gate_config_file: "{{ gpu_gate_config_dir }}/config.json"
+gpu_gate_unit: /etc/systemd/system/gpu-gate.service
+gpu_gate_binds: >-
+  {{ [gaming_pc_tailnet_ip] + ([gaming_pc_tailnet_ip6] if gaming_pc_tailnet_ip6 | default('') | length > 0 else []) }}
+gpu_gate_config: >-
+  {{ {'binds': gpu_gate_binds,
+      'port': gpu_gate_port | int,
+      'ollama_url': 'http://' ~ gaming_pc_tailnet_ip ~ ':' ~ gpu_gate_ollama_port}
+     | combine(gpu_gate_config_extra) }}

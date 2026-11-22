@@ -1,0 +1,118 @@
+---
+# The stack's two networks, pinned (docs/CONTRACTS.md §12.18b):
+#   `ai` (ai_stack_network_name): the main bridge. It existed before the pin, with a Docker-allocated
+#   subnet that the pin matches. Compose (v2.24+ and v5) stamps a config hash on the networks it creates and
+#   REMOVES AND RECREATES a network whose definition changes (pkg/compose/reconcile.go, reconcileNetworks),
+#   even if the subnet it ends up with is the same. Adding `ipam` would do exactly that and stop the whole
+#   stack. So this role owns `ai` (docker_network compares only the keys it is given: an existing network
+#   with this subnet is unchanged) and compose uses it as `external`.
+#   `extract`: Tika's internal network, new with §12.18b, so compose creates it with its pinned subnet.
+# Read-only checks first: nothing is created or changed when the plan doesn't fit the host.
+
+- name: Networks | role docker's address pools
+  ansible.builtin.include_vars:
+    file: "{{ ai_stack_docker_defaults_file }}"
+    name: ai_stack_docker_role_defaults
+
+- name: Networks | the pinned subnets fit role docker's address plan
+  vars:
+    ai_stack_net_issues: >-
+      {{ ai_stack_network_subnet | ai_stack_net_problems(ai_stack_extract_subnet,
+         docker_address_pools | default(ai_stack_docker_role_defaults.docker_address_pools)) }}
+  ansible.builtin.assert:
+    that: ai_stack_net_issues | length == 0
+    fail_msg: "{{ ai_stack_net_issues | join('; ') }}"
+    quiet: true
+
+- name: Networks | subnets of the Docker networks on the host
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      docker network ls --quiet | xargs --no-run-if-empty docker network inspect \
+        --format '{% raw %}{{.Name}} {{range .IPAM.Config}}{{.Subnet}} {{end}}{% endraw %}'
+    executable: /bin/bash
+  register: ai_stack_host_networks
+  changed_when: false
+  check_mode: false
+
+# `ai` may exist only with exactly its pinned subnet (never recreated here: containers are attached);
+# `extract` likewise; and no other network may overlap either.
+- name: Networks | the host's networks agree with the pinned subnets
+  vars:
+    ai_stack_net_conflicts: >-
+      {{ ai_stack_network_subnet | ai_stack_network_conflicts(ai_stack_host_networks.stdout_lines, ai_stack_network_name)
+         + ai_stack_extract_subnet | ai_stack_network_conflicts(ai_stack_host_networks.stdout_lines, ai_stack_extract_network_name) }}
+  ansible.builtin.assert:
+    that: ai_stack_net_conflicts | length == 0
+    fail_msg: >-
+      Docker networks conflict with the pinned subnets ({{ ai_stack_network_name }} {{ ai_stack_network_subnet }},
+      {{ ai_stack_extract_network_name }} {{ ai_stack_extract_subnet }}): {{ ai_stack_net_conflicts | join('; ') }}.
+      Nothing was changed. Set ai_stack_network_subnet to the live subnet (docker network inspect
+      {{ ai_stack_network_name }}) or pick another ai_stack_extract_subnet.
+    quiet: true
+
+# §12.23: the three pinned addresses fit the `ai` subnet, and no other container holds one of them (compose
+# would fail to start the service). Read-only.
+- name: Networks | the pinned container addresses fit the `ai` subnet
+  vars:
+    ai_stack_pin_issues: "{{ ai_stack_network_subnet | ai_stack_pinned_ip_problems(ai_stack_pinned_ips) }}"
+  ansible.builtin.assert:
+    that: ai_stack_pin_issues | length == 0
+    fail_msg: "{{ ai_stack_pin_issues | join('; ') }}"
+    quiet: true
+
+- name: Networks | containers on the `ai` network now
+  ansible.builtin.command:
+    argv:
+      - docker
+      - network
+      - inspect
+      - "{{ ai_stack_network_name }}"
+      - --format
+      - "{% raw %}{{range .Containers}}{{.Name}} {{.IPv4Address}}
+{{end}}{% endraw %}"
+  register: ai_stack_ai_members
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Networks | no other container holds a pinned address
+  vars:
+    ai_stack_pin_clashes: "{{ ai_stack_ai_members.stdout_lines | default([]) | ai_stack_pinned_ip_holders(ai_stack_pinned_ips) }}"
+  ansible.builtin.assert:
+    that: ai_stack_pin_clashes | length == 0
+    fail_msg: >-
+      {{ ai_stack_pin_clashes | join('; ') }}. Nothing was changed. Stop or move that container, or pick other
+      addresses (ai_stack_ollama_cpu_ip, ai_stack_broker_ip, ai_stack_webui_ip).
+    quiet: true
+
+# open-webui's address is the broker's only management client. Traffic that comes in through the published
+# port can arrive from the network's gateway, so a pin on the gateway would make the host a management
+# client. The live gateway is read (it's .1 unless someone set another); ai_stack_pinned_ip_problems
+# already refuses .1.
+- name: Networks | the `ai` network's gateway now
+  ansible.builtin.command:
+    argv:
+      - docker
+      - network
+      - inspect
+      - "{{ ai_stack_network_name }}"
+      - --format
+      - "{% raw %}{{range .IPAM.Config}}{{.Gateway}} {{end}}{% endraw %}"
+  register: ai_stack_ai_gateway
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Networks | no pinned address is the live gateway (open-webui's least of all)
+  ansible.builtin.include_tasks: gateway_assert.yml
+
+- name: Networks | the stack's main network (compose uses it as external)
+  community.docker.docker_network:
+    name: "{{ ai_stack_network_name }}"
+    driver: bridge
+    ipam_config:
+      - subnet: "{{ ai_stack_network_subnet }}"
+    # Never disconnect the containers already on it.
+    appends: true
+    state: present

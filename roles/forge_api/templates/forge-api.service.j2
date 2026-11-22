@@ -1,0 +1,48 @@
+# {{ ansible_managed }}
+# Skill Forge API F (docs/CONTRACTS.md §12.25, deploy module H8): the forge over HTTP for the Open WebUI tool
+# "Web research (approval required)". It creates research requests and passes on ticks Noah made in a chat
+# dialog (approver-gated); it never approves anything by itself and never reaches the internet. User rgate (the
+# research gate's account, no capabilities, not in docker); writes only the library's 35-forge/.
+# SOCKET-ACTIVATED (Reviewer Q, Q-F3): forge-api.socket binds the port and is the unit that is enabled; this
+# service has no [Install] section and serves only the socket it inherits (it can bind nothing itself). The
+# library share must be mounted (RequiresMountsFor + asserts).
+[Unit]
+Description=Skill Forge API for Open WebUI (chat-approved research requests)
+Documentation=file://{{ forge_api_launcher }}
+Requires={{ forge_api_socket }}
+After={{ forge_api_socket }}
+# Ordering only (Lead decision, §12.25 F done): start after Docker's own start.
+After=docker.service
+# Reviewer S (S-1): no start limit. Hitting it would fail the service and take forge-api.socket down with it, closing
+# the port; Restart=on-failure keeps retrying every 30 s instead.
+StartLimitIntervalSec=0
+RequiresMountsFor={{ forge_api_library_root }}
+# §12.11 mount safety: never run against an empty mount point.
+AssertPathExists={{ forge_api_sentinel }}
+AssertPathIsDirectory={{ forge_api_forge_dir }}
+# Reviewer M (M-4, role voice_profile): systemd follows a symlink in ReadWritePaths when it builds the sandbox, so
+# a link planted after the converge would make its target writable. Refuse to start instead.
+AssertPathIsSymbolicLink=!{{ forge_api_forge_dir }}
+
+[Service]
+Type=exec
+# F's launcher under -I (no PYTHON* variables, no user site, no working directory on sys.path): it puts its own
+# root-owned directory, which holds forge_api, forge and library, first on sys.path. -B: no bytecode there.
+ExecStart={{ (forge_api_argv + ['serve']) | join(' ') }}
+Restart=on-failure
+RestartSec=30s
+SyslogIdentifier=forge-api
+# The sandbox: exactly vars/main.yml forge_api_sandbox (the verify's sandboxed check-config uses the same list).
+# - ReadWritePaths is 35-forge only: new requests, proposals, ticks and the forge lock all live there. The rest
+#   of the library (items read from 10-sources/) is read-only through ProtectSystem=strict.
+# - InaccessiblePaths=/dev/shm: PrivateDevices keeps the host's writable, shared /dev/shm; F never uses it.
+# - Network: IPv4 and Unix sockets only (the bind is an IPv4 literal); it binds nothing (SocketBindDeny=any):
+#   the listening socket comes from forge-api.socket.
+# - ProcSubset=pid: F reads nothing under /proc but its own process (unlike the gate, no /proc/self/net).
+# - /run read-only explicitly (found writable despite ProtectSystem=strict on the mediaserver, 2026-10-24).
+# - IP filter (§12.25): systemd checks the source of incoming packets and the destination of outgoing ones.
+#   Only open-webui's pinned address {{ forge_api_webui_ip | trim }} is allowed, both ways, so the service can open
+#   no outbound connection at all. The inherited listening socket is filtered by forge-api.socket's copy.
+{% for p in forge_api_sandbox %}
+{{ p }}
+{% endfor %}

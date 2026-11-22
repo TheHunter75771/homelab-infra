@@ -1,0 +1,14 @@
+# {{ ansible_managed }}
+# Mission Control briefing schedule (docs/CONTRACTS.md §12.29): every day at {{ mission_control_briefing_time }} {{ mission_control_timezone }} (the zone
+# is part of OnCalendar, so it follows DST and never the host's zone). Persistent: a briefing missed while ai-box was
+# off is sent at the next boot.
+[Unit]
+Description=Mission Control morning briefing ({{ mission_control_briefing_time[:5] }} {{ mission_control_timezone }})
+
+[Timer]
+OnCalendar={{ mission_control_on_calendar }}
+Persistent=true
+Unit={{ mission_control_briefing_service }}
+
+[Install]
+WantedBy=timers.target

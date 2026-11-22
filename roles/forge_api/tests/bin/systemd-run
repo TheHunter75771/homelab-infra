@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Fake systemd-run for tests/test_forge_api.yml (verify.yml): records its arguments, one per line, in
+# $FA_TEST_DIR/systemd-run.args, then runs the command after `--` directly (no sandbox, no root).
+set -euo pipefail
+: "${FA_TEST_DIR:?}"
+printf '%s\n' "$@" >"$FA_TEST_DIR/systemd-run.args"
+while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done
+[ "$#" -gt 1 ] || { echo "fake systemd-run: no command after --" >&2; exit 2; }
+shift
+exec "$@"

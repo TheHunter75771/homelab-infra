@@ -1,0 +1,16 @@
+{
+  "listen_host": "127.0.0.1",
+  "listen_port": 8095,
+  "gate_url": "http://GAMING_PC_TAILNET_IP:11500",
+  "broker_url": "http://AI_BOX_TAILNET_IP:11434",
+  "webui_url": "http://AI_BOX_TAILNET_IP:8080",
+  "helper_socket": "/run/aictl-helper.sock",
+  "agent_url": "http://GAMING_PC_TAILNET_IP:11510",
+  "agent_token_file": "/etc/ai-control/agent-token",
+  "static_dir": "/opt/ai-control/web",
+  "gate_samples_path": "/var/lib/ai-control/gate-samples.jsonl",
+  "disk_mounts": ["/"],
+  "gate_threshold": 50,
+  "gate_window": 1800,
+  "timezone": null
+}

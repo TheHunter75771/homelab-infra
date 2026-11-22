@@ -1,0 +1,19 @@
+---
+# Order matters: handlers run in this order, so the units are reloaded before anything restarts, and a restarted
+# socket (which stops the service, Requires=) comes before the service's own restart.
+- name: Reload systemd for forge-api
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+# Only when the API is switched on; with forge_api_enabled false both stay stopped (tasks/service.yml).
+- name: Restart forge-api socket
+  ansible.builtin.systemd_service:
+    name: "{{ forge_api_socket }}"
+    state: restarted
+  when: forge_api_enabled | bool
+
+- name: Restart forge-api
+  ansible.builtin.systemd_service:
+    name: "{{ forge_api_service }}"
+    state: restarted
+  when: forge_api_enabled | bool

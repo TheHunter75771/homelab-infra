@@ -1,0 +1,20 @@
+# {{ ansible_managed }}
+# Mission Control morning briefing (docs/CONTRACTS.md §12.29): composes today's briefing deterministically and sends
+# it as a web push. Started by {{ mission_control_briefing_timer }} only (no [Install]). Same user and sandbox as the
+# server (vars/main.yml mission_control_sandbox).
+[Unit]
+Description=Mission Control morning briefing (web push)
+Documentation=file://{{ mission_control_server_dir }}
+After=network-online.target {{ mission_control_service }}
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ mission_control_briefing_argv | join(' ') }}
+TimeoutStartSec={{ mission_control_briefing_timeout }}
+SyslogIdentifier=mission-control-briefing
+MemoryMax={{ mission_control_briefing_memory_max }}
+TasksMax={{ mission_control_briefing_tasks_max }}
+{% for p in mission_control_sandbox %}
+{{ p }}
+{% endfor %}

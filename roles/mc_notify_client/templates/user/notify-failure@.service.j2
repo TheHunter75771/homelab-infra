@@ -1,0 +1,21 @@
+# {{ ansible_managed }}
+# The systemd --user copy of notify-failure@.service (B2-CONTRACT.md §5, role mc_notify_client, scope user), for user
+# units such as the gaming PC's timers. A user unit opts in with
+#   OnFailure=notify-failure@%n.service
+# and each failure of it runs this user's own `mc-notify --unit=<that unit>` (the "=" keeps a name starting with "-"
+# from reading as an option) with this user's own config and token (both 0600 in ~/.config/mc-notify). Never from a
+# catch-all drop-in (service.d/): notify-failure@ would get an OnFailure= too and loop. The system copy's sandbox is left out on purpose: most of it needs privileges a user manager
+# doesn't have, and a setting the manager can't apply fails the unit, which would silence the notice. No
+# network-online.target here either: the user manager has no such unit.
+[Unit]
+Description=Push "%i failed" to the phone through Mission Control (user manager)
+Documentation=file://{{ mc_notify_client_cli }}
+
+[Service]
+Type=oneshot
+Environment="MC_NOTIFY_CONFIG={{ mc_notify_client_config_file }}"
+ExecStart={{ mc_notify_client_cli }} --unit=%i
+TimeoutStartSec=60
+SyslogIdentifier=mc-notify
+UMask=0077
+NoNewPrivileges=yes

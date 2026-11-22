@@ -1,0 +1,1459 @@
+---
+# Offline test for role forge_api (no root, no systemd or firewall changes, nothing applied to this machine). Run
+# it through tests/run.sh (it loads the role's filter plugins and puts the fakes in tests/bin first on PATH). It
+# runs the role's own task files against a scratch dir, with stub handlers that count reloads and restarts:
+#   0. the defaults (bind = the ai bridge's gateway from role ai_stack's subnet, open-webui's /32, the UFW line),
+#      the rgate account tasks equal role research_gate's and ai_library_share's, and static rules over every
+#      task file: the order, no_log on every token task, the token is generated once (creates + O_EXCL), nothing
+#      reads the token, UFW is never written, docker is only inspected;
+#   1. preflight.yml: passes switched off with no approver and no library; passes switched on against a scratch
+#      library on the scratch dir's real mount; refuses bad inputs (switch, approver, paths, ports, the unit's
+#      settings, the addresses, the IP filter, the UFW rule, sources, F's loader, and the library mount);
+#   2. install.yml: F's launcher and package plus forge and library, from scratch copies with junk planted, run
+#      twice with strays in between (pruned), a third time changing nothing; symlinked directories refused;
+#   3. token.yml: generated once (43 chars, 0640), unchanged by a second run, a pre-existing token kept, a symlink
+#      or a dangling symlink at its path refused;
+#   4. config.yml: exactly F's keys, 0640 in 0750, validated with F's own check-config (which refuses bad configs
+#      and bad token files, and with --require-library an uninitialized library); not rendered without an approver;
+#   5. the unit: every line literal and in order, systemd-analyze verify clean (default and another network);
+#   6. verify.yml with the fakes: a good run passes, and 20 broken states are each refused by the right check.
+- name: Role forge_api deploys the forge API on the ai bridge gateway, open-webui-only, off by default
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  vars:
+    ansible_managed: Ansible managed
+    test_tmp: ""
+    test_repo: "{{ playbook_dir }}/../../.."
+    fa_test_reloads: 0
+    fa_test_restarts: 0
+    fa_test_socket_restarts: 0
+  # Stub handlers with the role's names: nothing touches systemd; requests are counted.
+  handlers:
+    - name: Reload systemd for forge-api
+      ansible.builtin.set_fact:
+        fa_test_reloads: "{{ fa_test_reloads | int + 1 }}"
+    - name: Restart forge-api socket
+      ansible.builtin.set_fact:
+        fa_test_socket_restarts: "{{ fa_test_socket_restarts | int + 1 }}"
+    - name: Restart forge-api
+      ansible.builtin.set_fact:
+        fa_test_restarts: "{{ fa_test_restarts | int + 1 }}"
+  tasks:
+    - name: The test runs through tests/run.sh
+      ansible.builtin.assert:
+        that: test_tmp is abs
+        fail_msg: Run this through roles/forge_api/tests/run.sh.
+        quiet: true
+
+    - name: Read role ai_stack's defaults (as preflight does)
+      ansible.builtin.include_vars:
+        file: "{{ test_repo }}/roles/ai_stack/defaults/main.yml"
+        name: forge_api_ai_stack_role_defaults
+
+    - name: The role's defaults (before any test override)
+      ansible.builtin.assert:
+        that:
+          - forge_api_enabled is sameas false
+          - forge_api_approver_user_id is not defined
+          - forge_api_user == 'rgate' and forge_api_group == 'rgate'
+          - forge_api_app_dir == '/opt/forge-api'
+          - forge_api_launcher == '/opt/forge-api/forge-api'
+          - forge_api_config_file == '/etc/forge-api/config.json'
+          - forge_api_token_file == '/etc/forge-api/token'
+          - forge_api_service == 'forge-api.service' and forge_api_socket == 'forge-api.socket'
+          - >-
+            forge_api_socket_lines == ['ListenStream=172.20.0.1:879', 'FreeBind=yes', 'Accept=no', 'TriggerLimitIntervalSec=0',
+                                       'IPAddressDeny=any', 'IPAddressAllow=172.20.0.4/32']
+          - forge_api_verify_owui_trust is sameas true
+          - forge_api_webui_data_dir == '/app/backend/data' and forge_api_webui_db_name == 'webui.db'
+          - forge_api_library_root == '/srv/ai-library'
+          - forge_api_forge_dir == '/srv/ai-library/35-forge'
+          - forge_api_sentinel == '/srv/ai-library/.ai-library-sentinel'
+          - forge_api_app_entries | sort == ['forge', 'forge-api', 'forge_api', 'library']
+          - forge_api_ai_subnet | trim == '172.20.0.0/24'
+          - forge_api_webui_ip | trim == '172.20.0.4'
+          - forge_api_bind | trim == '172.20.0.1'
+          - forge_api_port == 879
+          - forge_api_ip_allow == ['172.20.0.4/32']
+          - forge_api_ip_deny == ['any']
+          - >-
+            forge_api_ufw_rule == "allow from 172.20.0.4 to 172.20.0.1 port 879 proto tcp comment 'homelab: forge-api from open-webui'"
+          - forge_api_url == 'http://172.20.0.1:879/requests'
+          - forge_api_memory_max == '256M' and forge_api_tasks_max == 64 and forge_api_limit_nofile == 256
+          - forge_api_config_wanted | bool is sameas false
+          - forge_api_config_validate is not search('--require-library')
+        fail_msg: "{{ forge_api_bind }} {{ forge_api_ip_allow }} {{ forge_api_ufw_rule }}"
+        quiet: true
+
+    - name: The bind address follows the inventory (ai_stack_network_gateway, else the subnet's first host)
+      vars:
+        cases:
+          - {subnet: 172.21.0.0/24, gw: "", want: 172.21.0.1}
+          - {subnet: 172.20.0.0/24, gw: 172.20.0.254, want: 172.20.0.254}
+          - {subnet: 172.20.4.0/22, gw: "", want: 172.20.4.1}
+      ansible.builtin.assert:
+        that: >-
+          cases | map(attribute='want') | list ==
+          [(ai_stack_network_gateway | default('172.21.0.0/24' | forge_api_gateway_of, true)),
+           ('172.20.0.254' | default('x', true)),
+           ('' | default('172.20.4.0/22' | forge_api_gateway_of, true))]
+        quiet: true
+
+    - name: The bind default with the inventory's subnet set and no gateway
+      vars:
+        ai_stack_network_subnet: 172.22.0.0/24
+      ansible.builtin.assert:
+        that:
+          - forge_api_bind | trim == '172.22.0.1'
+          - forge_api_ufw_rule is search('^allow from 172[.]20[.]0[.]4 to 172[.]22[.]0[.]1 port 879 proto tcp ')
+        fail_msg: "{{ forge_api_bind }}"
+        quiet: true
+
+    - name: The bind follows ai_stack_network_gateway when the inventory sets one
+      vars:
+        ai_stack_network_gateway: 172.20.0.254
+      ansible.builtin.assert:
+        that: forge_api_bind | trim == '172.20.0.254'
+        fail_msg: "{{ forge_api_bind }}"
+        quiet: true
+
+    - name: The inventory pins open-webui where the role expects it (group_vars/ai_servers)
+      vars:
+        ai_servers: "{{ lookup('ansible.builtin.file', test_repo ~ '/inventory/group_vars/ai_servers/main.yml') | from_yaml }}"
+      ansible.builtin.assert:
+        that: ai_servers.ai_stack_webui_ip == '172.20.0.4'
+        quiet: true
+
+    - name: The role's config has F's keys (config.example.json)
+      vars:
+        example: "{{ lookup('ansible.builtin.file', test_repo ~ '/apps/forge-api/config.example.json') | from_json }}"
+        forge_api_approver_user_id: 11111111-2222-3333-4444-555555555555
+      ansible.builtin.assert:
+        that:
+          - example.keys() | sort == forge_api_config.keys() | sort
+          - forge_api_config_keys == example.keys() | sort
+          - forge_api_config.bind == example.bind and forge_api_config.port == example.port
+          - forge_api_config.allowed_peers == example.allowed_peers
+          - forge_api_config.token_file == example.token_file
+          - forge_api_config.port is integer
+        fail_msg: "{{ example | to_json }} vs {{ forge_api_config | to_json }}"
+        quiet: true
+
+    # ---- 0. the account, and static rules over every task file ---------------------------------------------
+    - name: Read the account tasks of this role, role research_gate and role ai_library_share
+      ansible.builtin.set_fact:
+        fa_test_mine: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../tasks/base.yml') | from_yaml }}"
+        fa_test_rg: "{{ lookup('ansible.builtin.file', test_repo ~ '/roles/research_gate/tasks/base.yml') | from_yaml }}"
+        fa_test_l2: "{{ lookup('ansible.builtin.file', test_repo ~ '/roles/ai_library_share/tasks/client.yml') | from_yaml }}"
+
+    - name: The rgate user and group tasks set exactly the research gate's attributes (shared account, Lead F-4)
+      vars:
+        my_user: "{{ (fa_test_mine | select('contains', 'ansible.builtin.user') | first)['ansible.builtin.user'] }}"
+        my_group: "{{ (fa_test_mine | select('contains', 'ansible.builtin.group') | first)['ansible.builtin.group'] }}"
+        rg_user: "{{ (fa_test_rg | select('contains', 'ansible.builtin.user') | first)['ansible.builtin.user'] }}"
+        rg_group: "{{ (fa_test_rg | select('contains', 'ansible.builtin.group') | first)['ansible.builtin.group'] }}"
+        l2_user: "{{ (fa_test_l2 | select('contains', 'ansible.builtin.user') | first)['ansible.builtin.user'] }}"
+        l2_group: "{{ (fa_test_l2 | select('contains', 'ansible.builtin.group') | first)['ansible.builtin.group'] }}"
+        groups_check: "{{ (fa_test_mine | selectattr('name', 'search', 'its own group only') | first)['ansible.builtin.assert'] }}"
+      ansible.builtin.assert:
+        that:
+          - fa_test_mine | select('contains', 'ansible.builtin.user') | list | length == 1
+          - my_user.keys() | sort == ['create_home', 'group', 'home', 'name', 'shell', 'system']
+          - my_user.name == ('{' ~ '{ forge_api_user }' ~ '}') and my_user.group == my_user.name
+          - my_user.system is sameas true and my_user.create_home is sameas false
+          - my_user.shell == '/usr/sbin/nologin' and my_user.home == '/nonexistent'
+          - my_group.keys() | sort == ['name', 'system'] and my_group.system is sameas true
+          - my_group.name == my_user.name
+          - (rg_user | dict2items | rejectattr('key', 'in', ['name', 'group']) | list)
+            == (my_user | dict2items | rejectattr('key', 'in', ['name', 'group']) | list)
+          - rg_user.keys() | sort == my_user.keys() | sort and rg_group.keys() | sort == my_group.keys() | sort
+          - (l2_user | dict2items | rejectattr('key', 'in', ['name', 'group']) | list)
+            == (my_user | dict2items | rejectattr('key', 'in', ['name', 'group']) | list)
+          - l2_user.keys() | sort == my_user.keys() | sort and l2_group.keys() | sort == my_group.keys() | sort
+          - groups_check.that == 'forge_api_user_groups.stdout.split() == [forge_api_user]'
+        fail_msg: "mine {{ my_user }} / research_gate {{ rg_user }} / ai_library_share {{ l2_user }}"
+        quiet: true
+
+    - name: Read every task and handler file of the role (parsed, and as text without comments)
+      ansible.builtin.set_fact:
+        fa_test_all_tasks: "{{ fa_test_all_tasks | default([]) + (lookup('ansible.builtin.file', item) | from_yaml) }}"
+        fa_test_texts: >-
+          {{ fa_test_texts | default('') ~ '\n'
+             ~ (lookup('ansible.builtin.file', item) | regex_replace('(?m)^\s*#.*$', '')) }}
+      loop: >-
+        {{ query('ansible.builtin.fileglob', playbook_dir ~ '/../tasks/*.yml')
+           + query('ansible.builtin.fileglob', playbook_dir ~ '/../handlers/*.yml') }}
+
+    - name: Read the token tasks
+      ansible.builtin.set_fact:
+        fa_test_token_tasks: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../tasks/token.yml') | from_yaml }}"
+
+    - name: Static rules over the role's task files
+      vars:
+        # The token tasks: every task of token.yml but the config directory's guard and creation.
+        token_touchers: >-
+          {{ fa_test_all_tasks | selectattr('name', 'search', '^Token [|]')
+             | rejectattr('name', 'search', 'config directory') | list }}
+        generator: "{{ fa_test_token_tasks | selectattr('name', 'equalto', 'Token | generate it once (never rotated)') | first }}"
+        journal_script: >-
+          {{ (fa_test_all_tasks | selectattr('name', 'equalto', "Verify | the unit's journal against the token") | first)
+             ['ansible.builtin.command'].argv[2] }}
+        commands: >-
+          {{ fa_test_all_tasks | select('contains', 'ansible.builtin.command') | map('dict2items')
+             | map('selectattr', 'key', 'equalto', 'ansible.builtin.command') | map('first')
+             | map(attribute='value') | list }}
+        ufw_tasks: "{{ commands | selectattr('argv', 'defined') | map(attribute='argv') | select('contains', 'ufw') | list }}"
+        docker_tasks: >-
+          {{ commands | selectattr('argv', 'defined') | map(attribute='argv') | select('contains', 'docker') | list }}
+        sd_tasks: >-
+          {{ fa_test_all_tasks | select('contains', 'ansible.builtin.systemd_service') | map('dict2items')
+             | map('selectattr', 'key', 'equalto', 'ansible.builtin.systemd_service') | map('first')
+             | map(attribute='value') | list }}
+      ansible.builtin.assert:
+        that:
+          - fa_test_all_tasks | length > 60
+          # Every token task is no_log (the generator, the stat, the assert, the mode fix): 4 of them.
+          - token_touchers | length == 4
+          - token_touchers | rejectattr('no_log', 'defined') | list == []
+          - token_touchers | map(attribute='no_log') | unique | list == [true]
+          # Generated once: only while the file is missing, and never through an existing path or symlink.
+          - generator['ansible.builtin.command'].creates == ('{' ~ '{ forge_api_token_file }' ~ '}')
+          - generator['ansible.builtin.command'].argv[4] is search('os[.]O_CREAT [|] os[.]O_EXCL [|] os[.]O_NOFOLLOW')
+          - generator['ansible.builtin.command'].argv[4] is search('secrets[.]token_urlsafe[(]32[)]')
+          # Reviewer S (S-6): created 0600 (nobody else can open it before the fchmod to 0640), the group set first.
+          - generator['ansible.builtin.command'].argv[4] is search('os[.]O_CLOEXEC, 0o600[)]')
+          - >-
+            generator['ansible.builtin.command'].argv[4] is search('(?s)os[.]fchown[(]fd, -1, gid[)].*os[.]fchmod[(]fd, 0o640[)].*os[.]write[(]fd')
+          # S-6: the journal grep reads the token as a pattern FILE (-f "$3"): never on a command line, where any
+          # local user could read it in /proc/<pid>/cmdline.
+          - journal_script is search('grep -cF -f "[$]3"')
+          - journal_script | regex_findall('[$]3') | length == 1
+          - journal_script is not search('[$][(]<|[$][(]cat|xargs')
+          - generator['ansible.builtin.command'].argv[4] is not search('O_TRUNC|unlink|os[.]remove|rename|replace')
+          # Nothing reads the token into Ansible (no slurp, no file lookup, no fetch, no cat).
+          - >-
+            fa_test_texts is not search("slurp|fetch:|lookup[(] *'(ansible[.]builtin[.])?file'|(^|[^a-z])cat([^a-z]|$)|get_checksum: *true")
+          # UFW is role firewall's: this role only reads `ufw show added`.
+          - ufw_tasks == [['ufw', 'show', 'added']]
+          - fa_test_texts is not search('community[.]general[.]ufw|ufw (allow|deny|insert|delete|reload|enable|reset)')
+          # Lead F-3 / Q-1: docker is only inspected (never exec): open-webui's pid and its mounts.
+          - docker_tasks | length == 2
+          - docker_tasks | map('join', ' ') | select('match', '^docker inspect -f ') | list | length == 2
+          - fa_test_texts is not search('docker[^a-z]+exec|(^|[^a-z_])exec([^a-z_]|$)')
+          # systemd (tasks/service.yml first, then handlers/main.yml): the socket is what the switch enables (Q-F3),
+          # the service is only started or stopped; the reload and the two restarts (switched on only).
+          - >-
+            sd_tasks == [{'name': '{' ~ '{ forge_api_socket }' ~ '}', 'enabled': '{' ~ '{ forge_api_enabled | bool }' ~ '}',
+                          'state': '{' ~ '{ ' ~ "'started' if forge_api_enabled | bool else 'stopped'" ~ ' }' ~ '}'},
+                         {'name': '{' ~ '{ forge_api_service }' ~ '}',
+                          'state': '{' ~ '{ ' ~ "'started' if forge_api_enabled | bool else 'stopped'" ~ ' }' ~ '}'},
+                         {'daemon_reload': true},
+                         {'name': '{' ~ '{ forge_api_socket }' ~ '}', 'state': 'restarted'},
+                         {'name': '{' ~ '{ forge_api_service }' ~ '}', 'state': 'restarted'}]
+          - (fa_test_all_tasks | selectattr('name', 'equalto', 'Restart forge-api') | first).when == 'forge_api_enabled | bool'
+          - (fa_test_all_tasks | selectattr('name', 'equalto', 'Restart forge-api socket') | first).when == 'forge_api_enabled | bool'
+          - query('ansible.builtin.fileglob', playbook_dir ~ '/../templates/*') | map('basename') | sort
+            == ['config.json.j2', 'forge-api.service.j2', 'forge-api.socket.j2']
+        fail_msg: >-
+          token tasks {{ token_touchers | map(attribute='name') | list }}; ufw {{ ufw_tasks }}; docker {{ docker_tasks }};
+          systemd {{ sd_tasks | to_json }}
+        quiet: true
+
+    - name: Service.yml installs both units, each notifying exactly its handlers (Q-F3, Q2-1)
+      vars:
+        svc: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../tasks/service.yml') | from_yaml }}"
+        templates: >-
+          {{ svc | select('contains', 'ansible.builtin.template') | map('dict2items')
+             | map('selectattr', 'key', 'equalto', 'ansible.builtin.template') | map('first') | map(attribute='value') | list }}
+      ansible.builtin.assert:
+        that:
+          - templates | map(attribute='src') | list == ['forge-api.socket.j2', 'forge-api.service.j2']
+          - templates | map(attribute='dest') | list == ['{' ~ '{ forge_api_unit_dir }}/{' ~ '{ forge_api_socket }}',
+                                                         '{' ~ '{ forge_api_unit_dir }}/{' ~ '{ forge_api_service }}']
+          - (svc | selectattr('name', 'equalto', 'Service | forge-api.socket') | first).notify
+            == ['Reload systemd for forge-api', 'Restart forge-api socket', 'Restart forge-api']
+          - (svc | selectattr('name', 'equalto', 'Service | forge-api.service') | first).notify
+            == ['Reload systemd for forge-api', 'Restart forge-api']
+        fail_msg: "{{ templates | to_json }}"
+        quiet: true
+
+    - name: The UFW port filter finds every rule that could admit the port, and only those
+      vars:
+        lines:
+          - "Added user rules (see 'ufw status' for running firewall):"
+          - "ufw allow in on tailscale0 to any port 22 proto tcp comment 'homelab: ssh over tailnet'"
+          - "ufw allow from 172.16.0.0/12 to 172.17.0.1 port 53 proto udp comment 'homelab: container dns to resolved'"
+          - "ufw deny out 53/udp comment 'homelab: no plaintext dns out'"
+          - ufw allow 879/tcp
+          - ufw allow 870:900/tcp
+          - ufw allow 80,879/tcp
+          - ufw allow from 172.20.0.0/24
+          - ufw allow in on eno1 from 192.168.1.2 to any port 870:899 proto tcp
+          - ufw allow OpenSSH
+          - ufw route allow in on x out on y
+          - ufw allow in on tailscale0 to any port 8790 proto tcp
+          - ufw allow in on tailscale0 to any port 880:899 proto tcp
+          - ufw allow 8790,1879/tcp
+          - ufw limit 879
+          - ufw allow out 879
+          - ufw deny 879/tcp
+          - ufw reject in on eno1 to any port 879
+      ansible.builtin.assert:
+        that: >-
+          lines | forge_api_ufw_port_rules(879) == ['ufw allow 879/tcp', 'ufw allow 870:900/tcp', 'ufw allow 80,879/tcp',
+            'ufw allow from 172.20.0.0/24', 'ufw allow in on eno1 from 192.168.1.2 to any port 870:899 proto tcp', 'ufw limit 879']
+        fail_msg: "{{ lines | forge_api_ufw_port_rules(879) }}"
+        quiet: true
+
+    - name: The role's entry point runs every step in order (verify last, switched on and never in check mode)
+      vars:
+        main: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../tasks/main.yml') | from_yaml }}"
+      ansible.builtin.assert:
+        that:
+          - >-
+            main | map('dict2items') | map('selectattr', 'key', 'search', '^ansible[.]builtin[.](import|include)_tasks$')
+            | map('first') | map(attribute='value') | list
+            == ['preflight.yml', 'base.yml', 'install.yml', 'token.yml', 'config.yml', 'service.yml', 'verify.yml']
+          - main | select('contains', 'ansible.builtin.import_tasks') | list | length == 6
+          - (main | last).when == ['forge_api_enabled | bool', 'not ansible_check_mode']
+        fail_msg: "{{ main | to_json }}"
+        quiet: true
+
+    # ---- scratch sources and library ------------------------------------------------------------------------
+    - name: Scratch sources with never-deployed junk, and scratch libraries on the scratch dir's mount
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          s="{{ test_tmp }}/src"
+          mkdir -p "$s/forge-api" "$s/skill-library"
+          cp -r "{{ test_repo }}/apps/forge-api/." "$s/forge-api/"
+          # A nested package, so the install covers a subdirectory (guards, pruning). F has none today.
+          mkdir -p "$s/forge-api/forge_api/sub"
+          echo '"""nested"""' > "$s/forge-api/forge_api/sub/__init__.py"
+          cp -r "{{ test_repo }}/apps/skill-library/forge" "{{ test_repo }}/apps/skill-library/library" "$s/skill-library/"
+          for p in "$s/forge-api/forge_api" "$s/skill-library/forge" "$s/skill-library/library"; do
+            mkdir -p "$p/__pycache__" "$p/tests" "$p/test" "$p/node_modules/x"
+            echo junk > "$p/__pycache__/m.cpython-314.pyc"
+            echo junk > "$p/tests/test_m.py"
+            echo junk > "$p/test/test_n.py"
+            echo junk > "$p/node_modules/x/y.py"
+            echo junk > "$p/README.md"
+            echo junk > "$p/notes.txt"
+          done
+          mkdir -p "$s/forge-api/forge_api/sub/tests"
+          echo junk > "$s/forge-api/forge_api/sub/tests/test_s.py"
+          l="{{ test_tmp }}/lib"
+          lib="$l/ai-library"
+          mkdir -p "$lib"
+          cd "{{ test_repo }}/apps/skill-library"
+          python3 -B -m library --root "$lib" init >/dev/null
+          echo sentinel > "$lib/.ai-library-sentinel"
+          # Broken libraries for the switched-on refusals.
+          ln -s "$lib" "$l/link"
+          mkdir -p "$l/nosentinel/35-forge"
+          mkdir -p "$l/linksentinel/35-forge" && ln -s "$lib/.ai-library-sentinel" "$l/linksentinel/.ai-library-sentinel"
+          mkdir -p "$l/dirsentinel/35-forge" "$l/dirsentinel/.ai-library-sentinel"
+          mkdir -p "$l/noforge" && echo sentinel > "$l/noforge/.ai-library-sentinel"
+          mkdir -p "$l/linkforge" && echo sentinel > "$l/linkforge/.ai-library-sentinel" && ln -s "$lib/35-forge" "$l/linkforge/35-forge"
+          # Sentinel and 35-forge only: not an initialized library (F's check-config --require-library refuses it).
+          mkdir -p "$l/bare/35-forge" && echo sentinel > "$l/bare/.ai-library-sentinel"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Where the scratch library lives (its real mount; tests/run.sh checks it isn't /)
+      ansible.builtin.command:
+        argv: [findmnt, --noheadings, --first-only, --output, TARGET, --target, "{{ test_tmp }}"]
+      register: fa_test_mount
+      changed_when: false
+
+    - name: Point the role at the scratch dir, and the good values every refusal case starts from
+      ansible.builtin.set_fact:
+        forge_api_src_dir: "{{ test_tmp }}/src/forge-api"
+        forge_api_pkg_src: "{{ test_tmp }}/src/forge-api/forge_api"
+        forge_api_launcher_src: "{{ test_tmp }}/src/forge-api/forge-api"
+        forge_api_library_src_dir: "{{ test_tmp }}/src/skill-library"
+        forge_api_ai_stack_defaults_file: "{{ test_repo }}/roles/ai_stack/defaults/main.yml"
+        forge_api_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        forge_api_root_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        forge_api_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
+        forge_api_app_dir: "{{ test_tmp }}/opt/forge-api"
+        forge_api_config_dir: "{{ test_tmp }}/etc/forge-api"
+        forge_api_config_file: "{{ test_tmp }}/etc/forge-api/config.json"
+        forge_api_token_file: "{{ test_tmp }}/etc/forge-api/token"
+        forge_api_unit_dir: "{{ test_tmp }}/systemd"
+        forge_api_verify_delay: 0
+        forge_api_verify_retries: 1
+        forge_api_owui_check_src: "{{ playbook_dir }}/../files/owui_trust_check.py"
+        fa_test_approver: 11111111-2222-3333-4444-555555555555
+        test_lib: "{{ test_tmp }}/lib/ai-library"
+        test_mount: "{{ fa_test_mount.stdout | trim }}"
+        # The scratch dir is under /tmp (or /dev/shm in CI): allow /tmp and /dev here (the default forbids them).
+        test_ok_re: '^/(home|root|run|proc|sys|etc|usr|boot|bin|sbin|lib|lib64|opt|var)(/|$)'
+
+    - name: The good values the refusal cases start from
+      ansible.builtin.set_fact:
+        test_good:
+          approver: "{{ fa_test_approver }}"
+          library_root: /srv/ai-library
+          library_mount: /srv/ai-library
+          forbidden_re: "{{ forge_api_library_forbidden_re }}"
+          subnet: 172.20.0.0/24
+          webui: 172.20.0.4
+          bind: 172.20.0.1
+          ip_allow: [172.20.0.4/32]
+          ufw_rule: "allow from 172.20.0.4 to 172.20.0.1 port 879 proto tcp comment 'homelab: forge-api from open-webui'"
+          token_file: "{{ forge_api_token_file }}"
+          pkg_src: "{{ forge_api_pkg_src }}"
+          launcher_src: "{{ forge_api_launcher_src }}"
+          library_src_dir: "{{ forge_api_library_src_dir }}"
+
+    # ---- 1. preflight -----------------------------------------------------------------------------------
+    - name: Preflight passes switched off, with no approver and no library mounted anywhere
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+
+    - name: Switched off with no approver, F's loader is skipped (nothing to load)
+      ansible.builtin.assert:
+        that: forge_api_cfg_check is skipped
+        quiet: true
+
+    - name: Preflight passes switched off with an approver
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+      vars:
+        forge_api_approver_user_id: "{{ fa_test_approver }}"
+
+    - name: F's loader ran on the role's config
+      ansible.builtin.assert:
+        that: forge_api_cfg_check.rc == 0
+        quiet: true
+
+    - name: Preflight passes switched on, against the scratch library on its real mount
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+      vars:
+        forge_api_enabled: true
+        forge_api_approver_user_id: "{{ fa_test_approver }}"
+        forge_api_library_root: "{{ test_lib }}"
+        forge_api_library_mount: "{{ test_mount }}"
+        forge_api_library_forbidden_re: "{{ test_ok_re }}"
+
+    - name: Preflight refuses bad inputs
+      ansible.builtin.include_tasks: expect_preflight_refusal.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - name: a switch that isn't a boolean
+          vars: {forge_api_enabled: "yes"}
+          task: Preflight | the switch is a boolean
+        # The approver (§12.25: no default; required switched on).
+        - name: switched on without an approver
+          vars: {forge_api_enabled: true, approver: ""}
+          task: Preflight | the approver's Open WebUI user id (required when switched on)
+          msg: Set forge_api_approver_user_id
+        - name: switched on with a null approver
+          vars: {forge_api_enabled: true, approver: null}
+          task: Preflight | the approver's Open WebUI user id (required when switched on)
+          msg: Set forge_api_approver_user_id
+        - name: an approver with a space and a semicolon
+          vars: {approver: "noah; rm -rf"}
+          task: Preflight | the approver's Open WebUI user id (required when switched on)
+        - name: an approver of 65 characters
+          vars: {approver: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+          task: Preflight | the approver's Open WebUI user id (required when switched on)
+        - name: an approver with a line break
+          vars: {approver: "noah\nadmin"}
+          task: Preflight | the approver's Open WebUI user id (required when switched on)
+        # The library paths.
+        - name: a library under /home (ProtectHome hides it)
+          vars: {forge_api_library_root: /home/someone/library, forge_api_library_mount: /home/someone/library}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a library under /tmp (PrivateTmp hides it)
+          vars: {forge_api_library_root: /tmp/library, forge_api_library_mount: /tmp/library}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a relative library path
+          vars: {forge_api_library_root: srv/ai-library, forge_api_library_mount: srv/ai-library}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a library path with a trailing slash
+          vars: {forge_api_library_root: /srv/ai-library/, forge_api_library_mount: /srv/ai-library/}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a library path with a space
+          vars: {forge_api_library_root: /srv/ai library, forge_api_library_mount: /srv/ai library}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a library path with a dot-dot
+          vars: {forge_api_library_root: /srv/x/../etc, forge_api_library_mount: /srv/x/../etc}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: the library at /
+          vars: {forge_api_library_root: /, forge_api_library_mount: /}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a library root that is only a name prefix of its mount
+          vars: {forge_api_library_root: /srv/ai-library2, forge_api_library_mount: /srv/ai-library}
+          task: Preflight | the library root is the mount or below it
+        # The unit's settings.
+        # Reviewer S / Lead: a privileged port only (systemd binds it; nobody else can, even with the socket closed).
+        - name: the old unprivileged port 8790
+          vars: {forge_api_port: 8790}
+          task: Preflight | the unit's settings
+        - name: port 1024 (the first unprivileged one)
+          vars: {forge_api_port: 1024}
+          task: Preflight | the unit's settings
+        - name: port 0
+          vars: {forge_api_port: 0}
+          task: Preflight | the unit's settings
+        - name: port 70000
+          vars: {forge_api_port: 70000}
+          task: Preflight | the unit's settings
+        - name: a port with a suffix
+          vars: {forge_api_port: "879/tcp"}
+          task: Preflight | the unit's settings
+        - name: a host whose unprivileged ports start at 0 (anyone could bind 879)
+          vars: {}
+          unpriv: "0"
+          task: Preflight | the port is privileged on this host
+        - name: a host whose unprivileged ports start at 879
+          vars: {}
+          unpriv: "879"
+          task: Preflight | the port is privileged on this host
+        - name: a host where the sysctl can't be read
+          vars: {}
+          unpriv: fail
+          task: Preflight | the port is privileged on this host
+        - name: a MemoryMax without a unit
+          vars: {forge_api_memory_max: "256"}
+          task: Preflight | the unit's settings
+        - name: a TasksMax of infinity
+          vars: {forge_api_tasks_max: infinity}
+          task: Preflight | the unit's settings
+        - name: a LimitNOFILE with a space
+          vars: {forge_api_limit_nofile: "256 512"}
+          task: Preflight | the unit's settings
+        - name: the account root
+          vars: {forge_api_user: root}
+          task: Preflight | the unit's settings
+        - name: the account docker
+          vars: {forge_api_user: docker}
+          task: Preflight | the unit's settings
+        # The addresses and the IP filter.
+        - name: a bind outside the ai network
+          vars: {forge_api_bind: 192.168.77.10}
+          task: Preflight | the bind address, open-webui's address and the IP filter
+        - name: a bind of 0.0.0.0
+          vars: {forge_api_bind: 0.0.0.0}
+          task: Preflight | the bind address, open-webui's address and the IP filter
+        - name: a bind on loopback
+          vars: {forge_api_bind: 127.0.0.1}
+          task: Preflight | the bind address, open-webui's address and the IP filter
+        - name: a bind that is the ai network's address
+          vars: {forge_api_bind: 172.20.0.0}
+          task: Preflight | the bind address, open-webui's address and the IP filter
+        - name: a bind in short form
+          vars: {forge_api_bind: 172.20.1}
+          task: Preflight | the bind address, open-webui's address and the IP filter
+        - name: open-webui outside the ai network
+          vars: {ai_stack_webui_ip: 172.29.16.4}
+          task: Preflight | the bind address, open-webui's address and the IP filter
+        - name: open-webui on the bind address
+          vars: {ai_stack_webui_ip: 172.20.0.1}
+          task: Preflight | the bind address, open-webui's address and the IP filter
+        - name: no ai subnet
+          vars: {ai_stack_network_subnet: ""}
+          task: Preflight | the bind address, open-webui's address and the IP filter
+        - name: an IP allow widened to the ai /24
+          vars: {forge_api_ip_allow: [172.20.0.0/24]}
+          task: Preflight | the bind address, open-webui's address and the IP filter
+        - name: an IP allow of any
+          vars: {forge_api_ip_allow: [any]}
+          task: Preflight | the bind address, open-webui's address and the IP filter
+        - name: an IP allow that adds the host (the gateway)
+          vars: {forge_api_ip_allow: [172.20.0.4/32, 172.20.0.1/32]}
+          task: Preflight | the bind address, open-webui's address and the IP filter
+        - name: an IP allow of loopback only
+          vars: {forge_api_ip_allow: [127.0.0.1/32]}
+          task: Preflight | the bind address, open-webui's address and the IP filter
+        - name: an empty IP allow
+          vars: {forge_api_ip_allow: []}
+          task: Preflight | the bind address, open-webui's address and the IP filter
+        - name: an IP deny that isn't any
+          vars: {forge_api_ip_deny: [10.0.0.0/8]}
+          task: Preflight | the bind address, open-webui's address and the IP filter
+        # The UFW rule (declared through role firewall; the verify requires it).
+        - name: a UFW rule from any
+          vars: {forge_api_ufw_rule: "allow to 172.20.0.1 port 879 proto tcp comment 'homelab: forge-api from open-webui'"}
+          task: Preflight | the UFW rule the API needs
+        - name: a UFW rule from the whole ai network
+          vars: {forge_api_ufw_rule: "allow from 172.20.0.0/24 to 172.20.0.1 port 879 proto tcp comment 'homelab: forge-api'"}
+          task: Preflight | the UFW rule the API needs
+        - name: a UFW rule to any
+          vars: {forge_api_ufw_rule: "allow from 172.20.0.4 to any port 879 proto tcp comment 'homelab: forge-api'"}
+          task: Preflight | the UFW rule the API needs
+        - name: a UFW rule for another port
+          vars: {forge_api_ufw_rule: "allow from 172.20.0.4 to 172.20.0.1 port 880 proto tcp comment 'homelab: forge-api'"}
+          task: Preflight | the UFW rule the API needs
+        - name: a UFW rule for udp
+          vars: {forge_api_ufw_rule: "allow from 172.20.0.4 to 172.20.0.1 port 879 proto udp comment 'homelab: forge-api'"}
+          task: Preflight | the UFW rule the API needs
+        - name: a UFW rule without a comment
+          vars: {forge_api_ufw_rule: "allow from 172.20.0.4 to 172.20.0.1 port 879 proto tcp"}
+          task: Preflight | the UFW rule the API needs
+        # Sources and F's loader.
+        - name: F's package missing on the controller
+          vars: {forge_api_pkg_src: "{{ test_tmp }}/src/nothing-here"}
+          task: Preflight | require the app sources
+        - name: the launcher missing on the controller
+          vars: {forge_api_launcher_src: "{{ test_tmp }}/src/nope"}
+          task: Preflight | require the app sources
+        - name: the library sources missing on the controller
+          vars: {forge_api_library_src_dir: "{{ test_tmp }}/src/nope"}
+          task: Preflight | require the app sources
+        - name: a relative token path (F's loader)
+          vars: {forge_api_token_file: etc/forge-api/token}
+          task: Preflight | F's loader accepts the config
+        # Switched on: the library must really be mounted.
+        - name: the library root missing
+          vars: {forge_api_enabled: true, forge_api_library_root: "{{ test_tmp }}/lib/missing", forge_api_library_mount: "{{ test_mount }}",
+                 forge_api_library_forbidden_re: "{{ test_ok_re }}"}
+          task: Preflight | the library root is a real directory
+        - name: the library root a symlink
+          vars: {forge_api_enabled: true, forge_api_library_root: "{{ test_tmp }}/lib/link", forge_api_library_mount: "{{ test_mount }}",
+                 forge_api_library_forbidden_re: "{{ test_ok_re }}"}
+          task: Preflight | the library root is a real directory
+        - name: the library root an empty mount point (not on the declared mount)
+          vars: {forge_api_enabled: true, forge_api_library_root: "{{ test_lib }}", forge_api_library_mount: "{{ test_lib }}",
+                 forge_api_library_forbidden_re: "{{ test_ok_re }}"}
+          task: Preflight | the library root is on the declared mount (not the disk under an empty mount point)
+        - name: no sentinel
+          vars: {forge_api_enabled: true, forge_api_library_root: "{{ test_tmp }}/lib/nosentinel", forge_api_library_mount: "{{ test_mount }}",
+                 forge_api_library_forbidden_re: "{{ test_ok_re }}"}
+          task: Preflight | the sentinel is a regular file and 35-forge a real folder (an initialized library)
+        - name: the sentinel a symlink
+          vars: {forge_api_enabled: true, forge_api_library_root: "{{ test_tmp }}/lib/linksentinel", forge_api_library_mount: "{{ test_mount }}",
+                 forge_api_library_forbidden_re: "{{ test_ok_re }}"}
+          task: Preflight | the sentinel is a regular file and 35-forge a real folder (an initialized library)
+        - name: the sentinel a directory
+          vars: {forge_api_enabled: true, forge_api_library_root: "{{ test_tmp }}/lib/dirsentinel", forge_api_library_mount: "{{ test_mount }}",
+                 forge_api_library_forbidden_re: "{{ test_ok_re }}"}
+          task: Preflight | the sentinel is a regular file and 35-forge a real folder (an initialized library)
+        - name: no 35-forge
+          vars: {forge_api_enabled: true, forge_api_library_root: "{{ test_tmp }}/lib/noforge", forge_api_library_mount: "{{ test_mount }}",
+                 forge_api_library_forbidden_re: "{{ test_ok_re }}"}
+          task: Preflight | the sentinel is a regular file and 35-forge a real folder (an initialized library)
+        - name: 35-forge a symlink (systemd would follow it in ReadWritePaths)
+          vars: {forge_api_enabled: true, forge_api_library_root: "{{ test_tmp }}/lib/linkforge", forge_api_library_mount: "{{ test_mount }}",
+                 forge_api_library_forbidden_re: "{{ test_ok_re }}"}
+          task: Preflight | the sentinel is a regular file and 35-forge a real folder (an initialized library)
+
+    # ---- 2. install -------------------------------------------------------------------------------------
+    - name: Install, first run
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Plant strays in the install (top level, inside packages, a cache dir, F's example config and tests)
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          a="{{ forge_api_app_dir }}"
+          echo stray > "$a/stray.py"
+          echo stray > "$a/config.example.json"
+          mkdir -p "$a/tests" && echo stray > "$a/tests/test_auth.py"
+          mkdir -p "$a/old_pkg" "$a/library/__pycache__" "$a/forge_api/sub/tests"
+          echo stray > "$a/old_pkg/__init__.py"
+          echo stray > "$a/library/__pycache__/core.cpython-314.pyc"
+          echo stray > "$a/forge/removed.py"
+          echo stray > "$a/forge_api/removed.py"
+          echo stray > "$a/forge_api/sub/tests/t.py"
+          echo stray > "$a/.hidden"
+          ln -s /etc/passwd "$a/forge_api/link.py"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Install, second run (prunes the strays)
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Apply the restart requests so far
+      ansible.builtin.meta: flush_handlers
+
+    - name: Count the restart requests after the second run
+      ansible.builtin.set_fact:
+        fa_test_restarts_before: "{{ fa_test_restarts }}"
+
+    - name: List the installed tree with inodes and mtimes
+      ansible.builtin.command:
+        argv: [find, "{{ forge_api_app_dir }}", -mindepth, "1", -printf, "%P|%i|%T@\n"]
+      register: fa_test_tree_before
+      changed_when: false
+
+    - name: Install, third run (no change)
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Apply any restart request from the third run
+      ansible.builtin.meta: flush_handlers
+
+    - name: List the installed tree
+      ansible.builtin.command:
+        argv: [find, "{{ forge_api_app_dir }}", -mindepth, "1", -printf, "%P|%m|%y\n"]
+      register: fa_test_tree
+      changed_when: false
+
+    - name: List the installed tree with inodes and mtimes again
+      ansible.builtin.command:
+        argv: [find, "{{ forge_api_app_dir }}", -mindepth, "1", -printf, "%P|%i|%T@\n"]
+      register: fa_test_tree_after
+      changed_when: false
+
+    - name: List what should be there (every *.py of the three packages, minus the never-deployed dirs)
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          s="{{ test_tmp }}/src"
+          echo "forge-api|755|f"
+          { cd "$s/forge-api" && find forge_api | sed 's|^|F:|'; cd "$s/skill-library" && find forge library | sed 's|^|L:|'; } \
+            | grep -Ev '(^|/)(__pycache__|tests?|node_modules)(/|$)' \
+            | while read -r e; do
+                case "$e" in F:*) base="$s/forge-api" ;; *) base="$s/skill-library" ;; esac
+                p="${e#?:}"
+                if [ -d "$base/$p" ]; then echo "$p|755|d"
+                else case "$p" in *.py) echo "$p|644|f" ;; esac; fi
+              done
+        executable: /bin/bash
+      register: fa_test_want
+      changed_when: false
+
+    - name: The install holds exactly the three packages' code plus the launcher, and run 3 touched nothing
+      ansible.builtin.assert:
+        that:
+          - fa_test_tree.stdout_lines | sort == fa_test_want.stdout_lines | sort
+          - fa_test_tree.stdout_lines | select('search', '(^|/)(__pycache__|tests?|node_modules|old_pkg)(/|$)|stray|removed|hidden|link') | list == []
+          - "'forge_api/sub/__init__.py|644|f' in fa_test_tree.stdout_lines"
+          - "'forge_api/config.py|644|f' in fa_test_tree.stdout_lines and 'forge/core.py|644|f' in fa_test_tree.stdout_lines"
+          - "'library/core.py|644|f' in fa_test_tree.stdout_lines"
+          - "'forge-api|755|f' in fa_test_tree.stdout_lines"
+          - fa_test_tree.stdout_lines | select('search', '^(config[.]example[.]json|README[.]md|tests)') | list == []
+          - fa_test_tree_before.stdout_lines | sort == fa_test_tree_after.stdout_lines | sort
+          - fa_test_restarts_before | int >= 1
+          - fa_test_restarts | int == fa_test_restarts_before | int
+        fail_msg: >-
+          extra {{ fa_test_tree.stdout_lines | difference(fa_test_want.stdout_lines) }},
+          missing {{ fa_test_want.stdout_lines | difference(fa_test_tree.stdout_lines) }},
+          run 3 changed {{ fa_test_tree_after.stdout_lines | difference(fa_test_tree_before.stdout_lines) }},
+          restarts {{ fa_test_restarts_before }} -> {{ fa_test_restarts }}
+        quiet: true
+
+    - name: The installed launcher imports the installed copies only (forge and library found beside it)
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -I
+          - -B
+          - -c
+          - |
+            import os, runpy, sys
+            app = sys.argv[1]
+            sys.argv = [os.path.join(app, "forge-api"), "--help"]
+            try:
+                runpy.run_path(sys.argv[0], run_name="__main__")
+            except SystemExit:
+                pass
+            for name in ("forge_api", "forge", "library"):
+                path = os.path.realpath(sys.modules[name].__file__)
+                assert path.startswith(os.path.realpath(app) + os.sep), (name, path)
+            assert not any(p.endswith("skill-library") for p in sys.path), sys.path
+          - "{{ forge_api_app_dir }}"
+      changed_when: false
+
+    - name: Install refuses symlinked directories
+      ansible.builtin.include_tasks: expect_guard_refusal.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - {name: app-dir, root: "{{ test_tmp }}/g1/forge-api", link: "{{ test_tmp }}/g1/forge-api"}
+        - {name: api-package, root: "{{ test_tmp }}/g2/forge-api", link: "{{ test_tmp }}/g2/forge-api/forge_api"}
+        - {name: forge-package, root: "{{ test_tmp }}/g3/forge-api", link: "{{ test_tmp }}/g3/forge-api/forge"}
+        - {name: api-subpackage, root: "{{ test_tmp }}/g4/forge-api", link: "{{ test_tmp }}/g4/forge-api/forge_api/sub"}
+
+    # ---- 3. the token -------------------------------------------------------------------------------------
+    - name: Token, first run (generates it)
+      ansible.builtin.include_tasks: ../tasks/token.yml
+
+    - name: Apply the restart requests from the first token run
+      ansible.builtin.meta: flush_handlers
+
+    - name: Stat the token (checksum only in the test, no content)
+      ansible.builtin.stat:
+        path: "{{ forge_api_token_file }}"
+        follow: false
+        get_checksum: true
+      register: fa_test_tok1
+      no_log: true
+
+    - name: The token's shape, without printing it (one line, 43 URL-safe characters)
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -I
+          - -c
+          - |
+            import re, sys
+            data = open(sys.argv[1], "rb").read()
+            ok = re.fullmatch(rb"[A-Za-z0-9_-]{43}\n", data) is not None
+            print("shape ok" if ok else "shape BAD (%d bytes)" % len(data))
+            sys.exit(0 if ok else 1)
+          - "{{ forge_api_token_file }}"
+      changed_when: false
+
+    - name: Count the restart requests after the first token run
+      ansible.builtin.set_fact:
+        fa_test_restarts_tok1: "{{ fa_test_restarts }}"
+
+    - name: Token, second run (never rotated)
+      ansible.builtin.include_tasks: ../tasks/token.yml
+
+    - name: Apply any restart request from the second token run
+      ansible.builtin.meta: flush_handlers
+
+    - name: Stat the token again
+      ansible.builtin.stat:
+        path: "{{ forge_api_token_file }}"
+        follow: false
+        get_checksum: true
+      register: fa_test_tok2
+      no_log: true
+
+    - name: Stat the config directory
+      ansible.builtin.stat:
+        path: "{{ forge_api_config_dir }}"
+      register: fa_test_cfgdir
+
+    - name: The token is a regular 0640 file in a 0750 dir, unchanged by the second run (same inode, time, content)
+      ansible.builtin.assert:
+        that:
+          - fa_test_tok1.stat.isreg and not fa_test_tok1.stat.islnk
+          - fa_test_tok1.stat.mode == '0640' and fa_test_tok1.stat.size == 44
+          - fa_test_tok1.stat.pw_name == forge_api_root_owner and fa_test_tok1.stat.gr_name == forge_api_group
+          - fa_test_tok2.stat.inode == fa_test_tok1.stat.inode
+          - fa_test_tok2.stat.mtime == fa_test_tok1.stat.mtime
+          - fa_test_tok2.stat.checksum == fa_test_tok1.stat.checksum
+          - fa_test_cfgdir.stat.mode == '0750'
+          - fa_test_restarts_tok1 | int == fa_test_restarts_before | int + 1
+          - fa_test_restarts | int == fa_test_restarts_tok1 | int
+        fail_msg: >-
+          mode {{ fa_test_tok1.stat.mode }} size {{ fa_test_tok1.stat.size }};
+          restarts {{ fa_test_restarts_before }}/{{ fa_test_restarts_tok1 }}/{{ fa_test_restarts }}
+        quiet: true
+
+    - name: A token that already exists (made by hand, wrong mode) and dirs for the symlink cases
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          umask 022
+          for d in keep link dangling; do mkdir -p "{{ test_tmp }}/tok-$d"; done
+          python3 -I -c 'import secrets, sys; open(sys.argv[1], "w").write(secrets.token_hex(24) + "\n")' "{{ test_tmp }}/tok-keep/token"
+          chmod 0644 "{{ test_tmp }}/tok-keep/token"
+          echo keep > "{{ test_tmp }}/tok-link/victim"
+          chmod 0644 "{{ test_tmp }}/tok-link/victim"
+          ln -s victim "{{ test_tmp }}/tok-link/token"
+          ln -s target "{{ test_tmp }}/tok-dangling/token"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Stat the pre-existing token
+      ansible.builtin.stat:
+        path: "{{ test_tmp }}/tok-keep/token"
+        get_checksum: true
+      register: fa_test_keep1
+      no_log: true
+
+    - name: Token run against the pre-existing token
+      ansible.builtin.include_tasks: ../tasks/token.yml
+      vars:
+        forge_api_config_dir: "{{ test_tmp }}/tok-keep"
+        forge_api_token_file: "{{ test_tmp }}/tok-keep/token"
+
+    - name: Stat the pre-existing token again
+      ansible.builtin.stat:
+        path: "{{ test_tmp }}/tok-keep/token"
+        get_checksum: true
+      register: fa_test_keep2
+      no_log: true
+
+    - name: The pre-existing token is kept (same inode and content); only its mode is set to 0640
+      ansible.builtin.assert:
+        that:
+          - fa_test_keep1.stat.mode == '0644'
+          - fa_test_keep2.stat.mode == '0640'
+          - fa_test_keep2.stat.inode == fa_test_keep1.stat.inode
+          - fa_test_keep2.stat.checksum == fa_test_keep1.stat.checksum
+        quiet: true
+
+    - name: Token refuses a symlink or a dangling symlink at its path
+      ansible.builtin.include_tasks: expect_token_refusal.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - {name: link, refused_by: "Token | a regular file, never a symlink"}
+        # `creates` sees a dangling link too (the generator is skipped); O_EXCL|O_NOFOLLOW would refuse it anyway.
+        - {name: dangling, refused_by: "Token | a regular file, never a symlink"}
+
+    # ---- 4. config --------------------------------------------------------------------------------------
+    - name: Config, switched off without an approver (not rendered)
+      ansible.builtin.include_tasks: ../tasks/config.yml
+      vars:
+        forge_api_config_file: "{{ test_tmp }}/etc/forge-api/not-rendered.json"
+
+    - name: Nothing was rendered without an approver
+      ansible.builtin.stat:
+        path: "{{ test_tmp }}/etc/forge-api/not-rendered.json"
+      register: fa_test_not_rendered
+
+    - name: Config, first run (with the approver)
+      ansible.builtin.include_tasks: ../tasks/config.yml
+      vars:
+        forge_api_approver_user_id: "{{ fa_test_approver }}"
+
+    - name: Apply the restart request from the first config run
+      ansible.builtin.meta: flush_handlers
+
+    - name: Stat config.json
+      ansible.builtin.stat:
+        path: "{{ forge_api_config_file }}"
+      register: fa_test_cfg1
+
+    - name: Count the restart requests after the first config run
+      ansible.builtin.set_fact:
+        fa_test_restarts_cfg1: "{{ fa_test_restarts }}"
+        fa_test_cfg_file: "{{ forge_api_config_file }}"
+
+    - name: Config, second run (no change)
+      ansible.builtin.include_tasks: ../tasks/config.yml
+      vars:
+        forge_api_approver_user_id: "{{ fa_test_approver }}"
+
+    - name: Apply any restart request from the second config run
+      ansible.builtin.meta: flush_handlers
+
+    - name: Stat config.json again
+      ansible.builtin.stat:
+        path: "{{ forge_api_config_file }}"
+      register: fa_test_cfg2
+
+    - name: Config.json holds exactly F's keys with the role's values, 0640, unchanged by run 2
+      vars:
+        c: "{{ lookup('ansible.builtin.file', forge_api_config_file) | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - not fa_test_not_rendered.stat.exists
+          - c.keys() | sort == ['allowed_peers', 'approver_user_id', 'bind', 'library_root', 'port', 'token_file']
+          - c.library_root == '/srv/ai-library'
+          - c.bind == '172.20.0.1'
+          - c.port == 879 and c.port is integer
+          - c.allowed_peers == ['172.20.0.4']
+          - c.token_file == forge_api_token_file
+          - c.approver_user_id == '11111111-2222-3333-4444-555555555555'
+          - fa_test_cfg1.stat.mode == '0640'
+          - fa_test_cfg2.stat.inode == fa_test_cfg1.stat.inode and fa_test_cfg2.stat.mtime == fa_test_cfg1.stat.mtime
+          - fa_test_restarts_cfg1 | int == fa_test_restarts_tok1 | int + 1
+          - fa_test_restarts | int == fa_test_restarts_cfg1 | int
+        fail_msg: "{{ c | to_json }}"
+        quiet: true
+
+    - name: Token files for the validator (copies of the real one with bad modes, a short one, a symlink)
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          d="{{ test_tmp }}/badtok"
+          mkdir -p "$d"
+          cp "{{ forge_api_token_file }}" "$d/token-world" && chmod 0644 "$d/token-world"
+          cp "{{ forge_api_token_file }}" "$d/token-gw" && chmod 0660 "$d/token-gw"
+          python3 -I -c 'import secrets, sys; open(sys.argv[1], "w").write(secrets.token_urlsafe(16) + "\n")' "$d/token-short"
+          chmod 0640 "$d/token-short"
+          ln -s "{{ forge_api_token_file }}" "$d/token-link"
+          : > "$d/token-empty" && chmod 0640 "$d/token-empty"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Bad configs for the deploy-time validator (F's check-config)
+      ansible.builtin.copy:
+        content: >-
+          {{ (lookup('ansible.builtin.file', forge_api_config_file) | from_json | dict2items
+              | rejectattr('key', 'equalto', item.drop | default('')) | items2dict)
+             | combine(item.patch | default({})) | to_json }}
+        dest: "{{ test_tmp }}/bad-{{ item.name }}.json"
+        mode: "0644"
+      loop:
+        - {name: extra-key, patch: {debug: true}}
+        - {name: no-approver, drop: approver_user_id}
+        - {name: no-port, drop: port}
+        - {name: approver-bad, patch: {approver_user_id: "noah admin"}}
+        - {name: bind-any, patch: {bind: 0.0.0.0}}
+        - {name: peer-loopback, patch: {allowed_peers: [127.0.0.1]}}
+        - {name: peer-is-bind, patch: {allowed_peers: [172.20.0.1]}}
+        - {name: peer-cidr, patch: {allowed_peers: [172.20.0.0/24]}}
+        - {name: port-string, patch: {port: "879"}}
+        - {name: relative-root, patch: {library_root: srv/ai-library}}
+        - {name: token-missing, patch: {token_file: "{{ test_tmp }}/badtok/nope"}}
+        - {name: token-world, patch: {token_file: "{{ test_tmp }}/badtok/token-world"}}
+        - {name: token-gw, patch: {token_file: "{{ test_tmp }}/badtok/token-gw"}}
+        - {name: token-short, patch: {token_file: "{{ test_tmp }}/badtok/token-short"}}
+        - {name: token-link, patch: {token_file: "{{ test_tmp }}/badtok/token-link"}}
+        - {name: token-empty, patch: {token_file: "{{ test_tmp }}/badtok/token-empty"}}
+        - {name: lib-bare, patch: {library_root: "{{ test_tmp }}/lib/bare"}}
+        - {name: lib-good, patch: {library_root: "{{ test_lib }}"}}
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: The validator (switched off) refuses each bad config
+      ansible.builtin.command:
+        cmd: "{{ forge_api_config_validate | replace('%s', test_tmp ~ '/bad-' ~ item ~ '.json') }}"
+      loop: [extra-key, no-approver, no-port, approver-bad, bind-any, peer-loopback, peer-is-bind, peer-cidr, port-string, relative-root,
+             token-missing, token-world, token-gw, token-short, token-link, token-empty]
+      register: fa_test_bad
+      changed_when: false
+      failed_when: fa_test_bad.rc == 0
+
+    # Reviewer S (S-7): compared with the real token files (a long scratch path is not a token), and the comparison
+    # prints only a count, so the token never enters the play's output.
+    - name: The validator never prints a token, even when it refuses one
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -I
+          - -c
+          - |
+            import glob, json, sys
+            outs = json.loads(sys.argv[2])
+            toks = {open(f).read().strip() for f in [sys.argv[1]] + glob.glob(sys.argv[3])}
+            toks = {t for t in toks if t}
+            leaks = sum(1 for o in outs for t in toks if t in o)
+            print(f"{len(outs)} outputs, {len(toks)} tokens, {leaks} leaks")
+            sys.exit(1 if leaks or len(toks) < 2 or len(outs) < 16 else 0)
+          - "{{ forge_api_token_file }}"
+          - "{{ ((fa_test_bad.results | map(attribute='stderr') | list) + (fa_test_bad.results | map(attribute='stdout') | list)) | to_json }}"
+          - "{{ test_tmp }}/badtok/token-*"
+      changed_when: false
+
+    - name: The validator (switched off) accepts the rendered config, and one on an uninitialized library
+      ansible.builtin.command:
+        cmd: "{{ forge_api_config_validate | replace('%s', item) }}"
+      loop: ["{{ forge_api_config_file }}", "{{ test_tmp }}/bad-lib-bare.json"]
+      changed_when: false
+
+    - name: Switched on, the validator requires the library (--require-library)
+      vars:
+        forge_api_enabled: true
+      ansible.builtin.command:
+        cmd: "{{ forge_api_config_validate | replace('%s', test_tmp ~ '/bad-' ~ item.name ~ '.json') }}"
+      loop:
+        - {name: lib-good, rc: 0}
+        - {name: lib-bare, rc: 2}
+      loop_control:
+        label: "{{ item.name }}"
+      register: fa_test_onval
+      changed_when: false
+      failed_when: fa_test_onval.rc != item.rc or fa_test_onval.cmd is not search('--require-library')
+
+    # ---- 5. the unit -------------------------------------------------------------------------------------
+    - name: Unit, the default network
+      ansible.builtin.include_tasks: units_case.yml
+      vars:
+        forge_api_app_dir: /opt/forge-api
+        forge_api_config_dir: /etc/forge-api
+        forge_api_config_file: /etc/forge-api/config.json
+        forge_api_library_root: /srv/ai-library
+        fa_case: default
+        fa_expect_listen: 172.20.0.1:879
+        fa_expect_ip_allow: 172.20.0.4/32
+
+    - name: Unit, another network and port (the filter and the bind allow follow the inventory)
+      ansible.builtin.include_tasks: units_case.yml
+      vars:
+        forge_api_app_dir: /opt/forge-api
+        forge_api_config_dir: /etc/forge-api
+        forge_api_config_file: /etc/forge-api/config.json
+        forge_api_library_root: /srv/ai-library
+        ai_stack_network_subnet: 172.21.0.0/24
+        ai_stack_webui_ip: 172.21.0.9
+        forge_api_port: 880
+        fa_case: other
+        fa_expect_listen: 172.21.0.1:880
+        fa_expect_ip_allow: 172.21.0.9/32
+
+    - name: The scratch unit directory (exists on a host)
+      ansible.builtin.file:
+        path: "{{ forge_api_unit_dir }}"
+        state: directory
+        mode: "0755"
+
+    # ---- 5b. the switch (service.yml through the fake systemctl, which emulates the unit files' states) --------
+    - name: Service.yml switched on, then again, then off, then again
+      ansible.builtin.include_tasks: switch_case.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        # The socket is what is enabled; the service is only started (Requires= pulls the socket in too).
+        - {name: "on, first run", enabled: true, log: [enable forge-api.socket, start forge-api.socket, start forge-api.service],
+           active: {forge-api.socket: active, forge-api.service: active}, reloads: 1, socket_restarts: 1, restarts: 1}
+        - {name: "on, second run", enabled: true, log: [], active: {forge-api.socket: active, forge-api.service: active},
+           reloads: 0, socket_restarts: 0, restarts: 0}
+        # Off: the socket disabled and stopped first (stopping it stops the service too: Requires=).
+        - {name: "off, first run", enabled: false, log: [disable forge-api.socket, stop forge-api.socket],
+           active: {forge-api.socket: inactive, forge-api.service: inactive}, reloads: 0, socket_restarts: 0, restarts: 0}
+        - {name: "off, second run", enabled: false, log: [], active: {forge-api.socket: inactive, forge-api.service: inactive},
+           reloads: 0, socket_restarts: 0, restarts: 0}
+
+    # ---- 6. verify ---------------------------------------------------------------------------------------
+    # The scratch config with the scratch library (check-config --require-library must open it).
+    - name: Verify configs (the scratch library; and an uninitialized one)
+      ansible.builtin.copy:
+        content: >-
+          {{ lookup('ansible.builtin.file', forge_api_config_file) | from_json | combine({'library_root': item.lib}) | to_json }}
+        dest: "{{ test_tmp }}/{{ item.name }}-config.json"
+        mode: "0640"
+      loop:
+        - {name: verify, lib: "{{ test_lib }}"}
+        - {name: bare, lib: "{{ test_tmp }}/lib/bare"}
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Verify against the scratch library
+      ansible.builtin.set_fact:
+        fa_test_cfg_file: "{{ test_tmp }}/verify-config.json"
+
+    # Q-1: scratch Open WebUI databases with 0.12.4's layout (user: id, role, settings; config: key, value).
+    - name: Scratch Open WebUI databases (one directory each, as the data volume)
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -I
+          - -B
+          - -c
+          - |
+            import json, os, sqlite3, sys
+            root, noah = sys.argv[1], sys.argv[2]
+            perms = {"workspace": {"models": False, "knowledge": False, "prompts": False, "tools": False,
+                                   "skills": False, "tools_import": False, "tools_export": False},
+                     "chat": {"controls": True}}
+            def make(name, users, rows, garbage=False, groups=(), tools=None, grants=()):
+                d = os.path.join(root, name)
+                os.makedirs(d)
+                path = os.path.join(d, "webui.db")
+                if garbage:
+                    open(path, "w").write("not a database")
+                    return
+                c = sqlite3.connect(path)
+                c.execute("CREATE TABLE user (id TEXT, name TEXT, email TEXT, role TEXT, settings JSON)")
+                c.execute("CREATE TABLE config (key TEXT PRIMARY KEY, value JSON, updated_at INTEGER)")
+                c.execute('CREATE TABLE "group" (id TEXT, user_id TEXT, name TEXT, permissions JSON, parent_group_id TEXT)')
+                c.execute("CREATE TABLE group_member (id TEXT, group_id TEXT, user_id TEXT)")
+                c.execute("CREATE TABLE tool (id TEXT, user_id TEXT, name TEXT, content TEXT)")
+                c.execute("CREATE TABLE access_grant (id TEXT, resource_type TEXT, resource_id TEXT, principal_type TEXT, "
+                          "principal_id TEXT, permission TEXT, created_at INTEGER)")
+                c.executemany("INSERT INTO user VALUES (?, 'n', 'e', ?, ?)",
+                              [(u, r, json.dumps(st) if st is not None else None) for u, r, st in users])
+                c.executemany("INSERT INTO config VALUES (?, ?, 0)", [(k, json.dumps(v)) for k, v in rows.items()])
+                c.executemany('INSERT INTO "group" VALUES (?, ?, ?, ?, NULL)', [(g, noah, n, json.dumps(p)) for g, n, p in groups])
+                # The approver's own tool (the research tool) unless the case says otherwise.
+                c.executemany("INSERT INTO tool VALUES (?, ?, 'x', 'code')", [("web_research", noah)] if tools is None else tools)
+                c.executemany("INSERT INTO access_grant VALUES (?, ?, ?, ?, ?, ?, 0)", [(str(i), *g) for i, g in enumerate(grants)])
+                c.commit()
+                c.close()
+            ok_users = [(noah, "admin", {"ui": {"version": "0.12.4"}}), ("u2", "user", None), ("u3", "pending", {})]
+            ok_rows = {"user.permissions": perms, "ui.default_interface_settings": {}}
+            def with_ws(**kw):
+                p = json.loads(json.dumps(perms))
+                p["workspace"].update(kw)
+                return {"user.permissions": p, "ui.default_interface_settings": {}}
+            make("good", ok_users, ok_rows)
+            make("norows", ok_users, {})
+            make("twoadmins", ok_users + [("eve", "admin", None)], ok_rows)
+            make("notadmin", [(noah, "user", None), ("eve", "admin", None)], ok_rows)
+            make("noadmin", [(noah, "user", None)], ok_rows)
+            make("tools", ok_users, with_ws(tools=True))
+            make("toolsimport", ok_users, with_ws(tools_import=True))
+            make("functions", ok_users, with_ws(functions=True))
+            make("iframedefault", ok_users, {"user.permissions": perms,
+                                             "ui.default_interface_settings": {"iframeSandboxAllowSameOrigin": True}})
+            make("iframeuser", ok_users + [("u4", "user", {"ui": {"iframeSandboxAllowSameOrigin": True}})], ok_rows)
+            # Reviewer S (S-2): groups, write grants and tool owners.
+            readers = ("g1", "readers", {"workspace": {"knowledge": True}})
+            make("grouptools", ok_users, ok_rows, groups=[readers, ("g2", "builders", {"workspace": {"tools": True}})])
+            make("defaultgroup", ok_users, dict(ok_rows, **{"ui.default_group_id": "g3"}),
+                 groups=[readers, ("g3", "everyone", {"workspace": {"tools_import": "false"}})])
+            make("grantuser", ok_users, ok_rows, grants=[("tool", "web_research", "user", "u2", "write")])
+            make("grantgroup", ok_users, ok_rows, groups=[readers], grants=[("tool", "web_research", "group", "g1", "write")])
+            make("grantall", ok_users, ok_rows, grants=[("tool", "web_research", "user", "*", "write")])
+            make("grantread", ok_users, ok_rows, groups=[readers],
+                 grants=[("tool", "web_research", "group", "g1", "read"), ("knowledge", "k1", "user", "*", "write")])
+            make("foreigntool", ok_users, ok_rows, tools=[("web_research", noah), ("mine", "u2")])
+            # S-3: Open WebUI's truthiness ("false" is a non-empty string: on for Python's bool() and for JS).
+            make("strfalse", ok_users, with_ws(tools="false"))
+            make("iframestr", ok_users + [("u5", "user", {"ui": {"iframeSandboxAllowSameOrigin": "false"}})], ok_rows)
+            make("iframezero", ok_users + [("u5", "user", {"ui": {"iframeSandboxAllowSameOrigin": 0}})],
+                 {"user.permissions": with_ws(tools=0)["user.permissions"], "ui.default_interface_settings": {"iframeSandboxAllowSameOrigin": ""}})
+            make("garbage", [], {}, garbage=True)
+            # S-4: a symlink to a good database, and a FIFO, where webui.db should be.
+            os.makedirs(os.path.join(root, "symlink"))
+            os.symlink(os.path.join(root, "good", "webui.db"), os.path.join(root, "symlink", "webui.db"))
+            os.makedirs(os.path.join(root, "fifo"))
+            os.mkfifo(os.path.join(root, "fifo", "webui.db"))
+            os.makedirs(os.path.join(root, "missing"))
+          - "{{ test_tmp }}/owui"
+          - "{{ fa_test_approver }}"
+        creates: "{{ test_tmp }}/owui"
+
+    - name: Stat the good database (the checker must not change it)
+      ansible.builtin.stat:
+        path: "{{ test_tmp }}/owui/good/webui.db"
+        get_checksum: true
+      register: fa_test_owui_before
+
+    - name: Verify cases
+      ansible.builtin.include_tasks: verify_case.yml
+      vars:
+        forge_api_library_root: "{{ test_lib }}"
+        forge_api_approver_user_id: "{{ fa_test_approver }}"
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - name: everything as it should be (the host call times out)
+          refused_by: ""
+        - name: the host call refused (no answer either way)
+          knobs: {host_curl: refused}
+          refused_by: ""
+        # Reviewer S (S-6): an empty reply or a reset means the connection was accepted: the filter isn't in force.
+        - name: the host's call accepted, then an empty reply (curl rc 52)
+          knobs: {host_curl: empty}
+          refused_by: Verify | the host gets no answer (the IP filter)
+        - name: the host's call accepted, then reset (curl rc 56)
+          knobs: {host_curl: reset}
+          refused_by: Verify | the host gets no answer (the IP filter)
+        - name: the socket listening with no service running yet (healthy)
+          knobs: {socket: listening}
+          refused_by: ""
+        - name: the socket in a SubState other than listening or running
+          knobs: {socket: failedsub}
+          refused_by: Verify | the socket is enabled and listening on the bind address only
+        - name: the socket not enabled
+          knobs: {socket: disabled}
+          refused_by: Verify | the socket is enabled and listening on the bind address only
+        - name: the socket stopped
+          knobs: {socket: stopped}
+          refused_by: Verify | the socket is enabled and listening on the bind address only
+        - name: the socket listening on every address
+          knobs: {socket: wronglisten}
+          refused_by: Verify | the socket is enabled and listening on the bind address only
+        - name: the service failed
+          knobs: {active: failed}
+          refused_by: Verify | forge-api is active
+        - name: the service restarting
+          knobs: {active: restarting}
+          refused_by: Verify | still active, no restart in between
+        - name: the service's process replaced in between
+          knobs: {active: pidchange}
+          refused_by: Verify | still active, no restart in between
+        - name: check-config refuses (an uninitialized library)
+          config: "{{ test_tmp }}/bare-config.json"
+          refused_by: Verify | the sandboxed check-config exited 0
+        - name: the bind address on no interface
+          knobs: {ip: none}
+          refused_by: Verify | the bind address is the ai bridge's gateway on this host
+        - name: the bind address with another prefix
+          knobs: {ip: wrongprefix}
+          refused_by: Verify | the bind address is the ai bridge's gateway on this host
+        - name: the bind address on two interfaces
+          knobs: {ip: two}
+          refused_by: Verify | the bind address is the ai bridge's gateway on this host
+        - name: listening on every address
+          knobs: {ss: any}
+          refused_by: Verify | one socket on the bind address only, held by systemd and the service
+        - name: a second listener on the port
+          knobs: {ss: two}
+          refused_by: Verify | one socket on the bind address only, held by systemd and the service
+        - name: another process holding the socket instead of the service
+          knobs: {ss: otherpid}
+          refused_by: Verify | one socket on the bind address only, held by systemd and the service
+        - name: a socket the service bound itself (not systemd's)
+          knobs: {ss: selfbound}
+          refused_by: Verify | one socket on the bind address only, held by systemd and the service
+        - name: a third process holding the socket
+          knobs: {ss: extra}
+          refused_by: Verify | one socket on the bind address only, held by systemd and the service
+        - name: nothing listening
+          knobs: {ss: none}
+          refused_by: Verify | one socket on the bind address only, held by systemd and the service
+        - name: the host gets 403 (the IP filter isn't in force)
+          knobs: {host_curl: "403"}
+          refused_by: Verify | the host gets no answer (the IP filter)
+        - name: the host gets 401
+          knobs: {host_curl: "401"}
+          refused_by: Verify | the host gets no answer (the IP filter)
+        - name: the host gets 200
+          knobs: {host_curl: "200"}
+          refused_by: Verify | the host gets no answer (the IP filter)
+        - name: no UFW rule for the port
+          knobs: {ufw: missing}
+          refused_by: Verify | UFW has exactly the declared rule for the port, and no other
+        - name: a UFW rule for the port from anywhere
+          knobs: {ufw: fromany}
+          refused_by: Verify | UFW has exactly the declared rule for the port, and no other
+        - name: a second UFW rule for the port
+          knobs: {ufw: extra}
+          refused_by: Verify | UFW has exactly the declared rule for the port, and no other
+        - name: a UFW rule from the whole ai network
+          knobs: {ufw: wrongsrc}
+          refused_by: Verify | UFW has exactly the declared rule for the port, and no other
+        - name: a UFW rule to any address
+          knobs: {ufw: widedst}
+          refused_by: Verify | UFW has exactly the declared rule for the port, and no other
+        - name: a UFW rule for a port range holding the port
+          knobs: {ufw: range}
+          refused_by: Verify | UFW has exactly the declared rule for the port, and no other
+        - name: a UFW rule for every port from the ai network
+          knobs: {ufw: wideopen}
+          refused_by: Verify | UFW has exactly the declared rule for the port, and no other
+        - name: an extra UFW deny for the port (admits nothing)
+          knobs: {ufw: denied}
+          refused_by: ""
+        - name: open-webui not running
+          knobs: {docker: stopped}
+          refused_by: Verify | open-webui is running
+        - name: open-webui's call dropped (000)
+          knobs: {netns_curl: "000"}
+          refused_by: Verify | open-webui's address without the token gets 401
+        - name: open-webui's call without the token accepted (200)
+          knobs: {netns_curl: "200"}
+          refused_by: Verify | open-webui's address without the token gets 401
+        - name: open-webui's call refused as a peer (403)
+          knobs: {netns_curl: "403"}
+          refused_by: Verify | open-webui's address without the token gets 401
+        - name: the token in the journal
+          knobs: {journal: leak}
+          refused_by: Verify | the token is not in the journal, which holds the service's own lines
+        - name: the journal without the service's own lines
+          knobs: {journal: noservice}
+          refused_by: Verify | the token is not in the journal, which holds the service's own lines
+        - name: the journal unreadable
+          knobs: {journal: fail}
+          refused_by: Verify | the token is not in the journal, which holds the service's own lines
+        # Q-1: Open WebUI's trust settings.
+        - name: no settings rows (Open WebUI's defaults are all off)
+          owui: norows
+          refused_by: ""
+        - name: a second admin
+          owui: twoadmins
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+          bad: admins
+        - name: the approver not an admin (someone else is)
+          owui: notadmin
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+          bad: admins
+        - name: no admin at all
+          owui: noadmin
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+          bad: admins
+        - name: users get workspace tools by default
+          owui: tools
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+          bad: default-permissions
+        - name: users may import tools by default
+          owui: toolsimport
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+          bad: default-permissions
+        - name: a workspace functions permission on
+          owui: functions
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+          bad: default-permissions
+        - name: iframe same-origin on in the Interface defaults
+          owui: iframedefault
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+          bad: iframe-same-origin
+        - name: iframe same-origin on for one user
+          owui: iframeuser
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+          bad: iframe-same-origin
+        - name: a group granting workspace tools
+          owui: grouptools
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+          bad: group-permissions
+        - name: the default group granting tools_import (as the string "false", which Open WebUI reads as on)
+          owui: defaultgroup
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+          bad: group-permissions
+        - name: a user with write access to a tool
+          owui: grantuser
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+          bad: tool-write-grants
+        - name: a group with write access to a tool
+          owui: grantgroup
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+          bad: tool-write-grants
+        - name: everyone with write access to a tool
+          owui: grantall
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+          bad: tool-write-grants
+        - name: read grants on a tool and write grants on other things (fine)
+          owui: grantread
+          refused_by: ""
+        - name: a tool owned by another user
+          owui: foreigntool
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+          bad: tool-owners
+        - name: a default permission stored as the string "false" (on, as Open WebUI reads it)
+          owui: strfalse
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+          bad: default-permissions
+        - name: iframe same-origin stored as the string "false" (JS-truthy, so on)
+          owui: iframestr
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+          bad: iframe-same-origin
+        - name: falsy spellings Open WebUI reads as off (0, "")
+          owui: iframezero
+          refused_by: ""
+        - name: a symlink where webui.db should be
+          owui: symlink
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+        - name: a FIFO where webui.db should be (no hang)
+          owui: fifo
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+        - name: an unreadable database
+          owui: garbage
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+        - name: no database
+          owui: missing
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+        - name: no data mount on open-webui
+          knobs: {mounts: none}
+          refused_by: Verify | Open WebUI's trust settings hold (forge_api_verify_owui_trust)
+        - name: a failed trust check with the switch off (reported, not fatal)
+          owui: twoadmins
+          trust: false
+          refused_by: ""
+          bad: admins
+
+    - name: The checker never changed the database (read-only)
+      ansible.builtin.stat:
+        path: "{{ test_tmp }}/owui/good/webui.db"
+        get_checksum: true
+      register: fa_test_owui_after
+
+    - name: The good database is byte-identical after every run
+      ansible.builtin.assert:
+        that:
+          - fa_test_owui_after.stat.checksum == fa_test_owui_before.stat.checksum
+          - fa_test_owui_after.stat.mtime == fa_test_owui_before.stat.mtime
+        quiet: true
+
+    - name: The scratch library is untouched by the verify (check-config never writes)
+      ansible.builtin.command:
+        argv: [find, "{{ test_lib }}/35-forge", -mindepth, "1"]
+      register: fa_test_forge_after
+      changed_when: false
+
+    - name: 35-forge is still empty
+      ansible.builtin.assert:
+        that: fa_test_forge_after.stdout_lines == []
+        fail_msg: "{{ fa_test_forge_after.stdout_lines }}"
+        quiet: true

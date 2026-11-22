@@ -1,0 +1,18 @@
+---
+# For test_render.yml's seeding cases: stat each sample file and refs/main without following links, into
+# hf_on_disk (by name: a_cfg, a_w, a_ref, b_cfg, b_w, b_ref). A path below a file (one case puts a file where a
+# folder belongs) can't be stat'ed; it counts as absent.
+- name: HF seed state | stat the files and refs/main
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: true
+    checksum_algorithm: sha256
+  loop: "{{ ai_stack_test_hf_paths.values() | list }}"
+  register: hf_seed_state_stat
+  failed_when: false
+
+- name: HF seed state | by name
+  ansible.builtin.set_fact:
+    hf_on_disk: >-
+      {{ dict(ai_stack_test_hf_paths.keys() | list | zip(hf_seed_state_stat.results | map(attribute='stat', default={'exists': false}))) }}

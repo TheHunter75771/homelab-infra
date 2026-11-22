@@ -1,0 +1,43 @@
+---
+# One case for tasks/verify_listen.yml: case = {name, out, want (default fail)}. A stub ss prints `out`
+# (ss -H -t -l -n lines) and records its arguments.
+- name: Listen case | stub ss for {{ case.name }}
+  ansible.builtin.copy:
+    dest: "{{ test_tmp }}/stub-ss-{{ case.name | regex_replace('[^a-z0-9]+', '-') }}"
+    content: |
+      #!/bin/sh
+      printf '%s\n' "$*" > "{{ test_tmp }}/ss-argv"
+      {% if case.out | length > 0 %}
+      printf '%s\n' '{{ case.out | replace('\n', "' '") }}'
+      {% endif %}
+    mode: "0755"
+
+- name: Listen case | run verify_listen.yml for {{ case.name }}
+  block:
+    - name: Listen case | verify for {{ case.name }}
+      ansible.builtin.include_tasks: ../tasks/verify_listen.yml
+      vars:
+        ai_library_share_ss: "{{ test_tmp }}/stub-ss-{{ case.name | regex_replace('[^a-z0-9]+', '-') }}"
+
+    - name: Listen case | result for {{ case.name }}
+      ansible.builtin.set_fact:
+        test_listen_result: pass
+  rescue:
+    - name: Listen case | result (refused) for {{ case.name }}
+      ansible.builtin.set_fact:
+        test_listen_result: >-
+          {{ 'fail' if ansible_failed_task.name is search('smbd listens on 445 on the wildcard')
+             else 'error: ' ~ ansible_failed_task.name }}
+
+- name: Listen case | outcome is as expected for {{ case.name }}
+  ansible.builtin.assert:
+    that: test_listen_result == case.want | default('fail')
+    fail_msg: "{{ case.name }}: got {{ test_listen_result }}, want {{ case.want | default('fail') }}"
+    quiet: true
+
+- name: Listen case | ss was asked for TCP listeners on 445, numeric, no header
+  ansible.builtin.command:
+    argv: [cat, "{{ test_tmp }}/ss-argv"]
+  register: test_ss_argv
+  changed_when: false
+  failed_when: test_ss_argv.stdout | trim != '-H -t -l -n sport = :445'

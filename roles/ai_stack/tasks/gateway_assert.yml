@@ -1,0 +1,14 @@
+---
+# Input: ai_stack_ai_gateway (`docker network inspect` of `ai`: its gateway address(es), space-separated; empty
+# when the network doesn't exist yet). See networks.yml. One assert for every pin, open-webui's included:
+# traffic through the published port can come from the gateway, so open-webui on it would make the host a
+# management client; any other pin on it would clash with Docker's own address.
+- name: Networks | no pinned address is the live gateway
+  ansible.builtin.assert:
+    that:
+      - ai_stack_pinned_ips.values() | list | intersect((ai_stack_ai_gateway.stdout | default('')).split()) | length == 0
+    fail_msg: >-
+      {{ ai_stack_network_name }}'s gateway is {{ ai_stack_ai_gateway.stdout | default('?') | trim }}, which is
+      also a pinned address ({{ ai_stack_pinned_ips | to_json }}). Traffic through the published port can come
+      from the gateway, so open-webui's address must never be it. Nothing was changed.
+    quiet: true

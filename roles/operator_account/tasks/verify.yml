@@ -1,0 +1,83 @@
+---
+# End-to-end: ask sudo itself what each account may do (skipped in check mode, where accounts and
+# files may not exist yet). Classic sudo always; sudo-rs too where it's installed, since it reads the
+# same sudoers files and an account with no rule there must get nothing from it either.
+- name: Ask classic sudo what each account may run
+  ansible.builtin.command:
+    argv: ["{{ operator_account_sudo_classic }}", -n, -l, -U, "{{ item.name }}"]
+  loop: "{{ operator_accounts_resolved }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: operator_account_sudo_list
+  changed_when: false
+  failed_when: false
+
+# Pure checks on the sudo -l output (verify_sudo_rules.yml), so the offline test runs the same logic.
+- name: Check classic sudo's view of each account
+  ansible.builtin.include_tasks: verify_sudo_rules.yml
+  vars:
+    operator_account_sudo_rules: "{{ operator_account_sudo_list.results }}"
+
+# Only sudo-rs's sudo understands -n -l -U; its su (also in the guarded set) would reject them.
+- name: Sudo-rs's sudo is identified when sudo-rs is installed
+  ansible.builtin.assert:
+    that:
+      - operator_account_sudo_rs_installed | length == 0 or operator_account_sudo_rs_sudo | length > 0
+    fail_msg: >-
+      sudo-rs is installed but none of {{ operator_account_sudo_rs }} answers --version like sudo-rs's sudo
+      ({{ operator_account_sudo_rs_sudo_re }}), so its view of the accounts can't be checked. Ask the Lead.
+    quiet: true
+
+- name: Ask sudo-rs what each account without sudo may run
+  ansible.builtin.command:
+    argv: ["{{ item.1 }}", -n, -l, -U, "{{ item.0.name }}"]
+  loop: "{{ operator_accounts_resolved | selectattr('sudo', 'equalto', 'none') | product(operator_account_sudo_rs_sudo) | list }}"
+  loop_control:
+    label: "{{ item.0.name }} via {{ item.1 }}"
+  register: operator_account_sudo_rs_list
+  changed_when: false
+  failed_when: false
+
+- name: Accounts without sudo get nothing from sudo-rs
+  ansible.builtin.assert:
+    that:
+      - "'may run the following commands' not in item.stdout"
+      - "'not allowed' in (item.stdout ~ item.stderr)"
+    fail_msg: "sudo-rs ({{ item.item.1 }}) grants {{ item.item.0.name }} something: {{ item.stdout }} {{ item.stderr }}"
+    quiet: true
+  loop: "{{ operator_account_sudo_rs_list.results }}"
+  loop_control:
+    label: "{{ item.item.0.name }} via {{ item.item.1 }}"
+
+# Execute, don't ask `test -x`: Ubuntu 26.04's uutils `test` ignores supplementary groups and reports the
+# sudo-rs binaries executable when the kernel refuses them (verify_exec.yml).
+- name: Full sudo accounts can't execute sudo-rs, but can execute classic sudo
+  ansible.builtin.include_tasks: verify_exec.yml
+  vars:
+    operator_account_exec_deny: >-
+      {{ operator_accounts_resolved | selectattr('sudo', 'equalto', 'full_logged') | map(attribute='name')
+         | product(operator_account_sudo_rs) | list }}
+    operator_account_exec_allow: >-
+      {{ operator_accounts_resolved | selectattr('sudo', 'equalto', 'full_logged') | map(attribute='name')
+         | product([operator_account_sudo_classic]) | list }}
+
+- name: Read each account's actual groups
+  ansible.builtin.command:
+    argv: [id, -Gn, "{{ item.name }}"]
+  loop: "{{ operator_accounts_resolved }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: operator_account_groups_now
+  changed_when: false
+
+- name: No account is in a privileged or polkit admin group
+  ansible.builtin.assert:
+    that:
+      - item.stdout.split() | intersect(operator_account_forbidden_groups + operator_account_polkit_groups) | length == 0
+    fail_msg: >-
+      {{ item.item.name }} is in {{ item.stdout.split() | intersect(operator_account_forbidden_groups + operator_account_polkit_groups) }}
+      (root through polkit or a privileged group bypasses the sudo log).
+    quiet: true
+  loop: "{{ operator_account_groups_now.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"

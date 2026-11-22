@@ -1,0 +1,68 @@
+---
+# Role forge_api (docs/CONTRACTS.md §12.25, module H8): the Skill Forge HTTP API (module F, apps/forge-api) on
+# ai-box, for the "Web research (approval required)" Open WebUI tool (module T). Host service forge-api.service,
+# user rgate (the research gate's account: one trust zone, Lead decision F-4); code at /opt/forge-api (F's
+# forge_api package plus apps/skill-library's forge and library, read-only); config /etc/forge-api/config.json;
+# bearer token /etc/forge-api/token (root-generated once, never rotated by a converge, never logged).
+
+# The switch. false (default): installed (code, token, unit; the config too once the approver is set), but
+# neither enabled nor started (a running one is stopped and disabled). true: preflight first proves the library
+# mount and requires forge_api_approver_user_id; after the start a read-only verify proves the bind, the IP
+# filter, the UFW rule, the 401 from open-webui's network namespace and a token-free journal.
+forge_api_enabled: false
+
+# --- Inventory (no default on purpose) ---
+# forge_api_approver_user_id: Noah's Open WebUI user id (Admin Panel > Users; a UUID). Only this user may tick
+#   searches or sources (F's tick endpoints). 1-64 of A-Z a-z 0-9 . _ @ -. Preflight refuses an enabled role
+#   without it; switched off without it, the config is not rendered.
+
+# The AI Library on ai-box: role ai_library_share's client automount (§12.17.3, CIFS as uid/gid rgate). Absolute,
+# plain characters only (it goes into the unit unescaped), and not under /home, /root, /run, /tmp, /opt, /etc...
+forge_api_library_root: /srv/ai-library
+# The mount the library lives on: the root itself, or a parent of it. Enabled, `findmnt --target <root>` must
+# name exactly this mount, and it can't be /.
+forge_api_library_mount: "{{ forge_api_library_root }}"
+
+# The `ai` bridge network (role ai_stack, §12.18b/§12.23): its pinned subnet and open-webui's pinned address, the
+# inventory's values (group_vars/ai_servers pins ai_stack_webui_ip), else role ai_stack's defaults (include_vars,
+# never copied here).
+forge_api_ai_stack_defaults_file: "{{ role_path }}/../ai_stack/defaults/main.yml"
+forge_api_ai_subnet: >-
+  {{ ai_stack_network_subnet | default(forge_api_ai_stack_role_defaults.ai_stack_network_subnet | default('')) }}
+forge_api_webui_ip: >-
+  {{ ai_stack_webui_ip | default(forge_api_ai_stack_role_defaults.ai_stack_webui_ip | default('')) }}
+# The bind address (§12.25, Lead + H8): the `ai` bridge's gateway, which open-webui reaches without NAT (the peer
+# the service sees is open-webui's own address). Role ai_stack exposes no gateway variable: Docker gives a bridge
+# network the first host of its subnet, so the default is that (172.20.0.1 for 172.20.0.0/24), or
+# ai_stack_network_gateway when the inventory sets one. The verify proves the host carries it on the bridge.
+forge_api_bind: "{{ ai_stack_network_gateway | default(forge_api_ai_subnet | trim | forge_api_gateway_of, true) }}"
+# Reviewer S / Lead (§12.25): a privileged port (below net.ipv4.ip_unprivileged_port_start, 1024 on ai-box), so no
+# non-root process can ever bind it, even while the socket is closed. systemd binds it (forge-api.socket); the
+# service inherits the socket and needs no capability. Preflight requires it below the host's unprivileged start.
+forge_api_port: 879
+
+# Unit limits (F's README): 16 handler threads + 16 deadline timers + the main thread fit in TasksMax.
+forge_api_memory_max: 256M
+forge_api_tasks_max: 64
+forge_api_limit_nofile: 256
+
+# Sources on the controller (module F's README, "Run"): the launcher apps/forge-api/forge-api and the package
+# apps/forge-api/forge_api; forge and library from apps/skill-library.
+forge_api_src_dir: "{{ role_path }}/../../apps/forge-api"
+forge_api_pkg_src: "{{ forge_api_src_dir }}/forge_api"
+forge_api_launcher_src: "{{ forge_api_src_dir }}/forge-api"
+forge_api_library_src_dir: "{{ role_path }}/../../apps/skill-library"
+# Owner of the installed code (the tests run unprivileged and override it).
+forge_api_owner: root
+
+# Post-start check (enabled only): the unit stays active this long without restarting; the curl timeout.
+forge_api_verify_retries: 10
+forge_api_verify_delay: 2
+forge_api_verify_curl_timeout: 5
+forge_api_verify_timeout: 1min
+# Reviewer Q (Q-1): the verify reads Open WebUI's database (read-only, from the host) and reports three trust
+# checks: the approver is the only admin, users get no workspace tools by default, and iframe same-origin is off.
+# true (default): a failed check fails the play. false: they are reported only.
+forge_api_verify_owui_trust: true
+# The checker (files/owui_trust_check.py), run on the host with python3 by the script module.
+forge_api_owui_check_src: "{{ role_path }}/files/owui_trust_check.py"

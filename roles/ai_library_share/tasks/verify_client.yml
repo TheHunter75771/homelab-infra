@@ -1,0 +1,36 @@
+---
+# Checks after the client converge (§12.17.3 Verify; skipped in check mode). Read-only except the one
+# probe file the probe writes, reads back and deletes in the library's own 00-inbox/. Run as the mount
+# user, so it proves what research_gate will get. The first access mounts the share (automount), which
+# is also the smbclient-style login test the server half can't do (§12.17.2).
+- name: Verify | probe the library as {{ ai_library_share_mount_user }}
+  ansible.builtin.command:
+    argv: >-
+      {{ ai_library_share_runas
+         + [ai_library_share_python, '-I', '-B', ai_library_share_lib_dir ~ '/probe.py',
+            '--lib', ai_library_share_lib_dir, '--root', ai_library_share_mount_point,
+            '--sentinel', ai_library_share_sentinel, '--write', '--symlink'] }}
+  register: ai_library_share_client_probe
+  changed_when: false
+  failed_when: ai_library_share_client_probe.rc != 0
+
+- name: Verify | the share is the library, writable, and refuses symlinks
+  vars:
+    ai_library_share_probe: "{{ ai_library_share_client_probe.stdout | from_json }}"
+  ansible.builtin.assert:
+    that:
+      - ai_library_share_probe.sentinel
+      - ai_library_share_probe.open
+      - ai_library_share_probe.write
+      - ai_library_share_probe.symlink_created == false
+      - ai_library_share_probe.errors | length == 0
+    fail_msg: >-
+      As {{ ai_library_share_mount_user }} on {{ ai_library_share_mount_point }}: sentinel {{ ai_library_share_probe.sentinel }},
+      Library.open {{ ai_library_share_probe.open }}, probe write/read/delete in 00-inbox {{ ai_library_share_probe.write }},
+      symlink created {{ ai_library_share_probe.symlink_created }} (must be false; if true, add symlink=none to
+      ai_library_share_mount_options_extra and tell the Lead); errors {{ ai_library_share_probe.errors | to_json }}.
+      See `journalctl -u '{{ ai_library_share_mount_unit }}'`.
+    quiet: true
+
+- name: Verify | the live mount's options
+  ansible.builtin.include_tasks: verify_client_mount.yml

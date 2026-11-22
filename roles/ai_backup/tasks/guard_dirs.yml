@@ -1,0 +1,22 @@
+---
+# §12.15 lesson (Reviewer D): never write through a symlink. Each directory this role creates or fills must be
+# absent or a real directory, checked without following links. Param: ai_backup_guard_dirs (absolute paths).
+- name: Guard | stat the directories without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: false
+  loop: "{{ ai_backup_guard_dirs }}"
+  register: ai_backup_guard_stat
+
+- name: Guard | each directory is absent or a real directory (never a symlink)
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isdir and not item.stat.islnk)
+    fail_msg: >-
+      {{ item.item }} exists but isn't a real directory (a symlink or a file). Refusing to write through it;
+      fix it by hand.
+    quiet: true
+  loop: "{{ ai_backup_guard_stat.results }}"
+  loop_control:
+    label: "{{ item.item }}"

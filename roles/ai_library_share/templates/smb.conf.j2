@@ -1,0 +1,54 @@
+# {{ ansible_managed }}
+# Role ai_library_share (docs/CONTRACTS.md §12.17.2). Fully managed: Fedora's default homes, printers
+# and print$ shares are gone on purpose. One share, ai-library, for ai-box's tailnet address only.
+
+[global]
+	workgroup = WORKGROUP
+	server string = AI Library
+	server role = standalone server
+	security = user
+	passdb backend = tdbsam
+
+	# Protocol: SMB 3.1.1 only, encryption required.
+	server min protocol = SMB3_11
+	server smb encrypt = required
+
+	# Binding: all addresses. smbd can't bind a point-to-point tun such as tailscale0 (it skips
+	# non-broadcast interfaces, then panics), so it listens everywhere and four layers filter:
+	# firewalld's LAN zone (no 445), module G's ai-box-only policy on 445, the smb.service drop-in's
+	# IPAddressDeny=any/IPAddressAllow (localhost + ai-box), and hosts allow/deny below.
+	bind interfaces only = no
+
+	# Access: ai-box only, named users only.
+	hosts allow = {{ ai_library_share_allow_ips | join(' ') }}
+	hosts deny = ALL
+	map to guest = never
+	restrict anonymous = 2
+
+	# Off: NetBIOS, other ports, printing.
+	disable netbios = yes
+	smb ports = 445
+	load printers = no
+	disable spoolss = yes
+	printing = bsd
+	printcap name = /dev/null
+
+	# Symlinks (§12.12): no client-made links, none followed. Samba 4.24 turns the SMB3 POSIX
+	# extensions on by default; `unix extensions` alone only covers SMB1, so both are off.
+	unix extensions = no
+	smb3 unix extensions = no
+	follow symlinks = no
+	wide links = no
+
+[{{ ai_library_share_share_name }}]
+	path = {{ ai_library_share_dir }}
+	valid users = {{ ai_library_share_user }}
+	force user = {{ ai_library_share_force_user }}
+	force group = {{ ai_library_share_force_group }}
+	read only = no
+	guest ok = no
+	create mask = 0664
+	directory mask = 0775
+	vfs objects =
+	veto files = /*.lnk/
+	delete veto files = no

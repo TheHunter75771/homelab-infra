@@ -1,0 +1,34 @@
+---
+# Inputs: ai_stack_skills_mountinfo (open-webui's /proc/1/mountinfo, as registered) and share_now (one
+# result of `systemctl is-active --quiet` on a share's mount unit: .rc, and .share from ai_stack_ro_shares).
+# See verify_skills.yml.
+#   read-only shares: the top mount is never rw and always ro; while mounted, ro,nosuid,nodev,noexec.
+#   the read-write share (§12.27): while mounted, the top is the CIFS mount with rw,nosuid,nodev,noexec;
+#   while not, the top is the local directory, which tasks/verify_skills.yml checks is immutable.
+- name: Skills verify | mode and nosuid,nodev,noexec in open-webui, {{ share_now.share.mode ~ " " ~ share_now.share.target }}
+  vars:
+    ai_stack_skills_stack: "{{ ai_stack_skills_mountinfo.stdout_lines | ai_stack_mountinfo_stack(share_now.share.target) }}"
+    ai_stack_skills_top: "{{ ai_stack_skills_stack[-1].options | default([]) }}"
+    ai_stack_skills_top_fstype: "{{ ai_stack_skills_stack[-1].fstype | default('') }}"
+    ai_stack_share_rw: "{{ share_now.share.mode | default('ro') == 'rw' }}"
+  ansible.builtin.assert:
+    that:
+      - share_now.share.mode | default('ro') in ['ro', 'rw']
+      - ai_stack_skills_stack | length >= 1
+      - ai_stack_share_rw | bool or 'ro' in ai_stack_skills_top
+      - ai_stack_share_rw | bool or 'rw' not in ai_stack_skills_top
+      # The host's mount is up: whatever is on top must carry every flag. One mount (the timer mounted
+      # before Docker created the container, so Docker's bind captured the CIFS mount itself) or two (it was
+      # propagated in afterwards) are both fine; only the top mount's flags matter.
+      - >-
+        share_now.rc != 0
+        or ([share_now.share.mode | default('ro'), 'nosuid', 'nodev', 'noexec'] | difference(ai_stack_skills_top) | length == 0)
+      # The read-write share mounted: the top must be the CIFS mount itself, not ai-box's local directory.
+      - not (ai_stack_share_rw | bool) or share_now.rc != 0 or ai_stack_skills_top_fstype == 'cifs'
+    fail_msg: >-
+      {{ share_now.share.target }} in open-webui is {{ ai_stack_skills_stack | to_json }} (top last); the host's
+      {{ share_now.share.name }} mount ({{ share_now.share.mode | default('ro') }}) is {{ 'active' if share_now.rc == 0
+      else 'not active' }}. A read-only share must be ro, and while mounted ro,nosuid,nodev,noexec; the read-write
+      share, while mounted, the CIFS mount with rw,nosuid,nodev,noexec. If a read-only share's top mount is
+      writable, stop {{ share_now.share.mount_unit }} and {{ ai_stack_skills_timer_unit }} right away (README, "Skills").
+    success_msg: "{{ share_now.share.target }} in open-webui: {{ ai_stack_skills_top | join(',') }}"

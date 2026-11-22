@@ -15,6 +15,12 @@
   ansible.builtin.command: chronyc reload sources
   changed_when: true
 
+# Rereads chrony.conf and conf.d (makestep isn't reloadable). Runs after the sources reload above.
+- name: Restart chrony (base)
+  ansible.builtin.systemd_service:
+    name: chrony.service
+    state: restarted
+
 # Only this file, through systemd-sysctl, which expands the net.ipv4.conf.* glob (sysctl.d(5); procps
 # sysctl(8) documents no glob support). Other services' runtime settings aren't re-applied.
 - name: Apply hardening sysctls (base)

@@ -1,0 +1,41 @@
+---
+# Role mission_control (docs/CONTRACTS.md §12.29, module H12). playbooks/mission-control.yml (hosts: ai_servers),
+# after playbooks/ai-control.yml (AI Control is a source, and its serve handler is part of the declared set).
+# Order: inputs, package + account, venv, code, config dir + state, VAPID keys, config.json, the local-access
+# guard, units + start, tailscale serve, checks.
+
+- name: Preflight checks
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Package and account
+  ansible.builtin.import_tasks: base.yml
+
+- name: Pinned venv
+  ansible.builtin.import_tasks: venv.yml
+
+- name: Code (server MC1, web MC2, the CLI)
+  ansible.builtin.import_tasks: install.yml
+
+- name: Config dir and state
+  ansible.builtin.import_tasks: config.yml
+
+- name: VAPID keys (generated once, never rotated)
+  ansible.builtin.import_tasks: vapid.yml
+
+- name: Config file
+  ansible.builtin.import_tasks: config_file.yml
+
+- name: Local-access guard (nftables, only root reaches 8097 and :8443)
+  ansible.builtin.import_tasks: guard.yml
+
+- name: Units and start
+  ansible.builtin.import_tasks: service.yml
+
+- name: Publish on the tailnet (tailscale serve :8443 next to AI Control's 443)
+  ansible.builtin.import_tasks: serve.yml
+
+- name: Read-only checks after start
+  ansible.builtin.include_tasks: verify.yml
+  when:
+    - mission_control_verify | bool
+    - not ansible_check_mode

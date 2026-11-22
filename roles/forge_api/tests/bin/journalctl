@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Fake journalctl: only `--unit forge-api.service --unit forge-api.socket --output short --quiet --no-pager`.
+# knob `journal`: clean (default) | leak (a service line carrying the token from $FA_TEST_TOKEN) | noservice (only
+# systemd's own lines) | fail
+set -euo pipefail
+: "${FA_TEST_DIR:?}" "${FA_TEST_TOKEN:?}"
+. "$(dirname "$0")/_knob"
+[ "$*" = "--unit forge-api.service --unit forge-api.socket --output short --quiet --no-pager" ] \
+  || { echo "fake journalctl: unexpected arguments: $*" >&2; exit 2; }
+sd="Oct 27 22:00:00 ai-box systemd[1]: Listening on forge-api.socket - Skill Forge API socket (open-webui only)."
+start="Oct 27 22:00:01 ai-box forge-api[4321]: INFO forge_api: forge-api serving $(knob bind 172.20.0.1) port 879"
+req="Oct 27 22:00:02 ai-box forge-api[4321]: INFO forge_api: 172.20.0.4 GET /requests 401 0.001s"
+case "$(knob journal clean)" in
+  clean) echo "$sd"; echo "$start"; echo "$req" ;;
+  leak) echo "$sd"; echo "$start"; echo "Oct 27 22:00:03 ai-box forge-api[4321]: WARNING header Bearer $(head -n1 "$FA_TEST_TOKEN")" ;;
+  noservice) echo "$sd" ;;
+  fail) echo "fake journalctl: no journal" >&2; exit 1 ;;
+  *) echo "fake journalctl: bad knob" >&2; exit 2 ;;
+esac

@@ -1,0 +1,39 @@
+---
+# ai-box: the AI host (docs/CONTRACTS.md §12). Public-safe; identifiers live in host_vars/ai-box.yml.
+# Ubuntu 26.04 defaults to sudo-rs; Ansible's sudo plugin needs classic sudo (same as media_servers).
+ansible_become_exe: /usr/bin/sudo.ws
+# §12.2: no media accounts on this host. Role `users` creates no backup-pull account here; role ai_backup creates
+# `backuppull` (rrsync-restricted, key `from=` the gaming PC) for the Open WebUI backup only (§12.28, amended 2026-10-28).
+users_media_accounts: false
+ssh_hardening_allow_users:
+  - "{{ admin_user }}"
+  - "{{ automation_user }}"
+  - "{{ operator_user }}"
+  - "{{ backup_pull_user | default('backuppull') }}"   # §12.28: Open WebUI backup pull, rrsync + from= the gaming PC only
+# §12.2: declared inbound rules. Default deny everything else.
+firewall_allow_rules:
+  - { port: 22, proto: tcp, iface: tailscale0, comment: "ssh over tailnet" }
+  - { port: 22, proto: tcp, iface: "{{ lan_iface }}", from: "{{ gaming_pc_lan_ip }}", comment: "ssh gaming-pc lan" }
+  - { port: 22, proto: tcp, iface: "{{ lan_iface }}", from: "{{ mediaserver_lan_ip }}", comment: "ssh mediaserver recovery" }
+  # §12.10: documents intent. Docker-published ports are DNAT and bypass UFW INPUT; the tailnet bind + DOCKER-USER guard enforce.
+  - { port: 8080, proto: tcp, iface: tailscale0, comment: "open-webui over tailnet" }
+  - { port: 11434, proto: tcp, iface: tailscale0, from: "{{ mediaserver_tailnet_ip }}", comment: "gpu-broker from mediaserver" }
+  - { port: 11434, proto: tcp, iface: tailscale0, from: "{{ gaming_pc_tailnet_ip }}", comment: "gpu-broker from gaming-pc" }
+  # §12.15: AI Control is published by `tailscale serve` (tailscaled listens on 443; the app itself is 127.0.0.1:8095).
+  - { port: 443, proto: tcp, iface: tailscale0, comment: "ai-control via tailscale serve" }
+  # §12.25: forge-api listens on the ai bridge gateway; only open-webui (pinned .4) may connect. No iface: from+to pin it.
+  - { port: 879, proto: tcp, from: "{{ ai_stack_webui_ip }}", to: 172.20.0.1, comment: "forge-api from open-webui" }
+# §12.8: install Docker from Docker's apt repo (pinned in versions.yml -> apt_packages, held).
+docker_install: true
+operator_key_from: ["{{ gaming_pc_tailnet_ip }}", "{{ gaming_pc_lan_ip }}"]
+operator_key_from_extra: ["{{ gaming_pc_tailnet_ip6 }}"]
+# §12.16/§12.17: the research gate runs against the AI Library share mount (live since 2026-10-27).
+research_gate_enabled: true
+research_gate_library_root: /srv/ai-library
+# §12.22: Noah saved the search settings (2026-10-27); every converge now asserts them.
+ai_stack_verify_search_settings: true
+# §12.23: the pinned container addresses on the `ai` network (role ai_stack checks them). They live here,
+# not only in the role's defaults, so the separate finance/skills/voice/ai-control plays see the same values.
+ai_stack_ollama_cpu_ip: 172.20.0.2
+ai_stack_broker_ip: 172.20.0.3
+ai_stack_webui_ip: 172.20.0.4

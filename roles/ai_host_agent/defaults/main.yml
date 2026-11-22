@@ -1,0 +1,43 @@
+---
+# Role ai_host_agent (docs/CONTRACTS.md §12.15.3, §12.15.7; module H3): installs host agent Y
+# (apps/ai-control/host-agent) on the gaming PC as a hardened, unprivileged systemd service that
+# answers ai-box's AI Control server on <gaming_pc_tailnet_ip>:11510 (and 127.0.0.1:11510).
+# Host vars: gaming_pc_tailnet_ip (required), ai_box_tailnet_ip (required while the IP allowlist is
+# on), gaming_pc_tailnet_ip6 / ai_box_tailnet_ip6 (added to the allowlist when set).
+# The firewalld policy for 11510 is module G's (ollama_rocm_policy_extra_ports), never this role's.
+
+ai_host_agent_src_dir: "{{ role_path }}/../../apps/ai-control/host-agent"
+# Pruned of anything that isn't the launcher or a package module, so it must end in /ai-host-agent.
+ai_host_agent_install_dir: /opt/ai-host-agent
+# Owner of the installed code (the tests run unprivileged and override it).
+ai_host_agent_owner: root
+
+# The service account: system, nologin, no home; its only supplementary group is systemd-journal
+# (journalctl reads the system journal through it).
+ai_host_agent_user: aictl-agent
+ai_host_agent_groups:
+  - systemd-journal
+
+ai_host_agent_port: 11510
+# The sudo binaries whose journal rows count (matched on _EXE). Fedora: classic sudo only.
+ai_host_agent_sudo_exes:
+  - /usr/bin/sudo
+# More config keys (apps/ai-control/host-agent/config.example.json), merged over the role's own.
+ai_host_agent_config_extra: {}
+
+# Unit knobs.
+# Y's README: if `systemctl show` breaks under ProtectProc=invisible on the host, set this to
+# "default" in inventory and record it (defence in depth, not a contract item).
+ai_host_agent_protect_proc: invisible
+# IPAddressDeny=any + IPAddressAllow=localhost, this PC's and ai-box's tailnet addresses. Defence in
+# depth on top of firewalld (the BPF filter drops everything else, LAN included).
+ai_host_agent_ip_allowlist: true
+ai_host_agent_memory_max: 512M
+ai_host_agent_tasks_max: 128
+
+# Post-start checks (read-only): how long to wait for the first 200 on /healthz.
+ai_host_agent_verify_retries: 15
+ai_host_agent_verify_delay: 2
+# /v1/sudo must return this account's sudo rows from the play's own become (skipped unless the
+# connection user is claude or localai, the only users the agent accepts).
+ai_host_agent_verify_sudo_user: "{{ ansible_user | default('') }}"

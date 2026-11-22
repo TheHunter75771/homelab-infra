@@ -1,0 +1,2 @@
+# A lock line without hashes (preflight must refuse it).
+setuptools==84.2.1

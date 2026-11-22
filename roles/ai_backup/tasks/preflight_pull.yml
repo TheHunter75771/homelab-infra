@@ -1,0 +1,73 @@
+---
+# Read-only. Refuses before anything changes on the PC. The script repeats the drive checks on every run
+# (findmnt, st_dev, FSROOT), because the drive can be gone at 06:30 even when it was here now.
+- name: Preflight | pull inputs
+  ansible.builtin.assert:
+    that:
+      - ai_backup_pull_host is match('^([0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - ai_backup_pull_keep | int >= 1 and ai_backup_pull_keep | string is match('^[0-9]+$')
+      - ai_backup_pull_max_age_hours | int >= 1 and ai_backup_pull_max_age_hours | string is match('^[0-9]+$')
+      - ai_backup_pull_dest_mount is match('^/[A-Za-z0-9._/-]+$') and '/../' not in ai_backup_pull_dest_mount ~ '/'
+      - ai_backup_pull_subdir is match('^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$')
+      - ai_backup_pull_subdir.split('/') | reject('in', ['.', '..']) | list | length == ai_backup_pull_subdir.split('/') | length
+      - ai_backup_pull_dest_fstypes | length > 0
+      - ai_backup_pull_max_remote | string is match('^[1-9][0-9]*$')
+      - ai_backup_pull_max_new | string is match('^[1-9][0-9]*$')
+      - ai_backup_pull_max_size | string is match('^[1-9][0-9]*[KMGT]?$')
+      - ai_backup_pull_min_free_mb | string is match('^[0-9]+$')
+      - ai_backup_pull_max_future_minutes | string is match('^[0-9]+$')
+      - ai_backup_pull_start_burst | string is match('^[1-9][0-9]*$')
+      - ai_backup_account is match('^[a-z_][a-z0-9_-]{0,31}$')
+    fail_msg: >-
+      Bad ai_backup pull inputs: host {{ ai_backup_pull_host }} (set ai_box_tailnet_ip in host_vars; IPv4 literal),
+      keep {{ ai_backup_pull_keep }}, max age {{ ai_backup_pull_max_age_hours }}, mount {{ ai_backup_pull_dest_mount }},
+      subdir {{ ai_backup_pull_subdir }}.
+    quiet: true
+
+- name: Preflight | the backup drive is mounted
+  ansible.builtin.command:
+    argv: ["{{ ai_backup_findmnt }}", -n, -r, -o, FSTYPE, --mountpoint, "{{ ai_backup_pull_dest_mount }}"]
+  register: ai_backup_pre_findmnt
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Preflight | refuse unless the backup drive is a mountpoint of the expected type
+  ansible.builtin.assert:
+    that:
+      - ai_backup_pre_findmnt.rc == 0
+      - ai_backup_pre_findmnt.stdout_lines | length > 0
+      - ai_backup_pre_findmnt.stdout_lines | last in ai_backup_pull_dest_fstypes
+    fail_msg: >-
+      {{ ai_backup_pull_dest_mount }} is not mounted, or is not {{ ai_backup_pull_dest_fstypes | join(' or ') }}
+      (findmnt: {{ ai_backup_pre_findmnt.stdout | default('') }}). Plug in / mount the backup drive first.
+    quiet: true
+
+# Only this task looks at the key itself; the rest use the boolean.
+- name: Preflight | was a key handed over by the ai-box play
+  ansible.builtin.set_fact:
+    ai_backup_pull_key_given: "{{ ai_backup_pull_private_key | length > 0 }}"
+  no_log: true
+
+- name: Preflight | look at the key files (no links followed)
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: false
+  loop:
+    - "{{ ai_backup_pull_key_file }}"
+    - "{{ ai_backup_pull_known_hosts }}"
+  register: ai_backup_pull_pre_stat
+
+- name: Preflight | a key and a host key are given, or both files are already here
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isreg and not item.stat.islnk)
+      - (ai_backup_pull_key_given | bool and ai_backup_pull_host_pubkey | length > 0) or item.stat.exists or ansible_check_mode
+    fail_msg: >-
+      {{ item.item }} is not a regular file, or no key came from the ai-box play and none is installed yet. Run the
+      ai-box play (tasks_from: stage + export_key) in the same playbook first.
+    quiet: true
+  loop: "{{ ai_backup_pull_pre_stat.results }}"
+  loop_control:
+    label: "{{ item.item }}"

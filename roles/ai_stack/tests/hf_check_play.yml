@@ -1,0 +1,14 @@
+---
+# A check run (--check) of the role's tasks/hf_models.yml, for test_render.yml: ansible_check_mode follows the
+# command line only, so the test runs this as a nested playbook. The seed folder, owner, models and URL come
+# from -e @<json>.
+- name: HF check run
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  tasks:
+    - name: HF check run | tasks/hf_models.yml
+      ansible.builtin.include_tasks: ../tasks/hf_models.yml

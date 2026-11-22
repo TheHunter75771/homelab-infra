@@ -1,0 +1,65 @@
+---
+# /opt/skill-drafter holds exactly K2's launcher and package plus the forge and library code, all root-owned:
+# the launcher `skill-drafter` (0755) and three packages (0755 dirs, 0644 *.py): K2's skill_drafter and
+# apps/skill-library's forge and library (K2 imports both; installed beside it, read-only). The launcher puts its
+# own directory first on sys.path (and, finding forge there, adds nothing else), so under `python3 -I` the
+# drafter imports exactly these copies. Anything else (a removed file, a stray, a test dir, K2's tests, README and
+# example config) is pruned. Any change restarts the drafter when it is enabled.
+- name: Install | the code directories are real directories (before any write)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    skill_drafter_guard_dirs: "{{ [skill_drafter_app_dir] + (skill_drafter_packages | map('regex_replace', '^', skill_drafter_app_dir ~ '/') | list) }}"
+
+- name: Install | code directory
+  ansible.builtin.file:
+    path: "{{ skill_drafter_app_dir }}"
+    state: directory
+    owner: "{{ skill_drafter_owner }}"
+    group: "{{ skill_drafter_owner }}"
+    mode: "0755"
+
+- name: Install | packages
+  ansible.builtin.include_tasks: tree.yml
+  vars:
+    skill_drafter_tree_src: "{{ skill_drafter_pkg.src }}"
+    skill_drafter_tree_dest: "{{ skill_drafter_app_dir }}/{{ skill_drafter_pkg.name }}"
+    skill_drafter_tree_name: "{{ skill_drafter_pkg.name }}"
+  loop:
+    - {name: skill_drafter, src: "{{ skill_drafter_pkg_src }}"}
+    - {name: forge, src: "{{ skill_drafter_library_src_dir }}/forge"}
+    - {name: library, src: "{{ skill_drafter_library_src_dir }}/library"}
+  # Not `item`: the included file's own loops would shadow it (its vars are evaluated lazily).
+  loop_control:
+    loop_var: skill_drafter_pkg
+    label: "{{ skill_drafter_pkg.name }}"
+
+- name: Install | launcher
+  ansible.builtin.copy:
+    src: "{{ skill_drafter_launcher_src }}"
+    dest: "{{ skill_drafter_launcher }}"
+    owner: "{{ skill_drafter_owner }}"
+    group: "{{ skill_drafter_owner }}"
+    mode: "0755"
+    follow: false
+  notify: Restart skill-drafter
+
+- name: Install | the code directory is still a real directory (before the find and prune)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    skill_drafter_guard_dirs: ["{{ skill_drafter_app_dir }}"]
+
+- name: Install | entries of the code directory
+  ansible.builtin.find:
+    paths: "{{ skill_drafter_app_dir }}"
+    file_type: any
+    hidden: true
+  register: skill_drafter_app_found
+
+- name: Install | anything but the launcher and the three packages is removed
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: >-
+    {{ skill_drafter_app_found.files | map(attribute='path')
+       | reject('in', skill_drafter_app_entries | map('regex_replace', '^', skill_drafter_app_dir ~ '/') | list) | sort }}
+  notify: Restart skill-drafter

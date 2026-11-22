@@ -1,0 +1,50 @@
+# Test fixtures for tasks/chrony_selectdata.yml: `chronyc -n selectdata -a` outputs, laid out with the
+# format string of chrony 4.8's client.c (process_cmd_selectdata). The NTS sources' addresses are
+# unresolved placeholders (ID#...) or documentation addresses (192.0.2.x); only the options columns matter here.
+---
+- name: 'ignore mode, NTS down: fallback usable'
+  expect: pass
+  lines:
+    - S Name/IP Address        Auth COpts EOpts Last Score     Interval  Leap
+    - =======================================================================
+    - '? ID#0000000001             Y -P--- -P---   12   1.0    -12us    +12us  N'
+    - '? ID#0000000002             Y -P--- -P---   12   1.0    -12us    +12us  N'
+    - '? ID#0000000003             Y -P--- -P---   12   1.0    -12us    +12us  N'
+    - '? ID#0000000004             Y -P--- -P---   12   1.0    -12us    +12us  N'
+    - '? ID#0000000005             Y -P--- -P---   12   1.0    -12us    +12us  N'
+    - '* 162.159.200.123           N ----- -----   12   1.0    -12us    +12us  N'
+    - + 216.239.35.0              N ----- -----   12   1.0    -12us    +12us  N
+- name: 'normal operation: NTS selected'
+  expect: pass
+  lines:
+    - S Name/IP Address        Auth COpts EOpts Last Score     Interval  Leap
+    - =======================================================================
+    - '* 192.0.2.56                Y -P--- -P---   12   1.0    -12us    +12us  N'
+    - + 192.0.2.157               Y -P--- -P---   12   1.0    -12us    +12us  N
+    - '- 162.159.200.123           N ----- -----   12   1.0    -12us    +12us  N'
+    - '- 216.239.35.0              N ----- -----   12   1.0    -12us    +12us  N'
+- name: 'default mix mode: NTS required'
+  expect: fail
+  lines:
+    - S Name/IP Address        Auth COpts EOpts Last Score     Interval  Leap
+    - =======================================================================
+    - '? ID#0000000001             Y -P--- -P-R-   12   1.0    -12us    +12us  N'
+    - '? ID#0000000002             Y -P--- -P-R-   12   1.0    -12us    +12us  N'
+    - '? ID#0000000003             Y -P--- -P-R-   12   1.0    -12us    +12us  N'
+    - '? ID#0000000004             Y -P--- -P-R-   12   1.0    -12us    +12us  N'
+    - '? ID#0000000005             Y -P--- -P-R-   12   1.0    -12us    +12us  N'
+    - x 162.159.200.123           N ----- -----   12   1.0    -12us    +12us  N
+    - x 216.239.35.0              N ----- -----   12   1.0    -12us    +12us  N
+- name: a fallback is noselect
+  expect: fail
+  lines:
+    - S Name/IP Address        Auth COpts EOpts Last Score     Interval  Leap
+    - =======================================================================
+    - '* 162.159.200.123           N ----- -----   12   1.0    -12us    +12us  N'
+    - '? 216.239.35.0              N N---- N----   12   1.0    -12us    +12us  N'
+- name: a fallback is missing
+  expect: fail
+  lines:
+    - S Name/IP Address        Auth COpts EOpts Last Score     Interval  Leap
+    - =======================================================================
+    - '* 162.159.200.123           N ----- -----   12   1.0    -12us    +12us  N'

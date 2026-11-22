@@ -1,0 +1,20 @@
+---
+# Imported by sudo.yml once the lockout guards passed; also run on its own by tests/test_sudo_switch.yml
+# against a stub update-alternatives. `--set` always leaves the group in manual mode, including when auto
+# already points at the classic path (community.general.alternatives skips that case, so it isn't used).
+# sudo_decide.yml makes it idempotent: base_sudo_switch is false once the value is classic and manual.
+- name: Sudo is the classic implementation (manual mode)
+  ansible.builtin.command:
+    argv: [update-alternatives, --set, sudo, "{{ base_sudo_alternative }}"]
+  changed_when: true
+  when:
+    - base_sudo_switch
+    - not ansible_check_mode
+
+- name: Check mode reports the switch it would make
+  ansible.builtin.debug:
+    msg: "Would run: update-alternatives --set sudo {{ base_sudo_alternative }}"
+  changed_when: true
+  when:
+    - base_sudo_switch
+    - ansible_check_mode

@@ -1,0 +1,36 @@
+---
+# One case for tasks/verify_client_mount.yml: case = {name, out, rc (default 0), want (default fail)}.
+# A stub findmnt prints `out` as the kernel's view of the mount.
+- name: Mount case | stub findmnt for {{ case.name }}
+  ansible.builtin.copy:
+    dest: "{{ test_tmp }}/stub-findmnt-{{ case.name | regex_replace('[^a-z0-9]+', '-') }}"
+    content: |
+      #!/bin/sh
+      {% if case.out | length > 0 %}
+      printf '%s\n' '{{ case.out }}'
+      {% endif %}
+      exit {{ case.rc | default(0) }}
+    mode: "0755"
+
+- name: Mount case | run verify_client_mount.yml for {{ case.name }}
+  block:
+    - name: Mount case | verify for {{ case.name }}
+      ansible.builtin.include_tasks: ../tasks/verify_client_mount.yml
+      vars:
+        ai_library_share_findmnt: "{{ test_tmp }}/stub-findmnt-{{ case.name | regex_replace('[^a-z0-9]+', '-') }}"
+
+    - name: Mount case | result for {{ case.name }}
+      ansible.builtin.set_fact:
+        test_mount_result: pass
+  rescue:
+    - name: Mount case | result (refused) for {{ case.name }}
+      ansible.builtin.set_fact:
+        test_mount_result: >-
+          {{ 'fail' if ansible_failed_task.name is search('the mount is CIFS 3.1.1')
+             else 'error: ' ~ ansible_failed_task.name }}
+
+- name: Mount case | outcome is as expected for {{ case.name }}
+  ansible.builtin.assert:
+    that: test_mount_result == case.want | default('fail')
+    fail_msg: "{{ case.name }}: got {{ test_mount_result }}, want {{ case.want | default('fail') }}"
+    quiet: true

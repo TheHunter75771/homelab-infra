@@ -1,0 +1,73 @@
+---
+# §12.29: ai_control_serve_extra_handlers = Mission Control's :8443 (as host_vars/ai-box.yml sets it, passed in by
+# test_ai_control.yml as an include param). AI Control's handler stays first and unchanged, the extra follows it
+# as given, role tailscale_serve takes the pair (one-origin guard still on 443), and its compare sees today's
+# ai-box (443 alone) as drift and the pair as no drift.
+- name: Serve with extras | preflight passes with Mission Control's handler
+  ansible.builtin.include_tasks: ../tasks/preflight.yml
+
+- name: Serve with extras | AI Control's handler first and unchanged, then the extra as given
+  ansible.builtin.assert:
+    that:
+      - >-
+        ai_control_serve_handlers == [{'port': 443, 'mount': '/', 'backend': 'http://127.0.0.1:8095'},
+                                      {'port': 8443, 'mount': '/', 'backend': 'http://127.0.0.1:8097'}]
+      - ai_control_serve_handlers[0] == ai_control_serve_own_handler
+      - ai_control_serve_handlers[0].port is integer
+      - ai_control_serve_handlers[1].port is integer
+    fail_msg: "{{ ai_control_serve_handlers | to_json }}"
+    quiet: true
+
+- name: Serve with extras | the role's preconditions pass with both handlers
+  ansible.builtin.include_role:
+    name: tailscale_serve
+    tasks_from: validate
+  vars:
+    tailscale_serve_handlers: "{{ ai_control_serve_handlers }}"
+    tailscale_serve_dashboard_port: "{{ ai_control_serve_port | int }}"
+    tailscale_serve_dashboard_backend: "{{ ai_control_serve_backend }}"
+    tailscale_serve_node_name: "{{ tailnet_fqdn }}"
+    tailscale_serve_backend_state: Running
+
+- name: Serve with extras | the declared config
+  ansible.builtin.include_role:
+    name: tailscale_serve
+    tasks_from: desired
+  vars:
+    tailscale_serve_handlers: "{{ ai_control_serve_handlers }}"
+    tailscale_serve_node_name: "{{ tailnet_fqdn }}"
+
+- name: Serve with extras | 443 -> 127.0.0.1:8095 and 8443 -> 127.0.0.1:8097, HTTPS, no funnel
+  ansible.builtin.assert:
+    that:
+      - >-
+        tailscale_serve_desired == {'TCP': {'443': {'HTTPS': true}, '8443': {'HTTPS': true}},
+          'Web': {'ai-box.example.ts.net:443': {'Handlers': {'/': {'Proxy': 'http://127.0.0.1:8095'}}},
+                  'ai-box.example.ts.net:8443': {'Handlers': {'/': {'Proxy': 'http://127.0.0.1:8097'}}}}}
+    fail_msg: "{{ tailscale_serve_desired | to_json }}"
+    quiet: true
+
+- name: Serve with extras | drift compare
+  ansible.builtin.include_tasks: serve_drift.yml
+  loop:
+    - name: both handlers, Go key order
+      json: >-
+        {"TCP":{"443":{"HTTPS":true},"8443":{"HTTPS":true}},"Web":{"ai-box.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8095"}}},
+        "ai-box.example.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8097"}}}}}
+      want: false
+    - name: today's ai-box (AI Control alone, so 8443 gets added)
+      json: >-
+        {"TCP":{"443":{"HTTPS":true}},"Web":{"ai-box.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8095"}}}}}
+      want: true
+    - name: Mission Control alone (AI Control's 443 missing)
+      json: >-
+        {"TCP":{"8443":{"HTTPS":true}},"Web":{"ai-box.example.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8097"}}}}}
+      want: true
+    - name: funnel on 8443
+      json: >-
+        {"TCP":{"443":{"HTTPS":true},"8443":{"HTTPS":true}},"Web":{"ai-box.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8095"}}},
+        "ai-box.example.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8097"}}}},"AllowFunnel":{"ai-box.example.ts.net:8443":true}}
+      want: true
+  loop_control:
+    loop_var: drift_case
+    label: "{{ drift_case.name }}"

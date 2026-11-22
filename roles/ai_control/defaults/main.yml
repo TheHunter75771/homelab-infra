@@ -1,0 +1,126 @@
+---
+# Role ai_control (docs/CONTRACTS.md §12.15, §12.15.7; module H3): AI Control on ai-box.
+#   server S  apps/ai-control/server/ai_control  -> /opt/ai-control/server   ai-control.service (aictl, 127.0.0.1:8095)
+#   web W     apps/ai-control/web/public         -> /opt/ai-control/web      (served by S)
+#   helper X  apps/ai-control/helper             -> /usr/local/sbin/aictl-helper  aictl-helper.socket + aictl-helper@.service (root)
+# and `tailscale serve` 443 -> 127.0.0.1:8095 (through role tailscale_serve, parameterised), plus any other roles'
+# handlers on ai-box listed in ai_control_serve_extra_handlers (Mission Control's :8443).
+# Host vars: tailnet_ip, tailnet_fqdn, gaming_pc_tailnet_ip (required).
+# Play var: ai_control_agent_token (required, the host agent's token from play 1; never in inventory).
+
+ai_control_src_dir: "{{ role_path }}/../../apps/ai-control"
+ai_control_server_src: "{{ ai_control_src_dir }}/server/ai_control"
+ai_control_web_src: "{{ ai_control_src_dir }}/web/public"
+ai_control_helper_src: "{{ ai_control_src_dir }}/helper/aictl_helper.py"
+# Owner of the installed code (the tests run unprivileged and override it).
+ai_control_owner: root
+
+# §12.15.1: system account, no login, no home, NOT in docker (Docker goes through the helper).
+ai_control_user: aictl
+
+# Packages from the Ubuntu archive (security updates via unattended-upgrades). nftables: the guard's `nft`.
+ai_control_packages:
+  - python3-aiohttp
+  - nftables
+
+ai_control_listen_port: 8095
+# Where S finds the other parts (§12.15.5). The broker and Open WebUI publish on ai-box's tailnet
+# address only (role ai_stack); the gate and the agent live on the gaming PC.
+ai_control_gate_port: 11500
+ai_control_broker_port: 11434
+ai_control_webui_port: 8080
+ai_control_agent_port: 11510
+ai_control_gate_url: "http://{{ gaming_pc_tailnet_ip }}:{{ ai_control_gate_port }}"
+ai_control_broker_url: "http://{{ tailnet_ip }}:{{ ai_control_broker_port }}"
+ai_control_webui_url: "http://{{ tailnet_ip }}:{{ ai_control_webui_port }}"
+ai_control_agent_url: "http://{{ gaming_pc_tailnet_ip }}:{{ ai_control_agent_port }}"
+# Shown as routing.threshold / routing.window_s. They must equal the gate's own config on the gaming
+# PC (gpu_gate_config_extra threshold/window; gate defaults 50 and 1800): set both from one value.
+ai_control_gate_threshold: 50
+ai_control_gate_window: 1800
+ai_control_disk_mounts:
+  - /
+# More server config keys (apps/ai-control/server/README.md), merged over the role's own.
+ai_control_config_extra: {}
+
+# Helper X (helper.json). The sudo binaries whose journal rows count (matched on _EXE): classic sudo
+# is sudo.ws on Ubuntu 26.04; sudo-rs stays in so an attempt through it is still audited.
+ai_control_helper_sudo_exes:
+  - /usr/bin/sudo.ws
+  - /usr/lib/cargo/bin/sudo
+ai_control_helper_containers:
+  - ollama-cpu
+  - gpu-broker
+  - open-webui
+# More helper.json keys (apps/ai-control/helper/helper.example.json), merged over the role's own.
+ai_control_helper_config_extra: {}
+# Socket limits. S makes a handful of helper calls per 10 s summary plus one per API call; 16 is
+# the contract's MaxConnections. The poll limit throttles a runaway client without latching the
+# socket into "failed" (the trigger limit stays at systemd's default, far above it).
+ai_control_helper_max_connections: 16
+ai_control_helper_poll_limit_interval: 2s
+ai_control_helper_poll_limit_burst: 40
+
+# ai-control.service limits.
+ai_control_memory_max: 256M
+ai_control_tasks_max: 64
+# IPAddressDeny=any + IPAddressAllow=localhost, ai-box's and the gaming PC's tailnet addresses:
+# S never talks to anything else. Inbound is tailscale serve from 127.0.0.1 only.
+ai_control_ip_allowlist: true
+# The container addresses S may reach (§12.23, R12-5). S's only container peers are the broker and
+# Open WebUI, which it calls on tailnet_ip and Docker DNATs to their bridge addresses. Unset (null):
+# Docker's whole container range, as before (it also lets S reach ollama-cpu directly). Set: a
+# non-empty list of IPv4 host literals (a.b.c.d or a.b.c.d/32) inside that range, which replaces it.
+# ai-box: ["{{ ai_stack_broker_ip }}/32", "{{ ai_stack_webui_ip }}/32"] (README, "Container allow list").
+ai_control_container_allow: null
+
+# tailscale serve: this node's whole serve config is declared (role tailscale_serve's semantics: any
+# other handler on ai-box is drift and is reset).
+ai_control_serve_port: 443
+# Other roles' handlers on ai-box (docs/CONTRACTS.md §12.29): role tailscale_serve resets anything this role
+# doesn't declare, so a handler another role adds (Mission Control's https :8443 -> 127.0.0.1:8097, role
+# mission_control) would be reset away by every ai-control converge, and put back by the next run of that role,
+# dropping AI Control's 443 for a moment each time. Listing them here keeps them: the declared set is AI Control's
+# 443 handler first, then these, in order. Set in host_vars (host_vars/ai-box.yml), which role mission_control reads
+# too, so both roles declare the identical set. Each is {port, mount, backend}: an integer port that isn't
+# ai_control_serve_port and isn't used by another extra, a mount `/` or `/name[/...]`, and a backend
+# `http://127.0.0.1:<port>` that isn't AI Control's (preflight.yml refuses anything else).
+#   ai-box: [{port: 8443, mount: /, backend: "http://127.0.0.1:8097"}]
+ai_control_serve_extra_handlers: []
+
+# --- Local-access guard (Reviewer Q; README "Local-access guard") ---
+# S trusts the Tailscale-User-Login header that tailscale serve sets, and ai-box is Noah's node, so a connection that
+# reaches serve's 443 from ai-box itself (the IPv4 self-connect, or tailscaled's world-usable local API dialling
+# ai-box's own tailnet IPv6 as root) is stamped as Noah; and 127.0.0.1:<listen port> takes a forged header from any
+# local process. The guard (table inet ai_control_guard, loaded by ai-control-guard.service) rejects both:
+#   input:  ai-box's tailnet IPv4/IPv6 :ai_control_serve_port unless it arrived on the tailscale interface;
+#   output: TCP to 127.0.0.0/8:ai_control_listen_port unless the socket's owner is one of these users.
+# root must stay (tailscaled runs as root and proxies serve to S; the role's own checks run as root). host_vars add
+# Mission Control's user, which reads /api/summary: [root, mc]. Resolved to uids on every converge. A listed user that
+# doesn't exist yet (mc before the first mission-control.yml run) is skipped with a warning: the guard keeps refusing
+# it until playbooks/ai-control.yml runs again (README, "Local-access guard").
+ai_control_guard_allow_users:
+  - root
+# The interface real serve traffic arrives on.
+ai_control_tailscale_iface: tailscale0
+# ai-box's tailnet IPv6 (the guard covers :443 there too). Empty: read from `tailscale ip -6` at preflight.
+ai_control_tailnet_ip6: "{{ tailnet_ip6 | default('') }}"
+# tailscaled's local API (the verify dials through it as a non-root user; it must not reach S as Noah).
+ai_control_tailscaled_socket: /run/tailscale/tailscaled.sock
+# The non-root user the guard's live checks connect as.
+ai_control_verify_guard_user: nobody
+ai_control_verify_guard_group: nogroup
+# The verify also runs `ufw reload` (only when ufw is active) and checks the guard is still in place and still refuses.
+ai_control_verify_guard_ufw_reload: true
+
+# Post-start checks (read-only).
+ai_control_verify_retries: 15
+ai_control_verify_delay: 2
+# /api/summary must show the helper, the broker and Open WebUI ok, and the host agent ok when play 1
+# exported a token this run. With no token (PC off, play 1 skipped or failed) the agent can't be
+# required: the check is skipped and preflight.yml says so. Set false to skip it in any case.
+ai_control_verify_agent: "{{ ai_control_token_given | default(false) }}"
+# Role docker's defaults (the container address pools for the IP allowlist) and role ai_host_agent's
+# (the agent's port), read with include_vars so neither value is duplicated here.
+ai_control_docker_defaults_file: "{{ role_path }}/../docker/defaults/main.yml"
+ai_control_agent_defaults_file: "{{ role_path }}/../ai_host_agent/defaults/main.yml"

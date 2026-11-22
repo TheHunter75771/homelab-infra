@@ -1,0 +1,31 @@
+---
+# §12.17.2: nightly snapshot backup to the backup drive (preflight checked it is mounted). The script
+# (files/ai-library-backup.py, installed by install.yml) refuses unless both drives are mounted and
+# the source is the library; the role only creates the folder and the units.
+- name: Backup | guard the backup folder
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    ai_library_share_guard_dirs:
+      - "{{ ai_library_share_backup_dir }}"
+
+- name: Backup | backup folder (root only)
+  ansible.builtin.file:
+    path: "{{ ai_library_share_backup_dir }}"
+    state: directory
+    owner: "{{ ai_library_share_owner }}"
+    group: "{{ ai_library_share_owner }}"
+    mode: "0700"
+
+- name: Backup | units
+  ansible.builtin.import_tasks: units_backup.yml
+
+- name: Backup | load changed units before enabling the timer
+  ansible.builtin.meta: flush_handlers
+
+- name: Backup | the timer is enabled and running (the service only runs from it)
+  ansible.builtin.systemd_service:
+    name: "{{ ai_library_share_backup_timer }}"
+    enabled: true
+    state: started
+  # On a first check run the unit file doesn't exist yet.
+  ignore_errors: "{{ ansible_check_mode }}"

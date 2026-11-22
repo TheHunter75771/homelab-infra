@@ -1,0 +1,25 @@
+#!/usr/sbin/nft -f
+# {{ ansible_managed }}
+# AI Control's local-access guard (Reviewer Q). S trusts the Tailscale-User-Login header that tailscale serve sets,
+# and ai-box is Noah's own node, so any connection that reaches serve's :{{ ai_control_serve_port }} from ai-box itself is stamped as Noah:
+#   - a plain connect to ai-box's tailnet IPv4 or IPv6;
+#   - tailscaled's local API (world-usable) dialling ai-box's own tailnet address for its caller, as root.
+# Real serve traffic always arrives on {{ ai_control_tailscale_iface }}, so the input hook decides by interface: anything else (lo,
+# whoever dialled; a Docker bridge) gets a reset, root included. And S on 127.0.0.1:{{ ai_control_listen_port }} would take a forged header
+# from any local process, so the output hook lets only the listed users' sockets connect there: uids
+# {{ ai_control_guard_uids | join(', ') }} ({{ ai_control_guard_present_users | join(', ') }}). tailscaled (root) proxies serve's requests to it.
+# Only this table is replaced: it is declared (so the delete can't fail on a first load), deleted and re-added in one
+# nft transaction. Never `flush ruleset`: UFW's, Docker's and every other table are left alone.
+table inet {{ ai_control_guard_table }}
+delete table inet {{ ai_control_guard_table }}
+table inet {{ ai_control_guard_table }} {
+	chain input {
+		type filter hook input priority filter; policy accept;
+		ip daddr {{ tailnet_ip }} tcp dport {{ ai_control_serve_port | int }} iifname != "{{ ai_control_tailscale_iface }}" counter reject with tcp reset
+		ip6 daddr {{ ai_control_guard_ip6 }} tcp dport {{ ai_control_serve_port | int }} iifname != "{{ ai_control_tailscale_iface }}" counter reject with tcp reset
+	}
+	chain output {
+		type filter hook output priority filter; policy accept;
+		ip daddr 127.0.0.0/8 tcp dport {{ ai_control_listen_port | int }} meta skuid != { {{ ai_control_guard_uids | join(', ') }} } counter reject with tcp reset
+	}
+}

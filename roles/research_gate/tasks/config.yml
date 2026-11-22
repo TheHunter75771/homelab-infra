@@ -1,0 +1,27 @@
+---
+# /etc/research-gate: root:rgate 0750; config.json root:rgate 0640 (no secrets in it; rgate only reads it).
+# Absent or a real directory before anything is written (Reviewer F: never write through a symlink).
+- name: Config | the config directory is a real directory (before any write)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    research_gate_guard_dirs: ["{{ research_gate_config_dir }}"]
+
+- name: Config | directory
+  ansible.builtin.file:
+    path: "{{ research_gate_config_dir }}"
+    state: directory
+    owner: "{{ research_gate_root_owner }}"
+    group: "{{ research_gate_group }}"
+    mode: "0750"
+
+# Exactly R's keys, with the right types (vars/main.yml research_gate_config_validate: a stdlib check).
+- name: Config | config.json
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ research_gate_config_file }}"
+    owner: "{{ research_gate_root_owner }}"
+    group: "{{ research_gate_group }}"
+    mode: "0640"
+    follow: false
+    validate: "{{ research_gate_config_validate }}"
+  notify: Restart research-gate

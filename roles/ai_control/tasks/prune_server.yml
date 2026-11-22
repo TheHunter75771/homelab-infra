@@ -1,0 +1,23 @@
+---
+# /opt/ai-control/server holds the ai_control package and nothing else (no tests, README, example).
+- name: Server dir | the server dirs are real directories (before the find and prune)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    ai_control_guard_dirs:
+      - "{{ ai_control_server_dir }}"
+      - "{{ ai_control_server_dir }}/ai_control"
+
+- name: Server dir | entries
+  ansible.builtin.find:
+    paths: "{{ ai_control_server_dir }}"
+    file_type: any
+    hidden: true
+  register: ai_control_server_found
+
+- name: Server dir | anything but the package is removed
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ ai_control_server_found.files | map(attribute='path') | reject('equalto', ai_control_server_dir ~ '/ai_control') | sort }}"
+  register: ai_control_server_pruned
+  notify: Restart ai-control

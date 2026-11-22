@@ -1,0 +1,18 @@
+---
+# Order matters: handlers run in this order, so units are reloaded before the server restarts. The briefing oneshot
+# is never started by a converge (its timer starts it; it reads its config at every run).
+- name: Reload systemd for mission-control
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+# Re-applies the guard file (ExecReload = nft -f; it starts the unit if it isn't running). A reload, not a restart:
+# a restart would stop the server too (it requires the guard).
+- name: Reload mission-control guard
+  ansible.builtin.systemd_service:
+    name: "{{ mission_control_guard_unit }}"
+    state: reloaded
+
+- name: Restart mission-control
+  ansible.builtin.systemd_service:
+    name: "{{ mission_control_service }}"
+    state: restarted

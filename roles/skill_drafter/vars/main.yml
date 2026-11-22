@@ -1,0 +1,108 @@
+---
+# Fixed by the contract (§12.19.1) and module K2.
+skill_drafter_user: sdraft
+# §12.19.1: supplementary group rgate (the library mount is uid/gid rgate, dir_mode 0770), never docker. Roles
+# research_gate and ai_library_share own the rgate account; this role only joins its group.
+skill_drafter_library_group: rgate
+skill_drafter_app_dir: /opt/skill-drafter
+skill_drafter_config_dir: /etc/skill-drafter
+skill_drafter_config_file: "{{ skill_drafter_config_dir }}/config.json"
+skill_drafter_service: skill-drafter.service
+skill_drafter_unit_dir: /etc/systemd/system
+skill_drafter_python: /usr/bin/python3
+# Owner/group of the root-owned files sdraft must read (config.json: root:sdraft 0640). The tests override them.
+skill_drafter_root_owner: root
+skill_drafter_group: "{{ skill_drafter_user }}"
+# K2's launcher (it puts its own directory first on sys.path, so it works under `python3 -I`, and finds forge
+# beside it) and the three packages beside it: the only entries kept under /opt/skill-drafter.
+skill_drafter_launcher: "{{ skill_drafter_app_dir }}/skill-drafter"
+skill_drafter_packages: [skill_drafter, forge, library]
+skill_drafter_app_entries: "{{ skill_drafter_packages + ['skill-drafter'] }}"
+# §12.11: the share carries this sentinel. 35-forge/ is the only writable path: K2 writes drafter-log.md and,
+# through forge.draft_skill, skill/, review.md, state.md, previous/<n>/, the forge lock and the library's temp
+# files, all inside 35-forge/<id>/ or 35-forge/ itself. draft_skill never rebuilds INDEX.md (only the forge CLI
+# does, on Noah's side), and 35-forge isn't indexed. It reads 10-sources/ (the ingested texts) and walks the
+# whole root for the cap: read-only (ProtectSystem=strict).
+skill_drafter_sentinel: "{{ skill_drafter_library_root }}/.ai-library-sentinel"
+skill_drafter_forge_dir: "{{ skill_drafter_library_root }}/35-forge"
+# Paths ProtectHome/ProtectSystem hide or make read-only in ways ReadWritePaths can't fix, plus system dirs.
+skill_drafter_library_forbidden_re: '^/(home|root|run|proc|sys|dev|etc|usr|boot|bin|sbin|lib|lib64|opt|var|tmp)(/|$)'
+
+skill_drafter_broker_url: "http://{{ tailnet_ip | default('') }}:{{ skill_drafter_broker_port }}"
+
+# §12.19 / the Lead's K2 decisions: an IP allow for the broker only. Allowed: ai-box's tailnet address (the
+# broker's published address, where the replies come from), the broker's DNAT target ranges, the resolver
+# stub. Everything else is denied.
+skill_drafter_ip_allow: >-
+  {{ [(tailnet_ip | default('')) ~ '/32'] + skill_drafter_broker_ranges + [skill_drafter_dns_stub ~ '/32'] }}
+skill_drafter_ip_deny: [any]
+
+# /etc/skill-drafter/config.json: exactly K2's keys (apps/skill-drafter/skill_drafter/config.py; its loader
+# refuses unknown keys).
+skill_drafter_config: >-
+  {{ {'library_root': skill_drafter_library_root,
+      'broker_url': skill_drafter_broker_url,
+      'model': skill_drafter_model,
+      'poll_interval': skill_drafter_poll_interval | int,
+      'max_source_chars': skill_drafter_max_source_chars | int,
+      'num_ctx': skill_drafter_num_ctx | int,
+      'timeout': skill_drafter_timeout | int,
+      'max_attempts': skill_drafter_max_attempts | int} }}
+
+# config.json's deploy-time check (`validate`; %s is the candidate file): K2's own loader from the installed
+# code. -I -B: nothing from the environment or the working directory, no bytecode in the root-owned install.
+skill_drafter_config_validate: >-
+  {{ skill_drafter_python }} -I -B -c
+  "import sys; sys.path.insert(0, sys.argv[2]); from skill_drafter.config import load; load(sys.argv[1])"
+  %s {{ skill_drafter_app_dir }}
+
+# The unit's [Service] sandbox, one `Key=Value` per entry. The unit template renders exactly these, and the
+# post-start `status` check (tasks/verify.yml) runs under the same list through systemd-run, so it proves the
+# real sandbox (the DNAT and ProcSubset lessons of §12.15/§12.17 were both found live).
+skill_drafter_sandbox:
+  - "User={{ skill_drafter_user }}"
+  - "Group={{ skill_drafter_user }}"
+  - "WorkingDirectory={{ skill_drafter_app_dir }}"
+  - "Environment=AI_LIBRARY_CAP={{ skill_drafter_library_cap }}"
+  - "UMask=0027"
+  - "MemoryMax={{ skill_drafter_memory_max }}"
+  - "TasksMax={{ skill_drafter_tasks_max }}"
+  - "NoNewPrivileges=yes"
+  - "ProtectSystem=strict"
+  - "ProtectHome=yes"
+  - "PrivateTmp=yes"
+  - "ReadOnlyPaths=/run"
+  - "ReadWritePaths={{ skill_drafter_forge_dir }}"
+  - "RestrictAddressFamilies=AF_INET AF_UNIX"
+  - "CapabilityBoundingSet="
+  - "AmbientCapabilities="
+  - "SystemCallFilter=@system-service"
+  - "SystemCallFilter=~@privileged"
+  - "SystemCallErrorNumber=EPERM"
+  - "SystemCallArchitectures=native"
+  - "PrivateDevices=yes"
+  - "PrivateIPC=yes"
+  - "ProtectKernelTunables=yes"
+  - "ProtectKernelModules=yes"
+  - "ProtectKernelLogs=yes"
+  - "ProtectControlGroups=yes"
+  - "ProtectClock=yes"
+  - "ProtectHostname=yes"
+  - "ProtectProc=invisible"
+  - "RestrictNamespaces=yes"
+  - "RestrictRealtime=yes"
+  - "RestrictSUIDSGID=yes"
+  - "LockPersonality=yes"
+  - "MemoryDenyWriteExecute=yes"
+  - "RemoveIPC=yes"
+  - "IPAddressDeny={{ skill_drafter_ip_deny | join(' ') }}"
+  - "IPAddressAllow={{ skill_drafter_ip_allow | join(' ') }}"
+
+# The drafter's command without its subcommand (the unit adds `serve`, the verify `status`).
+skill_drafter_argv:
+  - "{{ skill_drafter_python }}"
+  - -I
+  - -B
+  - "{{ skill_drafter_launcher }}"
+  - --config
+  - "{{ skill_drafter_config_file }}"

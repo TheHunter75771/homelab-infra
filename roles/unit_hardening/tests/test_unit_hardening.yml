@@ -1,0 +1,967 @@
+---
+# Offline test for role unit_hardening (no root, nothing applied to this machine). Run it through tests/run.sh,
+# which builds the synthetic world (make_fixture.py) and puts the fake systemctl (bin/systemctl) in charge:
+#   roles/unit_hardening/tests/run.sh
+#  1. inputs: refusals (shape, names, duplicates, excluded units, settle); an empty list does nothing at all;
+#  2. preflight: refusals (unknown, masked, oneshot with restart, tailscale in the unit file / in an ExecStartPre /
+#     in a helper module two levels into the app / in a shell script, scan over its limit, an unreadable file);
+#  3. a full converge: renders equal tests/expected/ literally; daemon-reload once; try-restart for exactly the
+#     restart-true units; the live verify passes (the fake /proc shows the new MainPIDs hidden);
+#  4. idempotence: a second converge changes nothing (no write, no daemon-reload, no restart);
+#  5. self-heal: a restart-true unit whose process predates its (unchanged) drop-in is restarted, nothing else;
+#  6. retire: a unit moved to unit_hardening_remove loses its drop-in (daemon-reload, no restart); a drop-in left on
+#     an undeclared unit fails the verify;
+#  7. a unit that dies once hardened fails the verify (still-active check);
+#  8. the verify assertions on canned readings (one per failure mode, plus the cases that must pass);
+#  Q6-1: root units get PrivatePIDs=yes (and SYSTEMCTL_FORCE_BUS=1 where declared); a root unit that can't take it
+#     (Type=forking, systemctl without the bus, pgrep in an ExecStartPre) is refused; DynamicUser is refused;
+#  Q6-3: a process of a hardened unit's uid that still sees the socket fails the verify (same-uid sweep);
+#  Q6-4: Ollama is not restarted while /api/ps shows a loaded model (or can't answer), unless allowed; a converge
+#     that has nothing to restart doesn't ask;
+#  Q8-1: a root unit's /run is a read-only tmpfs holding only its run_allow (refusals: a bad or dangerous run_allow,
+#     run_allow on a non-root unit, the bus without the bus in run_allow, a root unit binding more of /run); a root
+#     unit keeping the system bus is labelled ADVISORY.
+#  Read-only tasks run in check mode too (check_mode: false); the verify is skipped there.
+- name: Role unit_hardening hides tailscaled's socket from declared units, and proves it
+  hosts: localhost
+  gather_facts: false
+  vars:
+    ansible_managed: Ansible managed
+    test_tmp: ""   # run.sh passes its scratch dir
+    test_here: "{{ playbook_dir }}"
+    uh_test_log: "{{ test_tmp }}/systemctl.log"
+    uh_test_root: "{{ test_tmp }}/host"
+    test_ps_port: 0   # run.sh serves <test_tmp>/www (Ollama's /api/ps) on this port
+    uh_test_good:
+      - {unit: svc-a.service, restart: true}
+      - {unit: svc-b.service, restart: true}
+      - {unit: job.service, restart: false}
+      - {unit: busy-job.service, restart: false}
+      - {unit: off.service, restart: true}
+      - {unit: rootjob.service, restart: false}
+      - {unit: rootsvc.service, restart: true}
+      - {unit: rootctl.service, restart: false, run_allow: [/run/dbus/system_bus_socket, /run/systemd/system]}
+    uh_test_ollama: [{unit: ollama.service, restart: true}]
+    uh_test_via_bus: [rootctl.service]
+    uh_test_busy_urls: {ollama.service: "http://127.0.0.1:{{ test_ps_port }}/api/ps"}
+    uh_test_ps: "{{ test_tmp }}/www/api/ps"
+    # The role's own inputs for every run (the cases in expect_refusal.yml replace them through task vars).
+    unit_hardening_systemctl_via_bus: "{{ uh_test_via_bus }}"
+    unit_hardening_busy_urls: "{{ uh_test_busy_urls }}"
+  tasks:
+    - name: Run.sh passed a scratch dir
+      ansible.builtin.assert:
+        that:
+          - test_tmp is abs
+          - test_ps_port | int > 0
+        fail_msg: Run this through roles/unit_hardening/tests/run.sh.
+        quiet: true
+
+    - name: Point the role at the scratch world and the fakes
+      ansible.builtin.set_fact:
+        unit_hardening_root: "{{ uh_test_root }}"
+        unit_hardening_systemctl: "{{ test_here }}/bin/systemctl"
+        unit_hardening_python: "{{ ansible_playbook_python }}"
+        unit_hardening_proc: "{{ test_tmp }}/proc"
+        unit_hardening_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        unit_hardening_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
+
+    # ---- 1. inputs ---------------------------------------------------------------------------------
+    - name: An empty list does nothing (no host access at all)
+      ansible.builtin.include_role:
+        name: unit_hardening
+      vars:
+        unit_hardening_units: []
+
+    - name: Nothing was written and systemctl was never called
+      ansible.builtin.command:
+        argv: [find, "{{ uh_test_root }}/etc/systemd", "{{ uh_test_root }}/etc/tmpfiles.d", -type, f]
+      register: uh_test_empty_files
+      changed_when: false
+
+    - name: The empty run left no trace
+      ansible.builtin.assert:
+        that:
+          - uh_test_empty_files.stdout_lines | length == 0
+          - lookup('ansible.builtin.pipe', 'cat ' ~ uh_test_log ~ ' 2>/dev/null || true') == ''
+        fail_msg: "files: {{ uh_test_empty_files.stdout_lines }}"
+        quiet: true
+
+    - name: Inputs refuses bad inputs
+      ansible.builtin.include_tasks: expect_refusal.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - name: a string, not a list
+          vars: {unit_hardening_units: "svc-a.service"}
+          task: Inputs | unit_hardening_units is a list of {unit, restart} mappings
+        - name: a mapping, not a list
+          vars: {unit_hardening_units: {unit: svc-a.service, restart: true}}
+          task: Inputs | unit_hardening_units is a list of {unit, restart} mappings
+        - name: a bare name in the list
+          vars: {unit_hardening_units: [svc-a.service]}
+          task: Inputs | unit_hardening_units is a list of {unit, restart} mappings
+        - name: restart missing
+          vars: {unit_hardening_units: [{unit: svc-a.service}]}
+          task: Inputs | unit_hardening_units is a list of {unit, restart} mappings
+        - name: an extra key
+          vars: {unit_hardening_units: [{unit: svc-a.service, restart: true, reason: x}]}
+          task: Inputs | unit_hardening_units is a list of {unit, restart} mappings
+        - name: restart as the string "yes"
+          vars: {unit_hardening_units: [{unit: svc-a.service, restart: "yes"}]}
+          task: Inputs | unit_hardening_units is a list of {unit, restart} mappings
+        - name: unit as a number
+          vars: {unit_hardening_units: [{unit: 5, restart: true}]}
+          task: Inputs | unit_hardening_units is a list of {unit, restart} mappings
+        - name: remove as a string
+          vars: {unit_hardening_remove: "svc-a.service"}
+          task: Inputs | unit_hardening_remove is a list of names
+        - name: a socket unit
+          vars: {unit_hardening_units: [{unit: forge.socket, restart: true}]}
+          task: Inputs | every name is a plain .service unit (no template, instance, socket or timer)
+        - name: a timer unit
+          vars: {unit_hardening_units: [{unit: job.timer, restart: false}]}
+          task: Inputs | every name is a plain .service unit (no template, instance, socket or timer)
+        - name: a template unit
+          vars: {unit_hardening_units: [{unit: helper@.service, restart: false}]}
+          task: Inputs | every name is a plain .service unit (no template, instance, socket or timer)
+        - name: a template instance
+          vars: {unit_hardening_units: [{unit: helper@1.service, restart: false}]}
+          task: Inputs | every name is a plain .service unit (no template, instance, socket or timer)
+        - name: a path, not a name
+          vars: {unit_hardening_units: [{unit: ../x.service, restart: false}]}
+          task: Inputs | every name is a plain .service unit (no template, instance, socket or timer)
+        - name: a name without the suffix
+          vars: {unit_hardening_units: [{unit: svc-a, restart: true}]}
+          task: Inputs | every name is a plain .service unit (no template, instance, socket or timer)
+        - name: a bad name in remove
+          vars: {unit_hardening_remove: [svc-a.socket]}
+          task: Inputs | every name is a plain .service unit (no template, instance, socket or timer)
+        - name: a unit listed twice
+          vars: {unit_hardening_units: [{unit: svc-a.service, restart: true}, {unit: svc-a.service, restart: false}]}
+          task: Inputs | no unit is listed twice, or both hardened and removed
+        - name: a unit both hardened and removed
+          vars: {unit_hardening_units: [{unit: svc-a.service, restart: true}], unit_hardening_remove: [svc-a.service]}
+          task: Inputs | no unit is listed twice, or both hardened and removed
+        - name: tailscaled itself
+          vars: {unit_hardening_units: [{unit: tailscaled.service, restart: false}]}
+          task: Inputs | no excluded unit is listed (it needs tailscaled's socket, or its own role hides /run)
+        - name: the heartbeat (runs tailscale ping)
+          vars: {unit_hardening_units: [{unit: svc-a.service, restart: true}, {unit: homelab-heartbeat.service, restart: true}]}
+          task: Inputs | no excluded unit is listed (it needs tailscaled's socket, or its own role hides /run)
+        - name: settle not a number
+          vars: {unit_hardening_verify_settle: "5s"}
+          task: Inputs | the verify's settle time is a whole number of seconds (0 to 60)
+        - name: settle too long
+          vars: {unit_hardening_verify_settle: 61}
+          task: Inputs | the verify's settle time is a whole number of seconds (0 to 60)
+        - name: run_allow as a string
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: /run/dbus/system_bus_socket}]}
+          task: Inputs | each run_allow is a list of plain paths under /run, none that hands out root (Q8-1)
+        - name: run_allow with tailscaled's socket
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: [/run/tailscale/tailscaled.sock]}]}
+          task: Inputs | each run_allow is a list of plain paths under /run, none that hands out root (Q8-1)
+        - name: run_allow with docker.sock
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: [/run/docker.sock]}]}
+          task: Inputs | each run_allow is a list of plain paths under /run, none that hands out root (Q8-1)
+        - name: run_allow with systemd's private socket
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: [/run/systemd/private]}]}
+          task: Inputs | each run_allow is a list of plain paths under /run, none that hands out root (Q8-1)
+        - name: run_allow with a systemd varlink socket
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: [/run/systemd/io.systemd.Manager]}]}
+          task: Inputs | each run_allow is a list of plain paths under /run, none that hands out root (Q8-1)
+        - name: run_allow with a user's runtime dir
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: [/run/user/4242/bus]}]}
+          task: Inputs | each run_allow is a list of plain paths under /run, none that hands out root (Q8-1)
+        - name: run_allow with all of /run
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: [/run]}]}
+          task: Inputs | each run_allow is a list of plain paths under /run, none that hands out root (Q8-1)
+        - name: run_allow climbing out with ..
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: [/run/../etc/shadow]}]}
+          task: Inputs | each run_allow is a list of plain paths under /run, none that hands out root (Q8-1)
+        - name: run_allow outside /run
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: [/var/lib/x.sock]}]}
+          task: Inputs | each run_allow is a list of plain paths under /run, none that hands out root (Q8-1)
+        # Q9-1
+        - name: run_allow with /run/systemd (above private and the varlink sockets)
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: [/run/systemd]}]}
+          task: Inputs | each run_allow is a list of plain paths under /run, none that hands out root (Q8-1)
+        - name: run_allow with snapd's socket
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: [/run/snapd.socket]}]}
+          task: Inputs | each run_allow is a list of plain paths under /run, none that hands out root (Q8-1)
+        - name: run_allow with snapd's snap socket
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: [/run/snapd-snap.socket]}]}
+          task: Inputs | each run_allow is a list of plain paths under /run, none that hands out root (Q8-1)
+        - name: run_allow with something under /run/snapd
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: [/run/snapd/ns]}]}
+          task: Inputs | each run_allow is a list of plain paths under /run, none that hands out root (Q8-1)
+        - name: run_allow with /run/credentials
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: [/run/credentials]}]}
+          task: Inputs | each run_allow is a list of plain paths under /run, none that hands out root (Q8-1)
+        - name: run_allow with another unit's credentials
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: [/run/credentials/x.service]}]}
+          task: Inputs | each run_allow is a list of plain paths under /run, none that hands out root (Q8-1)
+        - name: run_allow with udev's control socket
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: [/run/udev/control]}]}
+          task: Inputs | each run_allow is a list of plain paths under /run, none that hands out root (Q8-1)
+        - name: run_allow with /run/udev (above udev's control socket)
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: [/run/udev]}]}
+          task: Inputs | each run_allow is a list of plain paths under /run, none that hands out root (Q8-1)
+        - name: run_allow with a deny word in another case
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: [/run/Podman.sock]}]}
+          task: Inputs | each run_allow is a list of plain paths under /run, none that hands out root (Q8-1)
+        - name: run_allow with a trailing newline
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: ["/run/dbus/system_bus_socket\n"]}]}
+          task: Inputs | each run_allow is a list of plain paths under /run, none that hands out root (Q8-1)
+        # Q10-1
+        - name: run_allow with /run/dbus (the directory above the bus socket)
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: [/run/dbus]}]}
+          task: Inputs | the system bus is allowed only as its socket path, never a directory above it
+        - name: via_bus as a string
+          vars: {unit_hardening_systemctl_via_bus: rootctl.service}
+          task: Inputs | unit_hardening_systemctl_via_bus is a list of names
+        - name: allow_busy_restart as a string
+          vars: {unit_hardening_allow_busy_restart: "true"}
+          task: Inputs | the busy check is set up (Q6-4)
+        - name: busy URLs as a list
+          vars: {unit_hardening_busy_urls: [http://127.0.0.1:1/api/ps]}
+          task: Inputs | the busy check is set up (Q6-4)
+        - name: ollama restart true without a busy URL
+          vars: {unit_hardening_units: [{unit: ollama.service, restart: true}], unit_hardening_busy_urls: {}}
+          task: Inputs | a restart-true unit that can be busy has a busy-check URL (Ollama's /api/ps)
+        - name: ollama restart true with the tailnet IP missing from the URL
+          vars: {unit_hardening_units: [{unit: ollama.service, restart: true}], unit_hardening_busy_urls: {ollama.service: "http://:11434/api/ps"}}
+          task: Inputs | a restart-true unit that can be busy has a busy-check URL (Ollama's /api/ps)
+
+    # ---- 2. preflight ------------------------------------------------------------------------------
+    - name: Preflight refuses units it can't vouch for
+      ansible.builtin.include_tasks: expect_refusal.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - name: an unknown unit
+          vars: {unit_hardening_units: [{unit: svc-a.service, restart: true}, {unit: nosuch.service, restart: true}]}
+          task: Preflight | every unit is known to systemd (systemctl cat finds it)
+        - name: a masked unit
+          vars: {unit_hardening_units: [{unit: masked.service, restart: false}]}
+          task: Preflight | every unit is loaded (not masked, not a broken unit file)
+        - name: a oneshot with restart true
+          vars: {unit_hardening_units: [{unit: oneshot-restart.service, restart: true}]}
+          task: Preflight | restart is false for every oneshot (the role never forces a run)
+        - name: a unit that binds tailscaled.sock into its sandbox
+          vars: {unit_hardening_units: [{unit: svc-a.service, restart: true}, {unit: ts-bind.service, restart: true}]}
+          task: Preflight | no unit's own directives use tailscaled's socket
+        - name: a unit whose ExecStartPre runs the tailscale CLI
+          vars: {unit_hardening_units: [{unit: ts-pre.service, restart: true}]}
+          task: Preflight | no unit's own directives use tailscaled's socket
+        - name: a unit whose app calls tailscale ip in a helper module
+          vars: {unit_hardening_units: [{unit: svc-a.service, restart: true}, {unit: ts-cli.service, restart: true}]}
+          task: Preflight | nothing the units run uses tailscaled's socket
+        - name: a unit whose shell script curls the local API
+          vars: {unit_hardening_units: [{unit: ts-sock.service, restart: true}]}
+          task: Preflight | nothing the units run uses tailscaled's socket
+        - name: an app too big to scan within the limit
+          vars: {unit_hardening_units: [{unit: big.service, restart: false}], unit_hardening_scan_max_files: 5}
+          task: Preflight | the scan read everything it named, within its limits
+        - name: an app with an unreadable file
+          vars: {unit_hardening_units: [{unit: locked.service, restart: false}]}
+          task: Preflight | the scan read everything it named, within its limits
+        - name: a DynamicUser unit
+          vars: {unit_hardening_units: [{unit: dyn.service, restart: false}]}
+          task: Preflight | no unit uses DynamicUser (its uid changes per run; the same-uid sweep can't follow it)
+        - name: a root unit whose code calls systemctl, without the bus
+          vars: {unit_hardening_units: [{unit: rootjob.service, restart: false}, {unit: rootctl.service, restart: false}], unit_hardening_systemctl_via_bus: []}
+          task: Preflight | every root unit can run in its own PID namespace (PrivatePIDs=yes)
+        - name: a root Type=forking unit
+          vars: {unit_hardening_units: [{unit: rootfork.service, restart: false}]}
+          task: Preflight | every root unit can run in its own PID namespace (PrivatePIDs=yes)
+        - name: a root unit with pgrep in an ExecStartPre (the bus doesn't excuse it)
+          vars: {unit_hardening_units: [{unit: rootpgrep.service, restart: false}], unit_hardening_systemctl_via_bus: [rootpgrep.service]}
+          task: Preflight | every root unit can run in its own PID namespace (PrivatePIDs=yes)
+        - name: run_allow on a non-root unit
+          vars: {unit_hardening_units: [{unit: svc-a.service, restart: true, run_allow: [/run/dbus/system_bus_socket]}]}
+          task: Preflight | run_allow is only for root units (non-root units keep the InaccessiblePaths hiding)
+        - name: systemctl over the bus without the bus in run_allow
+          vars: {unit_hardening_units: [{unit: rootctl.service, restart: false, run_allow: [/run/dbus/system_bus_socket]}]}
+          task: Preflight | a root unit whose systemctl uses the bus has the bus in its run_allow
+        - name: a root unit binding docker.sock itself
+          vars: {unit_hardening_units: [{unit: rootbind.service, restart: false}]}
+          task: Preflight | no root unit binds anything else from /run (only its run_allow)
+        - name: via_bus on a non-root unit
+          vars: {unit_hardening_units: [{unit: svc-a.service, restart: true}], unit_hardening_systemctl_via_bus: [svc-a.service]}
+          task: Preflight | unit_hardening_systemctl_via_bus names root units only (among the declared ones)
+
+    - name: Preflight never wrote or restarted anything
+      ansible.builtin.assert:
+        that:
+          - lookup('ansible.builtin.pipe', 'grep -cE "^(daemon-reload|try-restart)" ' ~ uh_test_log ~ ' || true') == '0'
+          - lookup('ansible.builtin.pipe', 'find ' ~ uh_test_root ~ '/etc/systemd ' ~ uh_test_root ~ '/etc/tmpfiles.d -type f | wc -l') == '0'
+        quiet: true
+
+    - name: The preflight passes on the good set, and saw the right exec paths
+      ansible.builtin.include_role:
+        name: unit_hardening
+        tasks_from: preflight
+      vars:
+        unit_hardening_units: "{{ uh_test_good }}"
+
+    - name: Exec paths, scan coverage, and the unit-file scan's view
+      ansible.builtin.assert:
+        that:
+          # Prefixes (!!, -) stripped, the continuation joined, --config=/path split, EnvironmentFile kept.
+          - >-
+            uh_pre['svc-b.service'].paths == ['/bin/true', '/usr/bin/python3', test_tmp ~ '/opt/clean-app/clean-app',
+            test_tmp ~ '/etc/clean-app/config.json', test_tmp ~ '/etc/clean-app/env']
+          - uh_pre['svc-a.service'].paths[1] == test_tmp ~ '/opt/clean-app/clean-app'
+          # The app dir was walked (both clean-app files), the data dir argument was not.
+          - (test_tmp ~ '/opt/clean-app') in uh_scan['svc-a.service'].walked
+          - uh_scan['svc-a.service'].scanned >= 4
+          - uh_scan['job.service'].skipped | join(' ') is search('/data/volume[:] directory argument')
+          - uh_scan['svc-b.service'].skipped | join(' ') is search('/etc/clean-app/env[:] missing')
+          # Ordering on tailscaled and IP_FREEBIND comments are not "uses".
+          - uh_pre | dict2items | selectattr('value.uses') | list | length == 0
+          # Root: empty User= and User=root; not root: a named user. Only rootctl's code calls systemctl.
+          - uh_pre | dict2items | selectattr('value.root') | map(attribute='key') | sort == ['rootctl.service', 'rootjob.service', 'rootsvc.service']
+          - uh_pre['rootctl.service'].via_bus and not uh_pre['rootjob.service'].via_bus
+          - uh_scan['rootctl.service'].hits.pidns | map(attribute='matches') | flatten == ['systemctl']
+          - uh_scan['rootjob.service'].hits.pidns == []
+          # Q8-1: advisory reasons (root + system bus; root + CAP_SYS_ADMIN), empty for the others.
+          - uh_pre['rootctl.service'].advisory == 'root + system bus, root + CAP_SYS_ADMIN'
+          - uh_pre['rootjob.service'].advisory == '' and uh_pre['svc-a.service'].advisory == ''
+        quiet: true
+
+    - name: A root unit with CAP_SYS_ADMIN but no bus is advisory for that alone
+      ansible.builtin.include_role:
+        name: unit_hardening
+        tasks_from: preflight
+      vars:
+        unit_hardening_units: [{unit: rootcap.service, restart: false}]
+
+    - name: Its advisory reason
+      ansible.builtin.assert:
+        that: uh_pre['rootcap.service'].advisory == 'root + CAP_SYS_ADMIN'
+        fail_msg: "{{ uh_pre['rootcap.service'] | to_json }}"
+        quiet: true
+
+    # Q10-1: the inputs refuse /run/dbus, but should one get past them, the preflight still labels the unit advisory
+    # (an entry at or above the bus socket hands out the bus).
+    - name: A root unit allowed /run/dbus (preflight only, past the inputs) is labelled advisory
+      ansible.builtin.include_role:
+        name: unit_hardening
+        tasks_from: preflight
+      vars:
+        unit_hardening_units: [{unit: rootjob.service, restart: false, run_allow: [/run/dbus]}]
+
+    - name: The directory above the bus counts as the bus
+      ansible.builtin.assert:
+        that: uh_pre['rootjob.service'].advisory == 'root + system bus'
+        fail_msg: "{{ uh_pre['rootjob.service'] | to_json }}"
+        quiet: true
+
+    # ---- 3. a full converge ------------------------------------------------------------------------
+    - name: Converge 1
+      ansible.builtin.include_role:
+        name: unit_hardening
+      vars:
+        unit_hardening_units: "{{ uh_test_good }}"
+        unit_hardening_verify_settle: 0
+
+    - name: The renders equal tests/expected/ literally
+      vars:
+        uh_expected: >-
+          {{ '50-no-tailscaled.root-bus.conf' if item == 'rootctl.service' else '50-no-tailscaled.root.conf'
+             if item.startswith('root') else '50-no-tailscaled.conf' }}
+      ansible.builtin.assert:
+        that:
+          - >-
+            lookup('ansible.builtin.file', uh_test_root ~ '/etc/systemd/system/' ~ item ~ '.d/50-no-tailscaled.conf')
+            == lookup('ansible.builtin.file', test_here ~ '/expected/' ~ uh_expected)
+        quiet: true
+      loop: "{{ uh_test_good | map(attribute='unit') | list }}"
+
+    - name: Tailscaled's drop-in and the tmpfiles entry equal tests/expected/ literally
+      ansible.builtin.assert:
+        that:
+          - >-
+            lookup('ansible.builtin.file', uh_test_root ~ '/etc/systemd/system/tailscaled.service.d/50-unit-hardening-keep-rundir.conf')
+            == lookup('ansible.builtin.file', test_here ~ '/expected/50-unit-hardening-keep-rundir.conf')
+          - >-
+            lookup('ansible.builtin.file', uh_test_root ~ '/etc/tmpfiles.d/unit-hardening-tailscale.conf')
+            == lookup('ansible.builtin.file', test_here ~ '/expected/unit-hardening-tailscale.conf')
+          # Nothing else under the unit dir: one drop-in per declared unit, plus tailscaled's.
+          - >-
+            lookup('ansible.builtin.pipe', 'cd ' ~ uh_test_root ~ '/etc/systemd/system && find . -type f | sort').split()
+            == ['./busy-job.service.d/50-no-tailscaled.conf', './job.service.d/50-no-tailscaled.conf',
+                './off.service.d/50-no-tailscaled.conf', './rootctl.service.d/50-no-tailscaled.conf',
+                './rootjob.service.d/50-no-tailscaled.conf', './rootsvc.service.d/50-no-tailscaled.conf',
+                './svc-a.service.d/50-no-tailscaled.conf', './svc-b.service.d/50-no-tailscaled.conf',
+                './tailscaled.service.d/50-unit-hardening-keep-rundir.conf']
+        quiet: true
+
+    - name: Converge 1 called daemon-reload once, then try-restart for exactly the restart-true units
+      vars:
+        uh_calls: "{{ lookup('ansible.builtin.file', uh_test_log).splitlines() | select('match', '^(daemon-reload|try-restart)') | list }}"
+      ansible.builtin.assert:
+        that: >-
+          uh_calls == ['daemon-reload', 'try-restart svc-a.service', 'try-restart svc-b.service',
+          'try-restart off.service', 'try-restart rootsvc.service']
+        fail_msg: "{{ uh_calls }}"
+        quiet: true
+
+    - name: Converge 1's live verify saw new hidden MainPIDs, and the oneshot mid-run as in flight
+      ansible.builtin.assert:
+        that:
+          - uh_v.units[0].probe.pid >= 5000 and uh_v.units[0].probe.socket == 'absent' and uh_v.units[0].probe.mounted
+          - uh_v.units[1].probe.pid >= 5000 and uh_v.units[1].probe.socket == 'absent'
+          - uh_v.units[3].probe.pid == 1003 and uh_v.units[3].probe.socket == 'present'
+          - uh_v.units[4].probe.pid == 0
+          - uh_v.tailscaled.RuntimeDirectoryPreserve == 'yes'
+          # Q6-1: the root service restarted into its own PID namespace; the root oneshots are configured for it.
+          - uh_v.units[6].probe.own_pidns and uh_v.units[6].s2.PrivatePIDs == 'yes'
+          - uh_v.units[5].s2.PrivatePIDs == 'yes' and uh_v.units[7].s2.PrivatePIDs == 'yes'
+          - uh_v.units[0].s2.PrivatePIDs == 'no' and not uh_v.units[0].probe.own_pidns
+          - "'SYSTEMCTL_FORCE_BUS=1' in uh_v.units[7].s2.Environment"
+          # Q8-1: root units' /run is a read-only tmpfs; the restarted root service's /run holds nothing; the root unit
+          # on the bus has exactly the bus and /run/systemd/system bound, and is labelled advisory.
+          - uh_v.units[5].s2.TemporaryFileSystem == '/run:ro' and uh_v.units[6].s2.TemporaryFileSystem == '/run:ro'
+          - uh_v.units[6].probe.run_extra == [] and not uh_v.units[6].probe.run_truncated
+          - uh_v.units[0].s2.TemporaryFileSystem == '' and uh_v.units[0].probe.run_extra is not defined
+          - >-
+            uh_v.units[7].s2.BindReadOnlyPaths == '/run/dbus/system_bus_socket:/run/dbus/system_bus_socket:rbind
+            /run/systemd/system:/run/systemd/system:rbind'
+          - uh_protection['rootctl.service'] == 'advisory (root + system bus, root + CAP_SYS_ADMIN)'
+          - uh_protection['rootjob.service'] == 'protected' and uh_protection['rootsvc.service'] == 'protected'
+          - uh_protection['svc-a.service'] == 'protected'
+          # Q6-3: the sweep covered every non-root user; svca's only process is svc-a's new, hidden one.
+          - uh_v.sweep.keys() | sort == ['busyu', 'jobu', 'offu', 'svca', 'svcb']
+          - uh_v.sweep.svca.procs | map(attribute='pid') | list == [uh_v.units[0].probe.pid]
+          - uh_v.sweep.busyu.procs[0].socket == 'present'
+        fail_msg: "{{ uh_v | to_json }}"
+        quiet: true
+
+    # ---- 4. idempotence ----------------------------------------------------------------------------
+    - name: Mark the log
+      ansible.builtin.shell:
+        cmd: echo '-- converge 2' >> "{{ uh_test_log }}"
+      changed_when: false
+
+    - name: Converge 2
+      ansible.builtin.include_role:
+        name: unit_hardening
+      vars:
+        unit_hardening_units: "{{ uh_test_good }}"
+        unit_hardening_verify_settle: 0
+
+    - name: Converge 2 changed nothing (no write, no daemon-reload, no restart)
+      vars:
+        uh_after: "{{ (lookup('ansible.builtin.file', uh_test_log).split('-- converge 2'))[-1].splitlines() }}"
+      ansible.builtin.assert:
+        that:
+          - uh_dropins is not changed
+          - uh_tailscaled_dropin is not changed
+          - uh_removed is not changed
+          - uh_after | select('match', '^(daemon-reload|try-restart)') | list | length == 0
+        fail_msg: "{{ uh_after | select('match', '^(daemon-reload|try-restart)') | list }}"
+        quiet: true
+
+    # ---- 5. self-heal ------------------------------------------------------------------------------
+    - name: Svc-b's process predates its drop-in (a run stopped between the write and the restart)
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          python3 "{{ test_here }}/fake_proc.py" "{{ test_tmp }}" stale svc-b.service 1900
+          echo '-- converge 3' >> "{{ uh_test_log }}"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Converge 3
+      ansible.builtin.include_role:
+        name: unit_hardening
+      vars:
+        unit_hardening_units: "{{ uh_test_good }}"
+        unit_hardening_verify_settle: 0
+
+    - name: Converge 3 restarted only svc-b, without a daemon-reload
+      vars:
+        uh_after: "{{ (lookup('ansible.builtin.file', uh_test_log).split('-- converge 3'))[-1].splitlines() }}"
+      ansible.builtin.assert:
+        that:
+          - uh_after | select('match', '^(daemon-reload|try-restart)') | list == ['try-restart svc-b.service']
+          - uh_dropins is not changed
+        fail_msg: "{{ uh_after | select('match', '^(daemon-reload|try-restart)') | list }}"
+        quiet: true
+
+    # ---- Q6-3: the same-uid sweep -------------------------------------------------------------------
+    - name: A shell running as svca that still sees the socket
+      ansible.builtin.command:
+        argv: [python3, "{{ test_here }}/fake_proc.py", "{{ test_tmp }}", stray, svca, "777"]
+      changed_when: true
+
+    - name: The sweep fails the verify on it
+      ansible.builtin.include_tasks: expect_refusal.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - name: a stray svca process outside any unit sees the socket
+          vars: {}
+          task: Verify | every process of each hardened non-root unit's user hides the socket (same-uid sweep; Q6-3)
+
+    - name: The stray shell exits
+      ansible.builtin.command:
+        argv: [python3, "{{ test_here }}/fake_proc.py", "{{ test_tmp }}", remove, "777"]
+      changed_when: true
+
+    # ---- Q6-4: Ollama is not restarted while busy ----------------------------------------------------
+    - name: Ollama has a model loaded
+      ansible.builtin.copy:
+        content: '{"models": [{"name": "qwen-test:7b", "size_vram": 1}]}'
+        dest: "{{ uh_test_ps }}"
+        mode: "0644"
+
+    - name: A busy (or silent) Ollama is not restarted
+      ansible.builtin.include_tasks: expect_refusal.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - name: ollama would be restarted with a model loaded
+          vars: {unit_hardening_units: "{{ uh_test_good + uh_test_ollama }}"}
+          task: Preflight | no busy unit would be restarted (Ollama /api/ps shows no loaded model)
+        - name: ollama would be restarted and /api/ps doesn't answer
+          vars: {unit_hardening_units: "{{ uh_test_good + uh_test_ollama }}", unit_hardening_busy_urls: {ollama.service: "http://127.0.0.1:1/api/ps"}}
+          task: Preflight | no busy unit would be restarted (Ollama /api/ps shows no loaded model)
+
+    - name: The refusals wrote nothing for Ollama (the would-change render is check mode)
+      ansible.builtin.assert:
+        that: not (uh_test_root ~ '/etc/systemd/system/ollama.service.d/50-no-tailscaled.conf') is exists
+        quiet: true
+
+    - name: Mark the log
+      ansible.builtin.shell:
+        cmd: echo '-- converge busy-allowed' >> "{{ uh_test_log }}"
+      changed_when: false
+
+    - name: Converge with unit_hardening_allow_busy_restart restarts Ollama anyway
+      ansible.builtin.include_role:
+        name: unit_hardening
+      vars:
+        unit_hardening_units: "{{ uh_test_good + uh_test_ollama }}"
+        unit_hardening_allow_busy_restart: true
+        unit_hardening_verify_settle: 0
+
+    - name: Only Ollama was restarted
+      vars:
+        uh_after: "{{ (lookup('ansible.builtin.file', uh_test_log).split('-- converge busy-allowed'))[-1].splitlines() }}"
+      ansible.builtin.assert:
+        that: uh_after | select('match', '^(daemon-reload|try-restart)') | list == ['daemon-reload', 'try-restart ollama.service']
+        fail_msg: "{{ uh_after | select('match', '^(daemon-reload|try-restart)') | list }}"
+        quiet: true
+
+    - name: Mark the log
+      ansible.builtin.shell:
+        cmd: echo '-- converge busy-idempotent' >> "{{ uh_test_log }}"
+      changed_when: false
+
+    - name: Converge while Ollama is busy and hardened already (nothing to restart, so nothing to ask)
+      ansible.builtin.include_role:
+        name: unit_hardening
+      vars:
+        unit_hardening_units: "{{ uh_test_good + uh_test_ollama }}"
+        unit_hardening_verify_settle: 0
+
+    - name: It passed without asking /api/ps or restarting
+      vars:
+        uh_after: "{{ (lookup('ansible.builtin.file', uh_test_log).split('-- converge busy-idempotent'))[-1].splitlines() }}"
+      ansible.builtin.assert:
+        that:
+          - uh_busy.results | rejectattr('skipped', 'defined') | list | length == 0
+          - uh_after | select('match', '^(daemon-reload|try-restart)') | list | length == 0
+        quiet: true
+
+    - name: Ollama goes idle, and its process predates the drop-in again
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          printf '{"models": []}' > "{{ uh_test_ps }}"
+          python3 "{{ test_here }}/fake_proc.py" "{{ test_tmp }}" stale ollama.service 1950
+          echo '-- converge idle' >> "{{ uh_test_log }}"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Converge with Ollama idle
+      ansible.builtin.include_role:
+        name: unit_hardening
+      vars:
+        unit_hardening_units: "{{ uh_test_good + uh_test_ollama }}"
+        unit_hardening_verify_settle: 0
+
+    - name: An idle Ollama was asked, then restarted without the override
+      vars:
+        uh_after: "{{ (lookup('ansible.builtin.file', uh_test_log).split('-- converge idle'))[-1].splitlines() }}"
+      ansible.builtin.assert:
+        that:
+          - uh_busy.results | selectattr('status', 'defined') | map(attribute='status') | list == [200]
+          - uh_after | select('match', '^(daemon-reload|try-restart)') | list == ['try-restart ollama.service']
+        fail_msg: "{{ uh_after | select('match', '^(daemon-reload|try-restart)') | list }}"
+        quiet: true
+
+    # ---- 6. retire, then a stray -------------------------------------------------------------------
+    - name: Mark the log
+      ansible.builtin.shell:
+        cmd: echo '-- converge 4' >> "{{ uh_test_log }}"
+      changed_when: false
+
+    - name: Converge 4 retires off.service
+      ansible.builtin.include_role:
+        name: unit_hardening
+      vars:
+        unit_hardening_units: "{{ (uh_test_good + uh_test_ollama) | rejectattr('unit', 'equalto', 'off.service') | list }}"
+        unit_hardening_remove: [off.service]
+        unit_hardening_verify_settle: 0
+
+    - name: Off.service lost its drop-in; one daemon-reload, no restart
+      vars:
+        uh_after: "{{ (lookup('ansible.builtin.file', uh_test_log).split('-- converge 4'))[-1].splitlines() }}"
+      ansible.builtin.assert:
+        that:
+          - not (uh_test_root ~ '/etc/systemd/system/off.service.d/50-no-tailscaled.conf') is exists
+          - uh_removed is changed
+          - uh_after | select('match', '^(daemon-reload|try-restart)') | list == ['daemon-reload']
+        fail_msg: "{{ uh_after | select('match', '^(daemon-reload|try-restart)') | list }}"
+        quiet: true
+
+    - name: A drop-in left on an undeclared unit fails the verify
+      ansible.builtin.include_tasks: expect_refusal.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - name: off.service dropped from the list without unit_hardening_remove
+          vars: {unit_hardening_units: [{unit: svc-a.service, restart: true}]}
+          task: Verify | this role's drop-in is on declared units only
+
+    # ---- 7. a unit that dies once hardened ---------------------------------------------------------
+    - name: A unit that dies once hardened fails the verify
+      ansible.builtin.include_tasks: expect_refusal.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - name: fragile.service fails after its restart
+          vars: {unit_hardening_units: "{{ uh_test_good + uh_test_ollama + [{'unit': 'fragile.service', 'restart': true}] }}"}
+          task: Verify | every unit that was active before the change is still active (both reads)
+
+    # ---- 8. the verify assertions on canned readings -------------------------------------------------
+    - name: The canned baseline (svc-a running and hidden; job idle; busy-job mid-run; root service and root oneshot)
+      ansible.builtin.set_fact:
+        uh_test_v_units:
+          - {unit: svc-a.service, restart: true}
+          - {unit: job.service, restart: false}
+          - {unit: busy-job.service, restart: false}
+          - {unit: rootsvc.service, restart: true}
+          - {unit: rootctl.service, restart: false, run_allow: [/run/dbus/system_bus_socket, /run/systemd/system]}
+        uh_test_v_good:
+          units:
+            - unit: svc-a.service
+              restart: true
+              root: false
+              via_bus: false
+              user: svca
+              run_allow: []
+              advisory: ""
+              pre: {LoadState: loaded, ActiveState: active, SubState: running, Type: exec, MainPID: "1001"}
+              s1: &uh_s_run
+                LoadState: loaded
+                ActiveState: active
+                SubState: running
+                Type: exec
+                MainPID: "5000"
+                NRestarts: "0"
+                DropInPaths: /usr/lib/systemd/system/service.d/10-timeout-abort.conf /etc/systemd/system/svc-a.service.d/50-no-tailscaled.conf
+                InaccessiblePaths: -/run/tailscale -/var/run/tailscale
+                PrivatePIDs: "no"
+                Environment: ""
+              s2: *uh_s_run
+              probe: {pid: 5000, root_ok: true, dir_present: true, socket: absent, mounted: true, own_pidns: false, error: ""}
+            - unit: job.service
+              restart: false
+              root: false
+              via_bus: false
+              user: jobu
+              run_allow: []
+              advisory: ""
+              pre: {LoadState: loaded, ActiveState: inactive, SubState: dead, Type: oneshot, MainPID: "0"}
+              s1: &uh_s_job
+                LoadState: loaded
+                ActiveState: inactive
+                SubState: dead
+                Type: oneshot
+                MainPID: "0"
+                NRestarts: "0"
+                DropInPaths: /etc/systemd/system/job.service.d/50-no-tailscaled.conf
+                InaccessiblePaths: -/run/tailscale -/var/run/tailscale
+              s2: *uh_s_job
+              probe: {pid: 0, root_ok: false, dir_present: false, socket: "unknown: not read", mounted: false, error: no process}
+            - unit: busy-job.service
+              restart: false
+              root: false
+              via_bus: false
+              user: busyu
+              run_allow: []
+              advisory: ""
+              pre: {LoadState: loaded, ActiveState: activating, SubState: start, Type: oneshot, MainPID: "1003"}
+              s1: &uh_s_busy
+                LoadState: loaded
+                ActiveState: activating
+                SubState: start
+                Type: oneshot
+                MainPID: "1003"
+                NRestarts: "0"
+                DropInPaths: /etc/systemd/system/busy-job.service.d/50-no-tailscaled.conf
+                InaccessiblePaths: -/run/tailscale -/var/run/tailscale
+              s2: *uh_s_busy
+              probe: {pid: 1003, root_ok: true, dir_present: true, socket: present, mounted: false, own_pidns: false, error: ""}
+            - unit: rootsvc.service
+              restart: true
+              root: true
+              via_bus: false
+              user: root
+              run_allow: []
+              advisory: ""
+              pre: {LoadState: loaded, ActiveState: active, SubState: running, Type: exec, MainPID: "1401"}
+              s1: &uh_s_rootsvc
+                LoadState: loaded
+                ActiveState: active
+                SubState: running
+                Type: exec
+                MainPID: "5003"
+                NRestarts: "0"
+                DropInPaths: /etc/systemd/system/rootsvc.service.d/50-no-tailscaled.conf
+                InaccessiblePaths: -/run/tailscale -/var/run/tailscale
+                PrivatePIDs: "yes"
+                Environment: ""
+                TemporaryFileSystem: /run:ro
+                BindPaths: ""
+                BindReadOnlyPaths: ""
+              s2: *uh_s_rootsvc
+              probe: {pid: 5003, root_ok: true, dir_present: false, socket: absent, mounted: false, own_pidns: true, error: "",
+                      run_extra: [], run_truncated: false}
+            - unit: rootctl.service
+              restart: false
+              root: true
+              via_bus: true
+              user: ""
+              run_allow: [/run/dbus/system_bus_socket, /run/systemd/system]
+              advisory: root + system bus
+              pre: {LoadState: loaded, ActiveState: inactive, SubState: dead, Type: oneshot, MainPID: "0"}
+              s1: &uh_s_rootctl
+                LoadState: loaded
+                ActiveState: inactive
+                SubState: dead
+                Type: oneshot
+                MainPID: "0"
+                NRestarts: "0"
+                DropInPaths: /etc/systemd/system/rootctl.service.d/50-no-tailscaled.conf
+                InaccessiblePaths: -/run/tailscale -/var/run/tailscale
+                PrivatePIDs: "yes"
+                Environment: SYSTEMCTL_FORCE_BUS=1
+                TemporaryFileSystem: /run:ro
+                BindPaths: ""
+                BindReadOnlyPaths: /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:rbind /run/systemd/system:/run/systemd/system:rbind
+              s2: *uh_s_rootctl
+              probe: {pid: 0, root_ok: false, dir_present: false, socket: "unknown: not read", mounted: false, own_pidns: false, error: no process}
+          tailscaled:
+            LoadState: loaded
+            RuntimeDirectoryPreserve: "yes"
+            DropInPaths: /etc/systemd/system/tailscaled.service.d/50-unit-hardening-keep-rundir.conf
+          host: {socket_is_socket: true, dir_is_dir: true}
+          found:
+            - busy-job.service.d/50-no-tailscaled.conf
+            - job.service.d/50-no-tailscaled.conf
+            - rootctl.service.d/50-no-tailscaled.conf
+            - rootsvc.service.d/50-no-tailscaled.conf
+            - svc-a.service.d/50-no-tailscaled.conf
+          tmpfiles: "# Ansible managed\nd /run/tailscale 0755 root root -\n"
+          sweep:
+            svca: {uid: 2001, error: "", procs: [{pid: 5000, comm: svc-a, socket: absent, cgroup: /system.slice/svc-a.service}]}
+            jobu: {uid: 2003, error: "", procs: []}
+            busyu: {uid: 2004, error: "", procs: [{pid: 1003, comm: busy-job, socket: present, cgroup: /system.slice/busy-job.service}]}
+
+    - name: Verify assertions on canned readings
+      ansible.builtin.include_tasks: verify_case.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - name: the baseline passes (a mid-run oneshot that still sees the socket is only noted)
+          task: ""
+        - name: a oneshot finished between the reads passes
+          units: [{}, {}, {s2: {ActiveState: inactive, SubState: dead, MainPID: "0"}}]
+          task: ""
+        - name: drop-in not loaded (no daemon-reload)
+          units: [{s2: {DropInPaths: /usr/lib/systemd/system/service.d/10-timeout-abort.conf}}]
+          task: Verify | each unit's drop-in is loaded (systemctl show DropInPaths)
+        - name: drop-in loaded from the wrong place
+          units: [{}, {s2: {DropInPaths: /etc/systemd/system/job.service.d/50-other.conf}}]
+          task: Verify | each unit's drop-in is loaded (systemctl show DropInPaths)
+        - name: unit no longer loaded
+          units: [{}, {s2: {LoadState: not-found}}]
+          task: Verify | each unit's drop-in is loaded (systemctl show DropInPaths)
+        - name: only /run/tailscale hidden, /var/run/tailscale missing
+          units: [{s2: {InaccessiblePaths: -/run/tailscale}}]
+          task: Verify | each unit hides /run/tailscale (systemctl show InaccessiblePaths)
+        - name: hidden without the "-" (a different setting)
+          units: [{}, {s2: {InaccessiblePaths: /run/tailscale /var/run/tailscale}}]
+          task: Verify | each unit hides /run/tailscale (systemctl show InaccessiblePaths)
+        - name: active before, failed after
+          units: [{s1: {ActiveState: failed}, s2: {ActiveState: failed, MainPID: "0"}}]
+          task: Verify | every unit that was active before the change is still active (both reads)
+        - name: active at the first read, gone at the second
+          units: [{s2: {ActiveState: activating, SubState: auto-restart}}]
+          task: Verify | every unit that was active before the change is still active (both reads)
+        - name: a new MainPID between the reads
+          units: [{s2: {MainPID: "5001"}}]
+          task: Verify | no running unit restarted between the two reads (same MainPID, same NRestarts)
+        - name: NRestarts grew between the reads
+          units: [{s2: {NRestarts: "1"}}]
+          task: Verify | no running unit restarted between the two reads (same MainPID, same NRestarts)
+        - name: the process still sees the socket
+          units: [{probe: {socket: present}}]
+          task: Verify | each running service's process can't see tailscaled.sock (/proc/<MainPID>/root)
+        - name: the socket state is unknown (not root)
+          units: [{probe: {socket: "unknown: Permission denied"}}]
+          task: Verify | each running service's process can't see tailscaled.sock (/proc/<MainPID>/root)
+        - name: no mount on /run/tailscale (absent only because the dir is missing)
+          units: [{probe: {mounted: false, dir_present: false}}]
+          task: Verify | each running service's process can't see tailscaled.sock (/proc/<MainPID>/root)
+        - name: the socket is absent but nothing hides the dir (tailscaled is between sockets)
+          units: [{probe: {mounted: false}}]
+          task: Verify | each running service's process can't see tailscaled.sock (/proc/<MainPID>/root)
+        - name: mounted, but no /run/tailscale directory in the namespace
+          units: [{probe: {dir_present: false}}]
+          task: Verify | each running service's process can't see tailscaled.sock (/proc/<MainPID>/root)
+        - name: the namespace root unreadable
+          units: [{probe: {root_ok: false}}]
+          task: Verify | each running service's process can't see tailscaled.sock (/proc/<MainPID>/root)
+        - name: the probe looked at another pid
+          units: [{probe: {pid: 4999}}]
+          task: Verify | each running service's process can't see tailscaled.sock (/proc/<MainPID>/root)
+        - name: the probe hit an error
+          units: [{probe: {error: "PermissionError: Permission denied"}}]
+          task: Verify | each running service's process can't see tailscaled.sock (/proc/<MainPID>/root)
+        - name: a restart-false service still sees the socket
+          units: [{restart: false, probe: {socket: present, mounted: false}}]
+          task: Verify | each running service's process can't see tailscaled.sock (/proc/<MainPID>/root)
+        - name: the host has no tailscaled socket (positive control)
+          patch: {host: {socket_is_socket: false}}
+          task: Verify | the host side is real (tailscaled.sock is a socket, /run/tailscale a directory)
+        - name: the host has no /run/tailscale
+          patch: {host: {dir_is_dir: false}}
+          task: Verify | the host side is real (tailscaled.sock is a socket, /run/tailscale a directory)
+        - name: tailscaled still removes its runtime directory
+          patch: {tailscaled: {RuntimeDirectoryPreserve: "no"}}
+          task: Verify | tailscaled keeps /run/tailscale (RuntimeDirectoryPreserve=yes from this role's drop-in)
+        - name: tailscaled keeps it, but not through this role's drop-in
+          patch: {tailscaled: {DropInPaths: /etc/systemd/system/tailscaled.service.d/override.conf}}
+          task: Verify | tailscaled keeps /run/tailscale (RuntimeDirectoryPreserve=yes from this role's drop-in)
+        - name: the tmpfiles entry is missing
+          patch: {tmpfiles: "# Ansible managed\n"}
+          task: Verify | tmpfiles.d creates /run/tailscale at boot
+        - name: the tmpfiles entry has another mode
+          patch: {tmpfiles: "d /run/tailscale 0777 root root -\n"}
+          task: Verify | tmpfiles.d creates /run/tailscale at boot
+        - name: a stray drop-in on an undeclared unit
+          patch:
+            found:
+              - busy-job.service.d/50-no-tailscaled.conf
+              - job.service.d/50-no-tailscaled.conf
+              - old.service.d/50-no-tailscaled.conf
+              - svc-a.service.d/50-no-tailscaled.conf
+          task: Verify | this role's drop-in is on declared units only
+        - name: a declared unit's drop-in missing on disk
+          patch: {found: [job.service.d/50-no-tailscaled.conf, svc-a.service.d/50-no-tailscaled.conf]}
+          task: Verify | this role's drop-in is on declared units only
+        # Q6-1
+        - name: a root service without PrivatePIDs
+          units: [{}, {}, {}, {s2: {PrivatePIDs: "no"}}]
+          task: Verify | each root unit runs in its own PID namespace (PrivatePIDs=yes; Q6-1)
+        - name: a root oneshot without PrivatePIDs
+          units: [{}, {}, {}, {}, {s2: {PrivatePIDs: "no"}}]
+          task: Verify | each root unit runs in its own PID namespace (PrivatePIDs=yes; Q6-1)
+        - name: the root service's process in the host PID namespace
+          units: [{}, {}, {}, {probe: {own_pidns: false}}]
+          task: Verify | each running service's process can't see tailscaled.sock (/proc/<MainPID>/root)
+        - name: SYSTEMCTL_FORCE_BUS missing where declared
+          units: [{}, {}, {}, {}, {s2: {Environment: ""}}]
+          task: Verify | systemctl uses the D-Bus system bus where declared (SYSTEMCTL_FORCE_BUS=1)
+        - name: a non-root service needs no PrivatePIDs nor its own PID namespace
+          units: [{s2: {PrivatePIDs: "no"}, probe: {own_pidns: false}}]
+          task: ""
+        # Q8-1
+        - name: a root service without the /run tmpfs
+          units: [{}, {}, {}, {s2: {TemporaryFileSystem: ""}}]
+          task: Verify | each root unit's /run is a read-only tmpfs holding only its run_allow (Q8-1)
+        - name: a root service with a writable /run tmpfs
+          units: [{}, {}, {}, {s2: {TemporaryFileSystem: /run}}]
+          task: Verify | each root unit's /run is a read-only tmpfs holding only its run_allow (Q8-1)
+        - name: a root oneshot that also binds docker.sock
+          units: [{}, {}, {}, {}, {s2: {BindPaths: /run/docker.sock:/run/docker.sock}}]
+          task: Verify | each root unit's /run is a read-only tmpfs holding only its run_allow (Q8-1)
+        - name: a root oneshot missing an allowlisted bind
+          units: [{}, {}, {}, {}, {s2: {BindReadOnlyPaths: /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:rbind}}]
+          task: Verify | each root unit's /run is a read-only tmpfs holding only its run_allow (Q8-1)
+        - name: the running root service's /run holds more than its allowlist
+          units: [{}, {}, {}, {probe: {run_extra: [/run/docker.sock]}}]
+          task: Verify | each running service's process can't see tailscaled.sock (/proc/<MainPID>/root)
+        - name: the running root service's /run walk was cut short
+          units: [{}, {}, {}, {probe: {run_truncated: true}}]
+          task: Verify | each running service's process can't see tailscaled.sock (/proc/<MainPID>/root)
+        - name: binds outside /run don't count against a root unit
+          units: [{}, {}, {}, {s2: {BindReadOnlyPaths: /etc/ssl/certs:/etc/ssl/certs:rbind}}]
+          task: ""
+        # Q6-3
+        - name: another svca process sees the socket
+          patch:
+            sweep:
+              svca:
+                procs:
+                  - {pid: 5000, comm: svc-a, socket: absent, cgroup: /system.slice/svc-a.service}
+                  - {pid: 777, comm: bash, socket: present, cgroup: /user.slice/user-4242.slice/session-1.scope}
+          task: Verify | every process of each hardened non-root unit's user hides the socket (same-uid sweep; Q6-3)
+        - name: a process whose view can't be read
+          patch: {sweep: {jobu: {procs: [{pid: 778, comm: x, socket: "unknown: Permission denied", cgroup: /system.slice/x.service}]}}}
+          task: Verify | every process of each hardened non-root unit's user hides the socket (same-uid sweep; Q6-3)
+        - name: a user the sweep couldn't resolve
+          patch: {sweep: {jobu: {error: "unknown user 'jobu'"}}}
+          task: Verify | every process of each hardened non-root unit's user hides the socket (same-uid sweep; Q6-3)
+        - name: a user not swept at all
+          replace:
+            sweep:
+              svca: {uid: 2001, error: "", procs: []}
+              busyu: {uid: 2004, error: "", procs: []}
+          task: Verify | every process of each hardened non-root unit's user hides the socket (same-uid sweep; Q6-3)
+        - name: the mid-run oneshot's uid also has a process outside it
+          patch:
+            sweep:
+              busyu:
+                procs:
+                  - {pid: 1003, comm: busy-job, socket: present, cgroup: /system.slice/busy-job.service}
+                  - {pid: 779, comm: sh, socket: absent, cgroup: /user.slice/user-4242.slice/session-2.scope}
+          task: Verify | every process of each hardened non-root unit's user hides the socket (same-uid sweep; Q6-3)
+
+    - name: The canned baseline's labels (verify_case.yml left the last passing case's facts)
+      ansible.builtin.include_tasks: verify_case.yml
+      vars:
+        case: {name: labels, task: ""}
+
+    - name: Root + bus is advisory, everything else protected
+      ansible.builtin.assert:
+        that:
+          - uh_protection['rootctl.service'] == 'advisory (root + system bus)'
+          - uh_protection['rootsvc.service'] == 'protected'
+          - uh_protection['svc-a.service'] == 'protected'
+        fail_msg: "{{ uh_protection | to_json }}"
+        quiet: true

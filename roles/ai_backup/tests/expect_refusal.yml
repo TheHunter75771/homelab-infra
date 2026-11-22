@@ -1,0 +1,21 @@
+---
+# One refusal case for test_ai_backup.yml. Include params: refusal_name, refusal_file (a role task file, relative
+# to tests/), refusal_task (the task that must fail), plus the role-variable overrides for the case.
+- name: Refusal | run {{ refusal_name }}
+  block:
+    - name: Refusal | include for {{ refusal_name }}
+      ansible.builtin.include_tasks: "{{ refusal_file }}"
+
+    - name: Refusal | not reached for {{ refusal_name }}
+      ansible.builtin.set_fact:
+        test_refused_by: ""
+  rescue:
+    - name: Refusal | note which task refused for {{ refusal_name }}
+      ansible.builtin.set_fact:
+        test_refused_by: "{{ ansible_failed_task.name }}"
+
+- name: Refusal | refused by the expected task for {{ refusal_name }}
+  ansible.builtin.assert:
+    that: test_refused_by == refusal_task
+    fail_msg: "{{ refusal_name }}: refused by '{{ test_refused_by }}', want '{{ refusal_task }}'"
+    quiet: true

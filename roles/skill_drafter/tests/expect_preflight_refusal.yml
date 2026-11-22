@@ -1,0 +1,43 @@
+---
+# One refusal case for test_skill_drafter.yml: case = {name, vars, task}. The case's vars are passed as include
+# params (they outrank the test's set_fact values); every other input keeps its good value (test_good).
+- name: Preflight refuses {{ case.name }}
+  block:
+    - name: Preflight with {{ case.name }}
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+      vars:
+        skill_drafter_enabled: "{{ case.vars.get('skill_drafter_enabled', true) }}"
+        tailnet_ip: "{{ case.vars.get('tailnet_ip', test_good.tailnet_ip) }}"
+        skill_drafter_broker_port: "{{ case.vars.get('skill_drafter_broker_port', 11434) }}"
+        skill_drafter_dns_stub: "{{ case.vars.get('skill_drafter_dns_stub', '127.0.0.53') }}"
+        skill_drafter_library_cap: "{{ case.vars.get('skill_drafter_library_cap', '500GB') }}"
+        skill_drafter_memory_max: "{{ case.vars.get('skill_drafter_memory_max', '256M') }}"
+        skill_drafter_restart_sec: "{{ case.vars.get('skill_drafter_restart_sec', '30s') }}"
+        skill_drafter_model: "{{ case.vars.get('skill_drafter_model', 'assistant') }}"
+        skill_drafter_poll_interval: "{{ case.vars.get('skill_drafter_poll_interval', 120) }}"
+        skill_drafter_num_ctx: "{{ case.vars.get('skill_drafter_num_ctx', 16384) }}"
+        skill_drafter_max_attempts: "{{ case.vars.get('skill_drafter_max_attempts', 3) }}"
+        skill_drafter_broker_ranges: "{{ case.vars.get('skill_drafter_broker_ranges', test_good.broker_ranges) }}"
+        skill_drafter_ip_deny: "{{ case.vars.get('skill_drafter_ip_deny', ['any']) }}"
+        searxng_subnet: "{{ case.vars.get('searxng_subnet', '172.29.16.0/28') }}"
+        skill_drafter_library_root: "{{ case.vars.get('skill_drafter_library_root', test_good.library_root) }}"
+        skill_drafter_library_mount: "{{ case.vars.get('skill_drafter_library_mount', test_good.library_mount) }}"
+        skill_drafter_library_forbidden_re: "{{ case.vars.get('skill_drafter_library_forbidden_re', test_good.forbidden_re) }}"
+        skill_drafter_library_group: "{{ case.vars.get('skill_drafter_library_group', test_good.library_group) }}"
+        skill_drafter_pkg_src: "{{ case.vars.get('skill_drafter_pkg_src', test_good.pkg_src) }}"
+        skill_drafter_launcher_src: "{{ case.vars.get('skill_drafter_launcher_src', test_good.launcher_src) }}"
+        skill_drafter_library_src_dir: "{{ case.vars.get('skill_drafter_library_src_dir', test_good.library_src_dir) }}"
+
+    - name: Not reached
+      ansible.builtin.set_fact:
+        sd_test_refused_by: ""
+  rescue:
+    - name: Note which task refused
+      ansible.builtin.set_fact:
+        sd_test_refused_by: "{{ ansible_failed_task.name }}"
+
+- name: Refused by the expected check for {{ case.name }}
+  ansible.builtin.assert:
+    that: sd_test_refused_by == case.task
+    fail_msg: "{{ case.name }}: refused by '{{ sd_test_refused_by }}', expected '{{ case.task }}'"
+    quiet: true

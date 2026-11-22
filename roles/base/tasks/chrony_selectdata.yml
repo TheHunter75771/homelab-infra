@@ -1,0 +1,22 @@
+---
+# Imported by main.yml after `chronyc -n selectdata -a` (registered as base_chrony_selectdata); also run
+# on its own by tests/test_chrony_selectdata.yml with fixture outputs.
+# Rows (chronyc's client.c): state, name/IP, auth Y|N, COpts, EOpts (5 characters each: N noselect,
+# P prefer, T trust, R require, then "-"), last, score, interval, leap.
+- name: No source is required (R) and the IP-literal fallback sources are selectable (no N)
+  ansible.builtin.assert:
+    that:
+      - base_chrony_fallback_rows | map(attribute='1') | list | sort == base_ntp_fallback_servers | sort
+      - base_chrony_rows | selectattr('4', 'search', 'R') | list | length == 0
+      - base_chrony_fallback_rows | selectattr('4', 'search', 'N') | list | length == 0
+    fail_msg: >-
+      chronyc selectdata: required (R) sources {{ base_chrony_rows | selectattr('4', 'search', 'R') | map(attribute='1') | list }};
+      fallback sources {{ base_chrony_fallback_rows | map('join', ' ') | list }} (want each of {{ base_ntp_fallback_servers }},
+      without N). An R means authselectmode isn't "ignore" (conf.d/homelab.conf), and while NTS fails the fallback
+      can't be selected.
+    quiet: true
+  vars:
+    base_chrony_rows: >-
+      {{ base_chrony_selectdata.stdout_lines | select('match', '^\S \S+\s+[YN] [-NPTR]{5} [-NPTR]{5}\s')
+         | map('split') | list }}
+    base_chrony_fallback_rows: "{{ base_chrony_rows | selectattr('1', 'in', base_ntp_fallback_servers) | list }}"

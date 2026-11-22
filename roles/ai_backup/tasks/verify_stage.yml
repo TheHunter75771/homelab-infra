@@ -1,0 +1,27 @@
+---
+# Read-only checks on ai-box after a real (non-check) run.
+# sshd must let the pull account in: ai_servers' ssh_hardening_allow_users is the Lead's (inventory); role
+# ssh_hardening renders it. Without it every pull fails at 06:30, so fail here with the fix instead.
+- name: Verify | sshd's effective AllowUsers
+  ansible.builtin.command:
+    argv: [sshd, -T]
+  register: ai_backup_sshd_t
+  changed_when: false
+
+- name: Verify | sshd allows the pull account
+  ansible.builtin.assert:
+    that:
+      - ai_backup_allow | length == 0 or ('allowusers ' ~ ai_backup_account) in ai_backup_sshd_t.stdout_lines
+    fail_msg: >-
+      sshd on {{ inventory_hostname }} does not allow {{ ai_backup_account }} (AllowUsers {{ ai_backup_allow | join(' ') }}).
+      Add it to ssh_hardening_allow_users for ai_servers and converge role ssh_hardening (README, "Wiring").
+    quiet: true
+  vars:
+    ai_backup_allow: "{{ ai_backup_sshd_t.stdout_lines | select('match', '^allowusers ') | map('regex_replace', '^allowusers ', '') | list }}"
+
+- name: Verify | the timer is enabled and active
+  ansible.builtin.command:
+    argv: [systemctl, is-enabled, "{{ ai_backup_stage_timer }}"]
+  register: ai_backup_timer_enabled
+  changed_when: false
+  failed_when: ai_backup_timer_enabled.stdout != 'enabled'

@@ -1,0 +1,263 @@
+---
+# Fixed by the contract (§12.29) and the house pattern (role ai_control, role finance_digest).
+# This role's own directory (its files/ and templates/ are named through it; the offline test points it at the role).
+mission_control_role_dir: "{{ role_path }}"
+mission_control_app_dir: /opt/mission-control
+mission_control_server_dir: "{{ mission_control_app_dir }}/server"
+mission_control_web_dir: "{{ mission_control_app_dir }}/web"
+mission_control_venv_dir: "{{ mission_control_app_dir }}/venv"
+mission_control_venv_python: "{{ mission_control_venv_dir }}/bin/python3"
+# Q-4: the rebuild happens in venv.new and is swapped in through venv.old.
+mission_control_venv_new_dir: "{{ mission_control_venv_dir }}.new"
+mission_control_venv_new_python: "{{ mission_control_venv_new_dir }}/bin/python3"
+mission_control_venv_old_dir: "{{ mission_control_venv_dir }}.old"
+# The locks and the role's helper scripts on the host (root 0644; read by root and, for the probe, by mc).
+mission_control_lib_dir: "{{ mission_control_app_dir }}/lib"
+mission_control_launcher: /usr/local/bin/mission-control
+mission_control_config_dir: /etc/mission-control
+mission_control_config_file: "{{ mission_control_config_dir }}/config.json"
+mission_control_vapid_file: "{{ mission_control_config_dir }}/vapid.json"
+mission_control_ha_token_file: "{{ mission_control_config_dir }}/ha-token"
+mission_control_state_dir: /var/lib/mission-control
+mission_control_subscriptions_file: "{{ mission_control_state_dir }}/subscriptions.json"
+mission_control_service: mission-control.service
+mission_control_guard_unit: mission-control-guard.service
+# Q-1: the nftables guard's own table and its rules file (root 0644; loaded by mission-control-guard.service).
+mission_control_guard_table: mission_control_guard
+mission_control_guard_file: "{{ mission_control_config_dir }}/guard.nft"
+mission_control_nft: /usr/sbin/nft
+# Read-only interface check at preflight (the tests point it at a fake).
+mission_control_iface_check_cmd: [ip, -o, link, show, dev]
+# Packages from the Ubuntu archive: the venv module, and nftables for the guard (Q2-3).
+mission_control_packages: [python3-venv, nftables]
+mission_control_tailscaled_socket: /run/tailscale/tailscaled.sock
+# Q-2: /run inside both units is an empty read-only tmpfs; only these are bound in, read-only.
+mission_control_run_allow:
+  # systemctl show (MC1's units and backups) talks to systemd over the system bus.
+  - /run/dbus/system_bus_socket
+  # systemctl refuses to run unless /run/systemd/system exists (sd_booted).
+  - /run/systemd/system
+  # /etc/resolv.conf -> stub-resolv.conf here (nameserver 127.0.0.53); nsswitch is `files dns`.
+  - /run/systemd/resolve
+# The guard's live check (tasks/verify_guard.yml), as a non-root user and as root. From ai-box itself serve's port is
+# refused to everyone (it doesn't arrive on the tailscale interface); the server only to non-root.
+mission_control_guard_targets:
+  - {name: server, kind: tcp, host: 127.0.0.1, port: "{{ mission_control_listen_port | int }}"}
+  - {name: serve on the tailnet IPv4, kind: tcp, host: "{{ tailnet_ip }}", port: "{{ mission_control_serve_port | int }}"}
+  - {name: serve on the tailnet IPv6, kind: tcp, host: "{{ mission_control_guard_ip6 }}", port: "{{ mission_control_serve_port | int }}"}
+# Q2-1: dials through tailscaled's local API (what tailscaled itself connects, as root) to serve's port.
+mission_control_localapi_targets:
+  - {name: local API dial to the tailnet IPv4, host: "{{ tailnet_ip }}", port: "{{ mission_control_serve_port | int }}"}
+  - {name: local API dial to the tailnet IPv6, host: "{{ mission_control_guard_ip6 }}", port: "{{ mission_control_serve_port | int }}"}
+# Sockets that must NOT be reachable from the sandbox (checked live by the egress probe).
+mission_control_run_forbidden:
+  - /run/tailscale/tailscaled.sock
+  - /run/snapd.socket
+  - /run/docker.sock
+  - /run/aictl-helper.sock
+mission_control_briefing_service: mission-control-briefing.service
+mission_control_briefing_timer: mission-control-briefing.timer
+mission_control_unit_dir: /etc/systemd/system
+# The system Python the venv is made from (Ubuntu 26.04: 3.14).
+mission_control_python: /usr/bin/python3
+mission_control_journalctl: journalctl
+mission_control_systemctl: /usr/bin/systemctl
+# Owner/group of root-owned files mc must read (config.json, vapid.json: root:mc 0640). The tests override them.
+mission_control_root_owner: root
+mission_control_group: "{{ mission_control_user }}"
+# The identity header tailscale serve sets on every proxied request from a logged-in tailnet user (never from a
+# tagged node); MC1 answers only when it equals mission_control_noah_login byte for byte (no trimming, no case
+# folding: MC1 README "Config"). Local processes can't forge it: see the guard (tasks/guard.yml).
+mission_control_identity_header: Tailscale-User-Login
+# The initial subscriptions file (MC1's format: a JSON list; created only when absent, never overwritten; MC1
+# replaces it atomically under its lock, 0600).
+mission_control_subscriptions_initial: "[]\n"
+
+# Only these file types from MC2's public/ are deployed (its icons are PNG).
+mission_control_web_extensions: [html, js, css, svg, png, webmanifest, json]
+
+# The CLI (§12.29: the timer calls `mission-control briefing --send`; MC1's README "Run").
+mission_control_serve_argv: ["{{ mission_control_launcher }}", --config, "{{ mission_control_config_file }}", serve]
+mission_control_briefing_argv:
+  - "{{ mission_control_launcher }}"
+  - --config
+  - "{{ mission_control_config_file }}"
+  - briefing
+  - --send
+mission_control_check_config_argv: ["{{ mission_control_launcher }}", --config, "{{ mission_control_config_file }}", check-config]
+mission_control_on_calendar: "*-*-* {{ mission_control_briefing_time }} {{ mission_control_timezone }}"
+
+# pip, run with venv.new's own interpreter during a rebuild (the tests point it at a fake). Step 1 installs build.lock (setuptools,
+# wheels only); step 2 the app's lock, every file hash-checked, wheels only except http-ece's sdist, which is built
+# with step 1's setuptools (no build isolation, so nothing unhashed is fetched).
+mission_control_pip_argv: ["{{ mission_control_venv_new_python }}", -I, -m, pip]
+mission_control_pip_common: [install, --no-input, --disable-pip-version-check, --require-hashes]
+mission_control_pip_build_args: ["--only-binary=:all:"]
+mission_control_pip_app_args: ["--only-binary=:all:", "--no-binary=http-ece", "--no-build-isolation"]
+
+# The pins (preflight reads both locks on the controller).
+mission_control_lock_text: "{{ lookup('ansible.builtin.file', mission_control_requirements_lock_src) }}"
+mission_control_build_lock_text: "{{ lookup('ansible.builtin.file', mission_control_build_lock_src) }}"
+mission_control_pins: >-
+  {{ mission_control_lock_text | mission_control_lock_pins
+     | combine(mission_control_build_lock_text | mission_control_lock_pins) }}
+
+# --- Addresses ---
+mission_control_moneyhub_ip: "{{ mission_control_moneyhub_url | mission_control_url_host }}"
+mission_control_ha_ip: "{{ mission_control_ha_url | mission_control_url_host if mission_control_ha_url | length > 0 else '' }}"
+mission_control_mediaserver_on: "{{ mission_control_mediaserver_url | length > 0 }}"
+# MC1's host_map: the tailnet names it reaches, each pinned to the address the IP filter allows (no MagicDNS).
+mission_control_host_map: >-
+  {{ {mission_control_erau_url | mission_control_url_host: mission_control_erau_ip}
+     | combine({mission_control_mediaserver_url | mission_control_url_host: mission_control_mediaserver_ip}
+               if mission_control_mediaserver_on | bool else {}) }}
+mission_control_ip_allow: >-
+  {{ (['127.0.0.1/32',
+       '127.0.0.53/32',
+       mission_control_moneyhub_ip ~ '/32',
+       mission_control_erau_ip ~ '/32']
+      + (mission_control_container_allow | map('regex_replace', '^([0-9.]+)$', '\\1/32') | list)
+      + ([mission_control_mediaserver_ip ~ '/32'] if mission_control_mediaserver_on | bool else [])
+      + ([mission_control_ha_ip ~ '/32'] if mission_control_ha_ip | length > 0 else []))
+     | unique | list }}
+# The contract's minimum deny set (§12.29: RFC 1918 and CGNAT; plus loopback, link-local and ULA as role
+# research_gate's §12.16.4); preflight refuses a deny list that misses any.
+mission_control_ip_deny_required:
+  - 127.0.0.0/8
+  - ::1/128
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  - 100.64.0.0/10
+  - 169.254.0.0/16
+  - fe80::/10
+  - fc00::/7
+
+# The [Service] sandbox both units share, one `Key=Value` per entry. The unit templates render exactly these, and
+# the post-start egress probe (tasks/verify.yml) runs under the same list through systemd-run, so the live check
+# proves the real IP filter. ReadWritePaths: the state dir only (subscriptions.json, dedup and cache files).
+mission_control_sandbox: >-
+  {{ ['User=' ~ mission_control_user,
+      'Group=' ~ mission_control_user,
+      'UMask=0077',
+      'NoNewPrivileges=yes',
+      'ProtectSystem=strict',
+      'ProtectHome=yes',
+      'PrivateTmp=yes',
+      'TemporaryFileSystem=/run:ro',
+      'BindReadOnlyPaths=' ~ (mission_control_run_allow | join(' ')),
+      'ReadWritePaths=' ~ mission_control_state_dir,
+      'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6',
+      'CapabilityBoundingSet=',
+      'AmbientCapabilities=',
+      'SystemCallFilter=@system-service',
+      'SystemCallFilter=~@privileged',
+      'SystemCallErrorNumber=EPERM',
+      'SystemCallArchitectures=native',
+      'PrivateDevices=yes',
+      'PrivateIPC=yes',
+      'ProtectKernelTunables=yes',
+      'ProtectKernelModules=yes',
+      'ProtectKernelLogs=yes',
+      'ProtectControlGroups=yes',
+      'ProtectClock=yes',
+      'ProtectHostname=yes',
+      'ProtectProc=invisible',
+      'RestrictNamespaces=yes',
+      'RestrictRealtime=yes',
+      'RestrictSUIDSGID=yes',
+      'LockPersonality=yes']
+     + (['MemoryDenyWriteExecute=yes'] if mission_control_memory_deny_write_execute | bool else [])
+     + ['RemoveIPC=yes',
+        'IPAddressDeny=' ~ (mission_control_ip_deny | join(' ')),
+        'IPAddressAllow=' ~ (mission_control_ip_allow | join(' '))] }}
+
+# --- tailscale serve (role tailscale_serve owns ai-box's whole serve config) ---
+# AI Control's handler exactly as role ai_control declares it (its port and serve port: the inventory's value,
+# else role ai_control's default, loaded by preflight.yml with include_vars).
+mission_control_aictl_listen_port: >-
+  {{ ai_control_listen_port | default(mission_control_aictl_defaults.ai_control_listen_port | default(0)) | int }}
+mission_control_aictl_serve_port: >-
+  {{ ai_control_serve_port | default(mission_control_aictl_defaults.ai_control_serve_port | default(0)) | int }}
+mission_control_aictl_backend: "http://127.0.0.1:{{ mission_control_aictl_listen_port }}"
+mission_control_aictl_handler:
+  port: "{{ mission_control_aictl_serve_port | int }}"
+  mount: /
+  backend: "{{ mission_control_aictl_backend }}"
+# Mission Control's own origin: https://<ai-box>:8443/ -> the server.
+mission_control_serve_backend: "http://127.0.0.1:{{ mission_control_listen_port }}"
+mission_control_own_handler:
+  port: "{{ mission_control_serve_port | int }}"
+  mount: /
+  backend: "{{ mission_control_serve_backend }}"
+# The whole set, identical to what role ai_control declares (its 443 handler + ai_control_serve_extra_handlers), so
+# the two roles never undo each other's handlers.
+mission_control_serve_handlers: "{{ [mission_control_aictl_handler] + (ai_control_serve_extra_handlers | default([])) }}"
+
+# --- The config MC1 reads (apps/mission-control/server/README.md "Config", config.example.json) ---
+# Unset optional URLs are null (MC1: "not configured"). MC1's other keys keep its defaults unless set in
+# mission_control_config_extra.
+mission_control_config: >-
+  {{ {'listen_host': '127.0.0.1',
+      'listen_port': mission_control_listen_port | int,
+      'allowed_login': mission_control_noah_login | default(''),
+      'timezone': mission_control_timezone,
+      'static_dir': mission_control_web_dir,
+      'state_dir': mission_control_state_dir,
+      'vapid_file': mission_control_vapid_file,
+      'lockscreen_detail': mission_control_lockscreen_detail,
+      'aicontrol_url': mission_control_aicontrol_url,
+      'webui_url': mission_control_webui_url,
+      'moneyhub_url': mission_control_moneyhub_url,
+      'moneyhub_timezone': mission_control_moneyhub_timezone,
+      'erau_url': mission_control_erau_url,
+      'host_map': mission_control_host_map,
+      'mediaserver_url': mission_control_mediaserver_url if mission_control_mediaserver_on | bool else none,
+      'ha_url': mission_control_ha_url if mission_control_ha_url | length > 0 else none,
+      'ha_token_file': mission_control_ha_token_file,
+      'ha_entities': mission_control_ha_entities,
+      'units': mission_control_units,
+      'backups': mission_control_backups,
+      'links': mission_control_links}
+     | combine(mission_control_notify_config)
+     | combine(mission_control_config_extra) }}
+# Keys the role owns: the unit, the serve backend, the key and state files, the identity check and the IP filter
+# (host_map pins the addresses it allows) depend on them. The B2/B1 keys come only from their role variables, so
+# preflight's checks (tokens hashed, allow_from on the tailnet, links without credentials) can't be bypassed.
+mission_control_config_role_keys:
+  - listen_host
+  - listen_port
+  - allowed_login
+  - static_dir
+  - state_dir
+  - vapid_file
+  - ha_token_file
+  - host_map
+  - systemctl
+  - notify_senders
+  - quiet_hours
+  - notify_dedupe_seconds
+  - notify_rate_per_hour
+  - app_links
+
+# --- B2 (POST /api/notify) and B1 (the Apps card): B2-CONTRACT.md §2 and §4 ---
+# Each key is rendered only when its variable is set (defaults/main.yml): with none set, config.json is byte for byte
+# what it was before B2, and an MC1 without these keys still loads it.
+# notify_senders: sorted by name, {name, token_sha256 (hash('sha256') of the vault token, lowercase hex), allow_from
+# (only when set)}. The tokens are never written. Every task that evaluates this (config_file.yml) is no_log, and
+# tests/check_no_log.py holds it to that.
+mission_control_notify_names: "{{ mission_control_notify_tokens.keys() | list | sort }}"
+mission_control_notify_senders: >-
+  {{ dict(mission_control_notify_names
+          | zip(mission_control_notify_names | map('extract', mission_control_notify_tokens) | map('string')
+                | map('hash', 'sha256')))
+     | mission_control_notify_sender_list(mission_control_notify_allow_from) }}
+mission_control_notify_config: >-
+  {{ ({'notify_senders': mission_control_notify_senders} if mission_control_notify_tokens | length > 0 else {})
+     | combine({'quiet_hours': {'start': mission_control_quiet_hours.start, 'end': mission_control_quiet_hours.end}}
+               if mission_control_quiet_hours is not none else {})
+     | combine({'notify_dedupe_seconds': mission_control_notify_dedupe_seconds | int}
+               if mission_control_notify_dedupe_seconds is not none else {})
+     | combine({'notify_rate_per_hour': mission_control_notify_rate_per_hour | int}
+               if mission_control_notify_rate_per_hour is not none else {})
+     | combine({'app_links': mission_control_app_links} if mission_control_app_links | length > 0 else {}) }}

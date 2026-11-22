@@ -1,0 +1,27 @@
+---
+# §12.28: the public half is the pull account's ONLY key (exclusive), installed with
+# restrict,from="<PC tailnet>",command="rrsync -ro <staging dir>" (vars/main.yml ai_backup_authorized_key_options).
+- name: Authorized key | read the public half
+  ansible.builtin.slurp:
+    src: "{{ ai_backup_key_file }}.pub"
+  register: ai_backup_pub_slurp
+  when: not ansible_check_mode or ai_backup_key_stat.results[1].stat.exists
+
+- name: Authorized key | the options carry restrict, from= and the read-only rrsync command
+  ansible.builtin.assert:
+    that:
+      - ai_backup_authorized_key_options is match('^restrict,')
+      - ai_backup_authorized_key_options is search(',from="[^"]+",')
+      - ai_backup_authorized_key_options is search(',command="' ~ ai_backup_rrsync ~ ' -ro ' ~ ai_backup_stage_dir ~ '"$')
+    quiet: true
+
+- name: Authorized key | the pull key is the account's only key, read-only and from the PC only
+  ansible.posix.authorized_key:
+    user: "{{ ai_backup_account }}"
+    key: "{{ ai_backup_pub_slurp.content | b64decode | trim }}"
+    key_options: "{{ ai_backup_authorized_key_options }}"
+    path: "{{ ai_backup_authorized_keys_path | default(omit, true) }}"
+    manage_dir: "{{ ai_backup_authorized_keys_path | length == 0 }}"
+    exclusive: true
+    state: present
+  when: ai_backup_pub_slurp is not skipped

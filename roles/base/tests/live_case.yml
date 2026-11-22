@@ -1,0 +1,62 @@
+---
+# One case of tests/test_sysctl_live*.yml: write the scratch /proc/sys tree (converged values plus the
+# case's overrides), run the role's real tasks/sysctl_live.yml, then check the outcome against the case:
+#   live: {key: value} overrides; apply: the apply command (default: copy the "file applied" tree);
+#   fail: the run fails at the assert; reapplied: the re-apply ran (not check mode) / would run (check mode);
+#   msg_has / msg_lacks: substrings of the failure message; after: the tree's values afterwards.
+- name: "Check the scratch paths (case {{ live_case.name }})"
+  ansible.builtin.include_tasks: live_guard.yml
+
+- name: "Write the live tree (case {{ live_case.name }})"
+  ansible.builtin.copy:
+    dest: "{{ base_sysctl_proc_dir }}/{{ item.key }}"
+    content: "{{ item.value }}\n"
+    mode: "0644"
+  loop: "{{ live_test_good | combine(live_case.live | default({})) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}={{ item.value }}"
+  check_mode: false
+
+- name: "Run the live check (case {{ live_case.name }})"
+  vars:
+    base_sysctl_apply_argv: "{{ live_case.apply | default(live_test_apply) }}"
+  block:
+    - name: "The role's live check (case {{ live_case.name }})"
+      ansible.builtin.include_tasks: ../tasks/sysctl_live.yml
+
+    - name: "Note that it passed (case {{ live_case.name }})"
+      ansible.builtin.set_fact:
+        live_case_failed: false
+        live_case_msg: ""
+  rescue:
+    - name: "Note the failure (case {{ live_case.name }})"
+      ansible.builtin.set_fact:
+        live_case_failed: true
+        live_case_msg: "{{ ansible_failed_result.msg | default('') }}"
+        live_case_failed_task: "{{ ansible_failed_task.name }}"
+
+- name: "Read the tree afterwards (case {{ live_case.name }})"
+  ansible.builtin.slurp:
+    src: "{{ base_sysctl_proc_dir }}/{{ item }}"
+  loop: "{{ live_case.after | default({}) | list }}"
+  register: live_case_after
+
+- name: "Outcome is as expected (case {{ live_case.name }})"
+  ansible.builtin.assert:
+    that:
+      - live_case_failed == live_case.fail
+      - not live_case_failed or live_case_failed_task is search('^Hardening sysctls are live')
+      - live_case_did_reapply == live_case.reapplied
+      - live_case.msg_has | default([]) | reject('in', live_case_msg) | list | length == 0
+      - live_case.msg_lacks | default([]) | select('in', live_case_msg) | list | length == 0
+      - live_case_after_values == (live_case.after | default({}))
+    fail_msg: >-
+      {{ live_case.name }}: failed={{ live_case_failed }} task={{ live_case_failed_task | default('') }}
+      reapplied={{ live_case_did_reapply }} after={{ live_case_after_values }} msg={{ live_case_msg }}
+    quiet: true
+  vars:
+    live_case_did_reapply: >-
+      {{ (base_sysctl_would_reapply is changed) if ansible_check_mode else (base_sysctl_reapplied is changed) }}
+    live_case_after_values: >-
+      {{ dict(live_case_after.results | map(attribute='item')
+         | zip(live_case_after.results | map(attribute='content') | map('b64decode') | map('trim'))) }}

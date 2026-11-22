@@ -1,0 +1,133 @@
+---
+# Test for tasks/sudo_probe.yml against stubs: a passwd first on PATH (answers `passwd -S <user>` from a
+# scratch file) and a sudo.ws that base_sudo_alternative points at (records its arguments; answers the
+# NOPASSWD probe and the `sudo -l -U <user> -u root <cmd>` check per user). No real account is read.
+#   .venv/bin/ansible-playbook -i localhost, -c local roles/base/tests/test_sudo_probe.yml </dev/null 2>&1 | cat
+- name: The classic sudo probe keeps each user's root access, by password state
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+  vars:
+    admin_user: probeadmin
+    automation_user: probeauto
+    # `passwd -S` statuses, as shadow's passwd prints them (L: ! or *, NP: empty, P: a usable password).
+    probe_ok: {status: L, probe: ["0\n", 0]}
+  tasks:
+    - name: Make a scratch directory
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: .sudo-probe
+      register: probe_test_tmp
+
+    - name: Every case
+      vars:
+        base_sudo_alternative: "{{ probe_test_tmp.path }}/sudo.ws"
+        probe_test_env:
+          PATH: "{{ probe_test_tmp.path }}/bin:{{ lookup('ansible.builtin.env', 'PATH') }}"
+      block:
+        - name: Create the stub directory
+          ansible.builtin.file:
+            path: "{{ probe_test_tmp.path }}/bin"
+            state: directory
+            mode: "0755"
+
+        - name: Install the stub passwd (answers status-<user>)
+          ansible.builtin.copy:
+            dest: "{{ probe_test_tmp.path }}/bin/passwd"
+            mode: "0755"
+            content: |
+              #!/bin/sh
+              cat {{ probe_test_tmp.path | quote }}/"status-$2"
+
+        - name: Install the stub sudo.ws (probe answers from reply/rc-<user>, -l answers from allow-<user>)
+          ansible.builtin.copy:
+            dest: "{{ probe_test_tmp.path }}/sudo.ws"
+            mode: "0755"
+            content: |
+              #!/bin/sh
+              dir={{ probe_test_tmp.path | quote }}
+              printf '%s\n' "$*" >> "$dir/calls"
+              if [ "$1" = -u ]; then
+                cat "$dir/reply-$2"
+                exit "$(cat "$dir/rc-$2")"
+              fi
+              # -n -l -U USER -u root CMD
+              if grep -qxF -- "$7" "$dir/allow-$4" 2>/dev/null; then
+                echo "$7"
+                exit 0
+              fi
+              exit 1
+
+        - name: Which passwd the probe would run
+          ansible.builtin.command:
+            argv: [sh, -c, command -v passwd]
+          environment: "{{ probe_test_env }}"
+          register: probe_test_which
+          changed_when: false
+
+        - name: The stub passwd comes first on PATH
+          ansible.builtin.assert:
+            that:
+              - probe_test_which.stdout == probe_test_tmp.path ~ '/bin/passwd'
+            quiet: true
+
+        - name: Run each case
+          ansible.builtin.include_tasks: sudo_probe_case.yml
+          loop:
+            - {name: locked + NOPASSWD, expect: pass, admin: "{{ probe_ok }}", auto: "{{ probe_ok }}"}
+            - name: no password (NP) counts as not usable
+              expect: pass
+              admin: {status: NP, probe: ["0\n", 0]}
+              auto: {status: NP, probe: ["0\n", 0]}
+            - name: locked + password required
+              expect: fail
+              admin: {status: L, probe: ["sudo: a password is required\n", 1]}
+              auto: "{{ probe_ok }}"
+            - name: locked + runs as itself
+              expect: fail
+              admin: {status: L, probe: ["1000\n", 0]}
+              auto: "{{ probe_ok }}"
+            - name: locked + extra output
+              expect: fail
+              admin: {status: L, probe: ["0\nwarning\n", 0]}
+              auto: "{{ probe_ok }}"
+            - name: usable password + (ALL) ALL
+              expect: pass
+              admin: {status: P, allow: [/usr/bin/id, /bin/sh]}
+              auto: "{{ probe_ok }}"
+            - name: usable password + no rule
+              expect: fail
+              admin: {status: P, allow: []}
+              auto: "{{ probe_ok }}"
+            - name: usable password + only some commands
+              expect: fail
+              admin: {status: P, allow: [/usr/bin/id]}
+              auto: "{{ probe_ok }}"
+            - name: the automation user stays strict even with a usable password
+              expect: fail
+              admin: "{{ probe_ok }}"
+              auto: {status: P, probe: ["sudo: a password is required\n", 1], allow: [/usr/bin/id, /bin/sh]}
+            - name: unexpected passwd -S output
+              expect: fail
+              calls: false
+              admin: {status: "?", probe: ["0\n", 0]}
+              auto: "{{ probe_ok }}"
+          loop_control:
+            loop_var: probe_case
+            label: "{{ probe_case.name }}"
+
+        - name: Every case got the expected verdict and command lines
+          ansible.builtin.assert:
+            that:
+              - probe_test_verdicts | length == 10
+              - probe_test_verdicts | dict2items | rejectattr('value') | list | length == 0
+            fail_msg: "Wrong: {{ probe_test_verdicts | dict2items | rejectattr('value') | map(attribute='key') | list }}"
+            quiet: true
+
+      always:
+        - name: Remove the scratch directory
+          ansible.builtin.file:
+            path: "{{ probe_test_tmp.path }}"
+            state: absent

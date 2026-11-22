@@ -1,0 +1,22 @@
+---
+# After a detection case, pass or fail: every path detection stat'ed, ran with --version, handed to
+# dpkg-query -S or got back from realpath is under the scratch dir t. A case that reached this machine's own
+# binaries (e.g. a runner's /usr/lib/cargo/bin/sudo) fails the play here, naming them. If a case fails before
+# detection runs, the results checked are the previous run's: another case's (already checked here) or the
+# render step's on this machine, which fails here (fail-closed).
+- name: "Detection looked only under the scratch dir ({{ scope_case }})"
+  vars:
+    looked_at: >-
+      {{ ((operator_account_sudo_stat.results | default([]))
+          + (operator_account_sudo_versions.results | default([]))
+          + (operator_account_sudo_rs_owner.results | default([]))
+          + (operator_account_sudo_rs_version.results | default([])))
+         | map(attribute='item') | list
+         + (operator_account_sudo_rs_real.stdout_lines | default([])) }}
+    outside: "{{ looked_at | reject('match', (t ~ '/') | regex_escape) | unique | list }}"
+  ansible.builtin.assert:
+    that:
+      - looked_at | length > 0
+      - outside | length == 0
+    fail_msg: "Detection looked outside {{ t }}: {{ outside | to_json }}"
+    quiet: true

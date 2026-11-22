@@ -1,0 +1,35 @@
+---
+# Broker management lock-down (docs/CONTRACTS.md §12.23). Read-only for the models: the probe names a model
+# that doesn't exist, so even a broker without the lock-down could push nothing. Skipped in check mode.
+# From the host through the published port, the broker sees a peer that isn't open-webui's pinned address,
+# and /api/push is refused for everyone anyway: 403. (The allow path for open-webui's management calls is
+# proven by apps/gpu-broker's own tests, not by a live pull.)
+
+- name: Broker | /api/push from the host through the published port
+  ansible.builtin.uri:
+    url: "http://{{ tailnet_ip }}:{{ ai_stack_broker_port }}/api/push"
+    method: POST
+    body_format: json
+    body:
+      model: "{{ ai_stack_broker_probe_model }}"
+      stream: false
+    status_code: [-1, 200, 201, 204, 400, 401, 403, 404, 405, 409, 500, 502, 503]
+    timeout: 15
+    return_content: true
+  register: ai_stack_broker_push
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Broker | /api/push is refused (403)
+  ansible.builtin.assert:
+    that:
+      - ai_stack_broker_push.status | default(-1) == 403
+      # apps/gpu-broker's own refusal (§12.23), so the 403 can't come from anything else.
+      - "'/api/push is disabled' in (ai_stack_broker_push.content | default(''))"
+    fail_msg: >-
+      POST /api/push via {{ tailnet_ip }}:{{ ai_stack_broker_port }} answered {{ ai_stack_broker_push.status
+      | default('nothing') }} ({{ ai_stack_broker_push.msg | default('') }}), not 403: the broker does not
+      refuse model management (apps/gpu-broker, §12.23). Is the broker image current?
+    success_msg: "/api/push via the published port: 403, as it must be."
+    quiet: true
+  when: not ansible_check_mode

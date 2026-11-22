@@ -35,3 +35,25 @@ docker_address_pools_avoid:
 
 # community.docker.docker_compose_v2 needs the compose plugin at this version or newer.
 docker_compose_min_version: "2.18.0"
+
+# --- Optional install path (docs/CONTRACTS.md §12.8) ---
+# false (media_servers): Docker is preinstalled and this role only checks it; nothing below is used.
+# true (ai_servers): install Docker Engine + the compose plugin from Docker's official apt repo, the same
+# source the mediaserver uses, at the versions pinned in versions.yml -> apt_packages, and hold them.
+docker_install: false
+docker_apt_repo_url: https://download.docker.com/linux/ubuntu
+docker_apt_key_url: "{{ docker_apt_repo_url }}/gpg"
+docker_apt_keyring: /etc/apt/keyrings/docker.asc
+# Docker Release (CE deb) signing key. The downloaded key must contain exactly this primary key, or the play fails.
+docker_apt_key_fingerprint: 9DC858229FC7DD38854AE2D88D81803C0EBFCD88
+docker_apt_codename: "{{ ansible_facts['distribution_release'] }}"
+docker_apt_arch: amd64
+# Installed at apt_packages[<name>] and put on hold, so unattended-upgrades and `apt upgrade` leave them alone.
+# Recommends are not installed; rootless-extras is listed explicitly (the mediaserver has it) so it is pinned too.
+docker_install_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+  - docker-ce-rootless-extras

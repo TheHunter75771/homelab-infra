@@ -1,0 +1,36 @@
+---
+# Fixed by the contract (§12.15.3, §12.15.7) and Y's README.
+ai_host_agent_config_dir: /etc/ai-host-agent
+ai_host_agent_config_file: "{{ ai_host_agent_config_dir }}/config.json"
+ai_host_agent_token_file: "{{ ai_host_agent_config_dir }}/token"
+# Token file and directory owners (root:aictl-agent 0640, dir 0750). The tests override them.
+ai_host_agent_token_owner: root
+ai_host_agent_token_group: "{{ ai_host_agent_user }}"
+ai_host_agent_unit_name: ai-host-agent.service
+ai_host_agent_unit: /etc/systemd/system/{{ ai_host_agent_unit_name }}
+ai_host_agent_launcher: ai-host-agent
+ai_host_agent_package: ai_host_agent
+ai_host_agent_python: /usr/bin/python3
+# The AVC check's program (the tests point it at stubs).
+ai_host_agent_ausearch: ausearch
+
+ai_host_agent_binds:
+  - 127.0.0.1
+  - "{{ gaming_pc_tailnet_ip }}"
+# Ollama binds only the PC's tailnet address (role ollama_rocm), never loopback, so the agent reaches
+# it there: one of the agent's own bind addresses (Integrator, 2026-10-26).
+ai_host_agent_ollama_url: "http://{{ gaming_pc_tailnet_ip }}:{{ ollama_rocm_port | default(11434) }}"
+ai_host_agent_config: >-
+  {{ {'binds': ai_host_agent_binds,
+      'port': ai_host_agent_port | int,
+      'token_file': ai_host_agent_token_file,
+      'ollama_url': ai_host_agent_ollama_url,
+      'sudo_exes': ai_host_agent_sudo_exes}
+     | combine(ai_host_agent_config_extra) }}
+
+# Who may talk to the agent at all (IPAddressAllow=): loopback, this PC's own tailnet addresses (the
+# role's own check of the tailnet bind comes from there) and ai-box's.
+ai_host_agent_ip_allow: >-
+  {{ (['localhost', gaming_pc_tailnet_ip, ai_box_tailnet_ip | default(''),
+       gaming_pc_tailnet_ip6 | default(''), ai_box_tailnet_ip6 | default('')])
+     | select('string') | reject('equalto', '') | unique | list }}

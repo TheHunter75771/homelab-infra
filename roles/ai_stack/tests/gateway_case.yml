@@ -1,0 +1,26 @@
+---
+# One gateway case for test_render.yml: runs the role's tasks/gateway_assert.yml with a sample live gateway and
+# pins, and checks it passes or fails as expected.
+- name: Gateway case | the role's check
+  block:
+    - name: Gateway case | tasks/gateway_assert.yml
+      ansible.builtin.include_tasks: "{{ ai_stack_test_role }}/tasks/gateway_assert.yml"
+      vars:
+        ai_stack_ai_gateway: {stdout: "{{ gw_case.gateway }}"}
+        ai_stack_pinned_ips: "{{ gw_case.pins }}"
+
+    - name: Gateway case | it passed
+      ansible.builtin.set_fact:
+        gw_case_failed: false
+  rescue:
+    - name: Gateway case | it failed
+      ansible.builtin.set_fact:
+        gw_case_failed: true
+  always:
+    - name: Gateway case | outcome is as expected
+      ansible.builtin.assert:
+        that:
+          - gw_case_failed is defined
+          - (not gw_case_failed) == (gw_case.ok | bool)
+        fail_msg: "{{ gw_case.name }}: expected {{ 'pass' if gw_case.ok | bool else 'fail' }}."
+        quiet: true

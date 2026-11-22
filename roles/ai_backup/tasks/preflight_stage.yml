@@ -1,0 +1,60 @@
+---
+# Read-only. Refuses before anything changes on ai-box.
+- name: Preflight | stage inputs
+  ansible.builtin.assert:
+    that:
+      - ai_backup_stage_keep | int >= 1
+      - ai_backup_stage_keep | string is match('^[0-9]+$')
+      - ai_backup_stage_calendar | length > 0
+      - ai_backup_account is match('^[a-z_][a-z0-9_-]{0,31}$')
+      - ai_backup_pull_from | length > 0
+      # Each from= entry is an IP literal: nothing that could close the quote or add an option.
+      - ai_backup_pull_from | reject('match', '^([0-9]{1,3}\.){3}[0-9]{1,3}$|^[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*$') | list == []
+      - ai_backup_volume_dir is match('^/[A-Za-z0-9._/-]+$') and '/../' not in ai_backup_volume_dir ~ '/'
+      - ai_backup_env_file is match('^/[A-Za-z0-9._/-]+$') and '/../' not in ai_backup_env_file ~ '/'
+      - ai_backup_stage_dir is match('^/[A-Za-z0-9._/-]+$') and '/../' not in ai_backup_stage_dir ~ '/'
+      - ai_backup_rrsync is abs
+    fail_msg: >-
+      Bad ai_backup stage inputs: keep {{ ai_backup_stage_keep }}, account {{ ai_backup_account }}, from
+      {{ ai_backup_pull_from }} (set gaming_pc_tailnet_ip in host_vars), paths {{ ai_backup_volume_dir }},
+      {{ ai_backup_env_file }}, {{ ai_backup_stage_dir }}.
+    quiet: true
+
+- name: Preflight | look at the volume, its folders, the .env and rrsync (no links followed)
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: false
+  loop:
+    - "{{ ai_backup_volume_dir }}"
+    - "{{ ai_backup_volume_dir }}/uploads"
+    - "{{ ai_backup_volume_dir }}/vector_db"
+    - "{{ ai_backup_env_file }}"
+    - "{{ ai_backup_rrsync }}"
+  register: ai_backup_pre_stat
+
+- name: Preflight | the open-webui volume and its uploads/ and vector_db/ are real directories
+  ansible.builtin.assert:
+    that:
+      - item.stat.isdir | default(false)
+      - not item.stat.islnk | default(false)
+    fail_msg: "{{ item.item }} is missing or not a real directory: is the ai stack deployed (role ai_stack)?"
+    quiet: true
+  loop: "{{ ai_backup_pre_stat.results[:3] }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Preflight | the ai stack's .env is a regular file
+  ansible.builtin.assert:
+    that:
+      - ai_backup_pre_stat.results[3].stat.isreg | default(false)
+    fail_msg: "{{ ai_backup_env_file }} is missing or not a regular file (role ai_stack generates it)."
+    quiet: true
+
+- name: Preflight | rrsync is installed (the forced command would refuse every pull)
+  ansible.builtin.assert:
+    that:
+      - ai_backup_pre_stat.results[4].stat.exists
+      - ai_backup_pre_stat.results[4].stat.executable | default(false)
+    fail_msg: "{{ ai_backup_rrsync }} is missing; install rsync >= 3.2.4 or set ai_backup_rrsync."
+    quiet: true

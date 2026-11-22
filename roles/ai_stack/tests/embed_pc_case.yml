@@ -1,0 +1,27 @@
+---
+# One case for test_render.yml: runs the role's tasks/embed_pc.yml with a given ai_embed_model and gaming-PC
+# extra-model list (or no PC host), and checks it passes or fails as expected.
+- name: Embed PC case | the role's check
+  block:
+    - name: Embed PC case | tasks/embed_pc.yml
+      ansible.builtin.include_tasks: "{{ ai_stack_test_role }}/tasks/embed_pc.yml"
+      vars:
+        ai_embed_model: "{{ embed_case.embed if embed_case.embed else undef(hint='unset') }}"
+        ai_stack_pc_host: "{{ embed_case.pc }}"
+        ai_stack_pc_extra_models: "{{ embed_case.extra }}"
+
+    - name: Embed PC case | it passed
+      ansible.builtin.set_fact:
+        embed_case_failed: false
+  rescue:
+    - name: Embed PC case | it failed
+      ansible.builtin.set_fact:
+        embed_case_failed: true
+  always:
+    - name: Embed PC case | outcome is as expected
+      ansible.builtin.assert:
+        that:
+          - embed_case_failed is defined
+          - (not embed_case_failed) == (embed_case.ok | bool)
+        fail_msg: "{{ embed_case.name }}: expected {{ 'pass' if embed_case.ok | bool else 'fail' }}."
+        quiet: true

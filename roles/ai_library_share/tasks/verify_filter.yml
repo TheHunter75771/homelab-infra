@@ -1,0 +1,88 @@
+---
+# The filtering layers in front of an smbd that listens everywhere (Lead after Reviewer G), read live:
+#   1. smb.service's IP filter (the drop-in): IPAddressDeny=any, IPAddressAllow=loopback + ai-box;
+#   2. module G's firewalld policy homelab-ai-only: the 445 reject rules for everyone but ai-box;
+#   3. no active firewalld zone but `trusted` (tailscale0, covered by 2) opens 445 (the LAN refusal).
+# (4, Samba's hosts allow/deny, is in smb.conf and checked by testparm.) Read-only.
+- name: Verify | smb.service's IP filter as systemd loaded it
+  ansible.builtin.command:
+    argv: ["{{ ai_library_share_systemctl }}", show, "{{ ai_library_share_smb_unit }}", -p, IPAddressDeny, -p, IPAddressAllow]
+  register: ai_library_share_ipfilter
+  changed_when: false
+
+- name: Verify | the IP filter denies everyone but loopback and ai-box
+  vars:
+    ai_library_share_shown: >-
+      {{ dict(ai_library_share_ipfilter.stdout_lines | select('search', '=') | map('split', '=', 1)) }}
+  ansible.builtin.assert:
+    that:
+      - (ai_library_share_shown.IPAddressDeny | default('')).split() | sort == ['0.0.0.0/0', '::/0']
+      - (ai_library_share_shown.IPAddressAllow | default('')).split() | sort == ai_library_share_smb_ip_allow_shown | sort
+    fail_msg: >-
+      {{ ai_library_share_smb_unit }} has IPAddressDeny={{ ai_library_share_shown.IPAddressDeny | default('') }} and
+      IPAddressAllow={{ ai_library_share_shown.IPAddressAllow | default('') }}; want 0.0.0.0/0 ::/0 and
+      {{ ai_library_share_smb_ip_allow_shown | join(' ') }} (the drop-in {{ ai_library_share_smb_dropin }}).
+    quiet: true
+
+- name: Verify | module G's live policy rules
+  ansible.builtin.command:
+    argv: ["{{ ai_library_share_firewall_cmd }}", "--policy={{ ai_library_share_g_policy }}", --list-rich-rules]
+  register: ai_library_share_g_live
+  changed_when: false
+
+- name: Verify | the policy rejects 445 from everyone but ai-box
+  ansible.builtin.assert:
+    that:
+      - ai_library_share_g_rules | difference(ai_library_share_g_live.stdout_lines | map('trim') | list) | length == 0
+    fail_msg: >-
+      The live firewalld policy {{ ai_library_share_g_policy }} lacks
+      {{ ai_library_share_g_rules | difference(ai_library_share_g_live.stdout_lines | map('trim') | list) | to_json }}.
+      Run playbooks/gaming-pc-ai.yml with ollama_rocm_policy_privileged_ports: [445] (module G).
+    quiet: true
+
+- name: Verify | the active firewalld zones
+  ansible.builtin.command:
+    argv: ["{{ ai_library_share_firewall_cmd }}", --get-active-zones]
+  register: ai_library_share_zones
+  changed_when: false
+
+- name: Verify | what each active zone but trusted opens
+  ansible.builtin.command:
+    argv: ["{{ ai_library_share_firewall_cmd }}", "--zone={{ item.0 }}", "{{ item.1 }}"]
+  loop: "{{ ai_library_share_lan_zones | product(['--list-services', '--list-ports', '--list-rich-rules']) | list }}"
+  loop_control:
+    label: "{{ item.0 }} {{ item.1 }}"
+  register: ai_library_share_zone_open
+  changed_when: false
+  vars:
+    ai_library_share_lan_zones: >-
+      {{ ai_library_share_zones.stdout_lines | reject('match', '^\s') | map('split') | map('first')
+         | reject('equalto', 'trusted') | list }}
+
+- name: Verify | no LAN zone opens 445 (no samba service, no 445 port, no 445 rule)
+  vars:
+    # Every tcp port or range a zone opens, as "a-b"; the ones that include 445.
+    ai_library_share_tcp_ranges: >-
+      {{ ai_library_share_zone_open.results
+         | selectattr('item.1', 'equalto', '--list-ports') | map(attribute='stdout') | map('split') | flatten
+         | select('match', '^[0-9]+(-[0-9]+)?/tcp$') | map('regex_replace', '/tcp$', '')
+         | map('regex_replace', '^([0-9]+)$', '\1-\1') | list }}
+    ai_library_share_open_ports: >-
+      {% set hits = [] %}{% for r in ai_library_share_tcp_ranges %}{% set ab = r.split('-') %}{% if ab[0] | int <= 445
+      and 445 <= ab[1] | int %}{% set _ = hits.append(r ~ '/tcp') %}{% endif %}{% endfor %}{{ hits }}
+    ai_library_share_open: >-
+      {{ ai_library_share_zone_open.results
+         | selectattr('item.1', 'equalto', '--list-services') | map(attribute='stdout') | map('split') | flatten
+         | select('match', '^samba(-dc)?$') | list
+         + ai_library_share_open_ports
+         + (ai_library_share_zone_open.results
+            | selectattr('item.1', 'equalto', '--list-rich-rules') | map(attribute='stdout_lines') | flatten
+            | select('search', 'port="445"') | reject('search', ' reject$| drop$') | list) }}
+  ansible.builtin.assert:
+    that:
+      - ai_library_share_zone_open.results | length > 0
+      - ai_library_share_open | length == 0
+    fail_msg: >-
+      {{ 'No active zone besides trusted was found.' if ai_library_share_zone_open.results | length == 0
+         else 'A LAN zone opens 445: ' ~ (ai_library_share_open | to_json) }}
+    quiet: true

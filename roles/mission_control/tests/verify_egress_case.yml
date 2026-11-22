@@ -1,0 +1,49 @@
+---
+# verify_egress.yml with the fake systemd-run printing a canned probe result: egress_case = {name, change, want}.
+# The canned result is every target's `want` from the plan plus crypto ok, with `change` applied (a null value
+# removes that target); change null makes the output garbage. The fake records its argv, which must carry the
+# units' whole sandbox (IP filter included), the venv's interpreter and the plan.
+- name: Verify egress | the canned result for {{ egress_case.name }}
+  vars:
+    # A "blocked" target answers as a dropped SYN would: a timeout.
+    good: >-
+      {{ dict(mission_control_probe_plan | map(attribute='name')
+              | zip(mission_control_probe_plan | map(attribute='want') | map('regex_replace', '^blocked$', 'ETIMEDOUT')))
+         | combine({'crypto': 'ok'}) }}
+    changed: "{{ good | combine(egress_case.change) | dict2items | rejectattr('value', 'none') | items2dict }}"
+  ansible.builtin.copy:
+    content: "{{ (changed | to_json) if egress_case.change is not none else 'Traceback (most recent call last):' }}\n"
+    dest: "{{ test_tmp }}/probe.out"
+    mode: "0600"
+
+- name: Verify egress for {{ egress_case.name }}
+  block:
+    - name: Verify egress | verify_egress.yml for {{ egress_case.name }}
+      ansible.builtin.include_tasks: ../tasks/verify_egress.yml
+    - name: Passed
+      ansible.builtin.set_fact:
+        test_egress_got: pass
+  rescue:
+    - name: Failed
+      ansible.builtin.set_fact:
+        test_egress_got: >-
+          {{ 'fail' if ansible_failed_task.name == "Verify | every probe target got the IP filter's answer"
+             else 'error: ' ~ ansible_failed_task.name }}
+
+- name: Verify egress | the fake systemd-run's argv for {{ egress_case.name }}
+  vars:
+    argv: "{{ lookup('ansible.builtin.file', test_tmp ~ '/systemd-run.args').splitlines() }}"
+  ansible.builtin.assert:
+    that:
+      - test_egress_got == egress_case.want
+      - argv[:6] == ['--wait', '--pipe', '--collect', '--quiet', '--service-type=oneshot', '--description=mission-control egress probe (Ansible verify)']
+      - (mission_control_sandbox | map('regex_replace', '^', '--property=') | list) | reject('in', argv) | list == []
+      - "'--property=IPAddressAllow=127.0.0.1/32 127.0.0.53/32 100.64.0.30/32 172.20.0.4/32 100.64.0.40/32' in argv"
+      - "'--property=TemporaryFileSystem=/run:ro' in argv"
+      - "'--property=BindReadOnlyPaths=/run/dbus/system_bus_socket /run/systemd/system /run/systemd/resolve' in argv"
+      - "'--property=User=' ~ test_me in argv"
+      - argv[-6] == '--'
+      - argv[-5:-1] == [mission_control_venv_python, '-I', '-B', test_tmp ~ '/opt/mission-control/lib/egress_probe.py']
+      - (argv[-1] | from_json) == mission_control_probe_plan
+    fail_msg: "{{ egress_case.name }}: {{ test_egress_got }}, want {{ egress_case.want }}; argv {{ argv }}"
+    quiet: true

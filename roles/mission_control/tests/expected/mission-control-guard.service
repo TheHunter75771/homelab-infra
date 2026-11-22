@@ -1,0 +1,27 @@
+# Ansible managed
+# Mission Control's local-access guard (Reviewer Q, Q-1): loads /etc/mission-control/guard.nft, which replaces only the
+# table inet mission_control_guard (never `flush ruleset`). mission-control.service requires it, so the server never
+# listens unguarded. After nftables.service: if that unit is ever enabled, its /etc/nftables.conf (`flush ruleset`)
+# runs first and the guard is loaded on top. Reload re-applies the file.
+[Unit]
+Description=Mission Control local-access guard (nftables table inet mission_control_guard)
+Documentation=file:///etc/mission-control/guard.nft
+After=nftables.service
+Before=mission-control.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/mission-control/guard.nft
+ExecReload=/usr/sbin/nft -f /etc/mission-control/guard.nft
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_NETLINK AF_UNIX
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

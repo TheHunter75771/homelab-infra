@@ -1,0 +1,86 @@
+---
+# Render finance-digest.service and .timer with the real paths and verify them. Any systemd-analyze warning
+# fails, except one about the machine's own unit files. Params: fd_case (name), fd_expect_allow (the exact IPAddressAllow
+# value), fd_expect_public (Notion on).
+- name: Unit dir ({{ fd_case }})
+  ansible.builtin.file:
+    path: "{{ test_tmp }}/units-{{ fd_case }}"
+    state: directory
+    mode: "0755"
+
+- name: Render the unit and the timer ({{ fd_case }})
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ test_tmp }}/units-{{ fd_case }}/{{ item }}"
+    mode: "0644"
+  loop: [finance-digest.service, finance-digest.timer]
+
+- name: Systemd-analyze verify ({{ fd_case }})
+  ansible.builtin.command:
+    argv:
+      - systemd-analyze
+      - verify
+      - "{{ test_tmp }}/units-{{ fd_case }}/finance-digest.service"
+      - "{{ test_tmp }}/units-{{ fd_case }}/finance-digest.timer"
+  register: fd_test_verify
+  changed_when: false
+  # Any stderr line fails, except systemd's warnings about the machine's own unit files (ubuntu-latest's newer systemd:
+  # "<host unit dir>/x.service:26: Support for option CPUAccounting= has been removed") that name no unit verified here.
+  # Not caught: a host drop-in for a template or prefix of ours (foo@.service.d, foo-.service.d); a CI runner has none.
+  failed_when: >-
+    fd_test_verify.rc != 0
+    or fd_test_verify.stderr_lines | reject('match', '(/usr/lib|/lib|/etc|/run)/systemd/[^:]+:[0-9]+: ') | list | length > 0
+    or fd_test_verify.stderr_lines | select('search', fd_test_verify.cmd[2:] | map('basename') | map('regex_escape') | join('|'))
+    | list | length > 0
+
+- name: The unit carries the contract's settings ({{ fd_case }})
+  vars:
+    unit: "{{ lookup('ansible.builtin.file', test_tmp ~ '/units-' ~ fd_case ~ '/finance-digest.service') }}"
+    timer: "{{ lookup('ansible.builtin.file', test_tmp ~ '/units-' ~ fd_case ~ '/finance-digest.timer') }}"
+    lines: "{{ unit.splitlines() }}"
+    deny: "{{ unit | regex_search('(?m)^IPAddressDeny=(.*)$', '\\1') | first | split(' ') }}"
+    allow: "{{ unit | regex_search('(?m)^IPAddressAllow=(.*)$', '\\1') | first | split(' ') }}"
+    service_section: "{{ unit | regex_search('(?ms)^\\[Service\\]$(.*)', '\\1') | first }}"
+  ansible.builtin.assert:
+    that:
+      # The [Service] section is exactly the sandbox list plus the four fixed keys (each entry once).
+      - finance_digest_sandbox | reject('in', lines) | list == []
+      - (service_section.splitlines() | reject('match', '^(#|$)') | list | sort)
+        == ((finance_digest_sandbox + ['Type=oneshot', 'ExecStart=' ~ (finance_digest_argv | join(' ')),
+            'TimeoutStartSec=10min', 'SyslogIdentifier=finance-digest']) | sort)
+      - unit is search('(?m)^Type=oneshot$')
+      - unit is search('(?m)^ExecStart=/usr/bin/python3 -I -B /opt/finance-digest/finance-digest --config /etc/finance-digest/config.json run$')
+      - unit is not search('--dry-run')
+      - unit is not search('(?m)^\[Install\]')
+      - unit is search('(?m)^User=fdigest$') and unit is search('(?m)^Group=fdigest$')
+      - unit is not search('(?m)^SupplementaryGroups=')
+      - unit is search('(?m)^ProtectSystem=strict$') and unit is search('(?m)^ProtectHome=yes$')
+      - unit is search('(?m)^PrivateTmp=yes$') and unit is search('(?m)^NoNewPrivileges=yes$')
+      - unit | regex_findall('(?m)^ReadWritePaths=') == ['ReadWritePaths=']
+      - unit is search('(?m)^ReadWritePaths=/srv/ai-library/50-finance$')
+      - unit is search('(?m)^RequiresMountsFor=/srv/ai-library$')
+      - unit is search('(?m)^AssertPathExists=/srv/ai-library/.ai-library-sentinel$')
+      - unit is search('(?m)^AssertPathIsDirectory=/srv/ai-library/50-finance$')
+      - unit is search('(?m)^CapabilityBoundingSet=$') and unit is search('(?m)^AmbientCapabilities=$')
+      - unit is search('(?m)^RestrictAddressFamilies=AF_INET AF_UNIX$')
+      - unit is search('(?m)^ProtectProc=invisible$')
+      - unit is not search('(?m)^ProcSubset=')
+      - unit is not search('(?m)^(Environment|EnvironmentFile|PassEnvironment)=')
+      # IP filter: exactly one of each line.
+      - unit | regex_findall('(?m)^IPAddressDeny=') | length == 1
+      - unit | regex_findall('(?m)^IPAddressAllow=') | length == 1
+      - unit is search('(?m)^IPAddressAllow=' ~ (fd_expect_allow | regex_escape) ~ '$')
+      - "'localhost' not in allow and 'any' not in allow and '127.0.0.1/32' not in allow"
+      - allow | select('search', '/0$') | list == []
+      - (deny == ['any']) if not fd_expect_public else (deny | sort == finance_digest_ip_deny_public | sort)
+      - fd_expect_public or unit is search('(?m)^IPAddressDeny=any$')
+      - not fd_expect_public or ('any' not in deny and '0.0.0.0/0' not in deny and '::/0' not in deny)
+      - not fd_expect_public or (deny is superset(finance_digest_ip_deny_required))
+      # The timer.
+      - timer is search('(?m)^OnCalendar=\*-\*-\* 09:30:00 America/New_York$')
+      - timer is search('(?m)^Persistent=true$')
+      - timer is search('(?m)^RandomizedDelaySec=120$')
+      - timer is search('(?m)^Unit=finance-digest.service$')
+      - timer is search('(?m)^WantedBy=timers.target$')
+    fail_msg: "{{ unit }}\n{{ timer }}"
+    quiet: true

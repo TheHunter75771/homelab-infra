@@ -1,0 +1,145 @@
+---
+# Role inputs (no host access). Every check names the rule it enforces; the tests match these task names.
+- name: Inputs | unit_hardening_units is a list of {unit, restart} mappings
+  ansible.builtin.assert:
+    that:
+      - unit_hardening_units is sequence
+      - unit_hardening_units is not string
+      - unit_hardening_units is not mapping
+      - unit_hardening_units | reject('mapping') | list | length == 0
+      - >-
+        unit_hardening_units | map('dict2items') | map('map', attribute='key') | map('sort') | map('join', ',')
+        | reject('in', ['restart,unit', 'restart,run_allow,unit']) | list | length == 0
+      - unit_hardening_units | map(attribute='restart') | reject('boolean') | list | length == 0
+      - unit_hardening_units | map(attribute='unit') | reject('string') | list | length == 0
+    fail_msg: >-
+      unit_hardening_units must be a list of {unit: <name>.service, restart: true|false} plus, for root units only,
+      run_allow: [<path under /run>, ...] (restart a YAML boolean), got {{ unit_hardening_units | to_json }}
+    quiet: true
+
+- name: Inputs | each run_allow is a list of plain paths under /run, none that hands out root (Q8-1)
+  vars:
+    uh_allow: "{{ unit_hardening_units | selectattr('run_allow', 'defined') | map(attribute='run_allow') | list }}"
+    uh_paths: "{{ uh_allow | select('sequence') | reject('string') | reject('mapping') | flatten | list }}"
+  ansible.builtin.assert:
+    that:
+      - uh_allow | reject('sequence') | list | length == 0
+      - uh_allow | select('string') | list | length == 0
+      - uh_allow | select('mapping') | list | length == 0
+      - uh_paths | reject('string') | list | length == 0
+      - uh_paths | reject('match', unit_hardening_run_allow_re) | list | length == 0
+      - uh_paths | select('search', '(?i)' ~ unit_hardening_run_deny_re) | list | length == 0
+      - uh_paths | unit_hardening_denied_ancestors(unit_hardening_run_deny_paths) | length == 0
+    fail_msg: >-
+      run_allow must list absolute paths under /run (no "."/".." segments, nothing after the last one), never
+      tailscaled's, a container runtime's or snapd's sockets, systemd's private or varlink sockets, userdb,
+      /run/user, /run/credentials or udev's control socket, nor a directory above any of them
+      (unit_hardening_run_deny_paths); got {{ uh_allow | to_json }}
+    quiet: true
+
+# Q10-1: the bus may only be bound as its socket. A directory above it (/run/dbus) would hand it out too, under a
+# name that reads like something else. (The preflight's advisory label also fires for any entry at or above it.)
+- name: Inputs | the system bus is allowed only as its socket path, never a directory above it
+  vars:
+    uh_paths: >-
+      {{ unit_hardening_units | selectattr('run_allow', 'defined') | map(attribute='run_allow') | flatten | list }}
+    uh_bad: >-
+      {{ uh_paths | unit_hardening_denied_ancestors([unit_hardening_bus_socket])
+         | reject('equalto', unit_hardening_bus_socket) | list }}
+  ansible.builtin.assert:
+    that: uh_bad | length == 0
+    fail_msg: >-
+      {{ uh_bad | join(', ') }}: allow the bus as {{ unit_hardening_bus_socket }} itself (the unit is then labelled
+      advisory: root + system bus)
+    quiet: true
+
+- name: Inputs | unit_hardening_remove is a list of names
+  ansible.builtin.assert:
+    that:
+      - unit_hardening_remove is sequence
+      - unit_hardening_remove is not string
+      - unit_hardening_remove is not mapping
+      - unit_hardening_remove | reject('string') | list | length == 0
+    fail_msg: unit_hardening_remove must be a list of unit names, got {{ unit_hardening_remove | to_json }}
+    quiet: true
+
+- name: Inputs | every name is a plain .service unit (no template, instance, socket or timer)
+  vars:
+    uh_names: "{{ unit_hardening_units | map(attribute='unit') | list + unit_hardening_remove }}"
+  ansible.builtin.assert:
+    that: uh_names | reject('match', unit_hardening_unit_re) | list | length == 0
+    fail_msg: >-
+      not a plain service unit: {{ uh_names | reject('match', unit_hardening_unit_re) | list | to_json }}.
+      The drop-in goes on the .service (a .socket's sandbox covers only its own Exec lines, not the service it
+      starts); a timer's service is listed by its .service name. Templates/instances aren't supported (one MainPID
+      per unit for the verify).
+    quiet: true
+
+- name: Inputs | no unit is listed twice, or both hardened and removed
+  vars:
+    uh_names: "{{ unit_hardening_units | map(attribute='unit') | list }}"
+  ansible.builtin.assert:
+    that:
+      - uh_names | unique | length == uh_names | length
+      - unit_hardening_remove | unique | length == unit_hardening_remove | length
+      - uh_names | intersect(unit_hardening_remove) | length == 0
+    fail_msg: >-
+      duplicates or overlap: units {{ uh_names | to_json }}, remove {{ unit_hardening_remove | to_json }}
+    quiet: true
+
+- name: Inputs | no excluded unit is listed (it needs tailscaled's socket, or its own role hides /run)
+  vars:
+    uh_excluded: "{{ unit_hardening_excluded | map(attribute='unit') | list }}"
+    uh_hit: "{{ unit_hardening_units | map(attribute='unit') | select('in', uh_excluded) | list }}"
+  ansible.builtin.assert:
+    that: uh_hit | length == 0
+    fail_msg: >-
+      excluded: {{ unit_hardening_excluded | selectattr('unit', 'in', uh_hit)
+      | map('dict2items') | map('map', attribute='value') | map('join', ': ') | join('; ') }}
+    quiet: true
+
+- name: Inputs | the verify's settle time is a whole number of seconds (0 to 60)
+  ansible.builtin.assert:
+    that:
+      - unit_hardening_verify_settle | string is match('^[0-9]+$')
+      - unit_hardening_verify_settle | int <= 60
+    fail_msg: unit_hardening_verify_settle must be 0 to 60, got {{ unit_hardening_verify_settle }}
+    quiet: true
+
+- name: Inputs | unit_hardening_systemctl_via_bus is a list of names
+  ansible.builtin.assert:
+    that:
+      - unit_hardening_systemctl_via_bus is sequence
+      - unit_hardening_systemctl_via_bus is not string
+      - unit_hardening_systemctl_via_bus is not mapping
+      - unit_hardening_systemctl_via_bus | reject('string') | list | length == 0
+    fail_msg: >-
+      unit_hardening_systemctl_via_bus must be a list of unit names, got {{ unit_hardening_systemctl_via_bus | to_json }}
+    quiet: true
+
+- name: Inputs | the busy check is set up (Q6-4)
+  ansible.builtin.assert:
+    that:
+      - unit_hardening_allow_busy_restart is boolean
+      - unit_hardening_busy_urls is mapping
+      - unit_hardening_busy_urls.values() | reject('string') | list | length == 0
+    fail_msg: >-
+      unit_hardening_allow_busy_restart must be a YAML boolean and unit_hardening_busy_urls a mapping of unit to URL
+      (got {{ unit_hardening_allow_busy_restart | to_json }}, {{ unit_hardening_busy_urls | to_json }})
+    quiet: true
+
+- name: Inputs | a restart-true unit that can be busy has a busy-check URL (Ollama's /api/ps)
+  vars:
+    uh_need: >-
+      {{ unit_hardening_units | selectattr('restart') | map(attribute='unit')
+         | select('in', unit_hardening_busy_required) | list }}
+    uh_bad: >-
+      {% set ns = namespace(out=[]) %}{% for u in uh_need %}{% if u not in unit_hardening_busy_urls
+      or unit_hardening_busy_urls[u] is not match('^https?://[^/\\s:]+:[0-9]+/\\S*$') %}{%
+      set ns.out = ns.out + [u] %}{% endif %}{% endfor %}{{ ns.out }}
+  ansible.builtin.assert:
+    that: uh_bad | length == 0
+    fail_msg: >-
+      restart: true but no usable busy-check URL (http(s)://<host>:<port>/...) for {{ uh_bad | join(', ') }}:
+      {{ unit_hardening_busy_urls | to_json }}. The role won't restart these without asking whether they are busy.
+    quiet: true

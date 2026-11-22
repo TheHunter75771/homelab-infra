@@ -1,0 +1,24 @@
+# {{ ansible_managed }}
+# Role ai_library_share (docs/CONTRACTS.md §12.17.2): nightly snapshot of the AI Library to the backup
+# drive (current/ + prev/). The script refuses unless both drives are mounted and the source is the
+# library (sentinel + Library.open). Run by hand: systemctl start {{ ai_library_share_backup_service }}
+[Unit]
+Description=AI Library backup (snapshot to the backup drive)
+RequiresMountsFor={{ ai_library_share_dir }} {{ ai_library_share_backup_dir }}
+
+[Service]
+Type=oneshot
+ExecStart={{ ai_library_share_python }} -I -B {{ ai_library_share_lib_dir }}/ai-library-backup.py --source {{ ai_library_share_dir }} --source-mount {{ ai_library_share_share_mount }}{% for t in ai_library_share_share_fstypes %} --source-fstype {{ t }}{% endfor %} --dest {{ ai_library_share_backup_dir }} --dest-mount {{ ai_library_share_backup_mount }}{% for t in ai_library_share_backup_fstypes %} --dest-fstype {{ t }}{% endfor %} --lib {{ ai_library_share_lib_dir }} --sentinel {{ ai_library_share_sentinel }}
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths={{ ai_library_share_backup_dir }}
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_FSETID

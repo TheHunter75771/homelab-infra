@@ -1,0 +1,32 @@
+---
+# Pull half (docs/CONTRACTS.md §12.28), gaming PC (Fedora), as root:
+#   include_role: {name: ai_backup, tasks_from: pull}
+#     vars: ai_backup_pull_private_key / ai_backup_pull_host_pubkey from the ai-box play's facts.
+# Why root and not a user timer: README, "Why a root play on the PC".
+# Order: read-only preflight (the backup drive is mounted, inputs), script, key + known_hosts, destination
+# folders, units + timer.
+
+- name: Pull | preflight (read-only)
+  ansible.builtin.import_tasks: preflight_pull.yml
+
+- name: Pull | script
+  ansible.builtin.import_tasks: install.yml
+
+- name: Pull | key and known_hosts
+  ansible.builtin.import_tasks: pull_key.yml
+
+- name: Pull | destination folders on the backup drive
+  ansible.builtin.import_tasks: dest_dirs.yml
+
+- name: Pull | units
+  ansible.builtin.import_tasks: units_pull.yml
+
+- name: Pull | load changed units before enabling the timer
+  ansible.builtin.meta: flush_handlers
+
+- name: Pull | the timer is enabled and running
+  ansible.builtin.systemd_service:
+    name: "{{ ai_backup_pull_timer }}"
+    enabled: true
+    state: started
+  ignore_errors: "{{ ansible_check_mode }}"

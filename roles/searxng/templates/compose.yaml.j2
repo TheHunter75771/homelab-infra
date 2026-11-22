@@ -1,0 +1,72 @@
+# {{ ansible_managed }}
+# SearXNG on ai-box (docs/CONTRACTS.md §12.16.2): used only by the research gate (role research_gate), which
+# connects straight to the pinned container address {{ searxng_ipv4 }}:{{ searxng_container_port }}. The loopback publish
+# {{ searxng_publish_host }}:{{ searxng_publish_port }} is for host-side checks only. Nothing is published on the tailnet, the LAN or
+# 0.0.0.0. The secret key comes from .env (SEARXNG_SECRET, root 0600, generated once on the host).
+name: {{ searxng_project }}
+
+services:
+  searxng:
+    image: "{{ images.searxng }}"
+    container_name: {{ searxng_container }}
+    restart: unless-stopped
+    # The image's own unprivileged user from the first process on: the entrypoint then skips its chown and
+    # update-ca-certificates (root-only paths), so no capability is needed at all.
+    user: "{{ searxng_uid }}:{{ searxng_gid }}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: {{ searxng_mem_limit }}
+    # Same as mem_limit: no swap, so it is OOM-killed instead of thrashing the HDD.
+    memswap_limit: {{ searxng_mem_limit }}
+    pids_limit: {{ searxng_pids_limit }}
+    # SEARXNG_SECRET only.
+    env_file:
+      - .env
+    environment:
+      SEARXNG_SETTINGS_PATH: /etc/searxng/settings.yml
+      # IPv4 only (the network has no IPv6), on the container port the gate and the publish use.
+      GRANIAN_HOST: 0.0.0.0
+      GRANIAN_PORT: "{{ searxng_container_port }}"
+      # Never chown (it can't anyway as {{ searxng_uid }}); the image's code is precompiled.
+      FORCE_OWNERSHIP: "false"
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      # settings.yml only (root 0644 on the host, no secret in it). Root-owned, so the entrypoint prints a
+      # harmless "not owned by searxng:searxng" warning for /etc/searxng; it only reads the file.
+      - type: bind
+        source: "{{ searxng_config_dir }}"
+        target: /etc/searxng
+        read_only: true
+        bind:
+          create_host_path: false
+    # The only writable paths: SearXNG's sqlite caches (in /tmp) and its data dir. Lost on restart, by design.
+    tmpfs:
+      - /tmp:size={{ searxng_tmpfs_size }},uid={{ searxng_uid }},gid={{ searxng_gid }},mode=0700
+      - /var/cache/searxng:size={{ searxng_tmpfs_size }},uid={{ searxng_uid }},gid={{ searxng_gid }},mode=0700
+    networks:
+      {{ searxng_network }}:
+        ipv4_address: {{ searxng_ipv4 }}
+    ports:
+      - "{{ searxng_publish_host }}:{{ searxng_publish_port }}:{{ searxng_container_port }}"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:{{ searxng_container_port }}/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    labels:
+      homelab.watch: "true"
+      # A settings change recreates the container (SearXNG reads settings.yml only at start).
+      homelab.config-hash: "{{ searxng_settings_hash }}"
+
+networks:
+  {{ searxng_network }}:
+    name: {{ searxng_network }}
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: {{ searxng_bridge_name }}
+    ipam:
+      config:
+        - subnet: {{ searxng_subnet }}
+          gateway: {{ searxng_gateway }}

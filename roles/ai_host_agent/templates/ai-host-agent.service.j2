@@ -1,0 +1,70 @@
+# {{ ansible_managed }}
+# ai-host-agent (docs/CONTRACTS.md §12.15.3): Y's reviewed unit (apps/ai-control/host-agent/README.md),
+# with the role's paths and the optional IP allowlist filled in.
+# SELinux: systemd runs /usr/bin/python3 (bin_t) as unconfined_service_t; no custom policy.
+[Unit]
+Description=ai-host-agent: read-only AI status for ai-box (CONTRACTS.md 12.15.3)
+After=network-online.target tailscaled.service ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{ ai_host_agent_python }} -I {{ ai_host_agent_install_dir }}/{{ ai_host_agent_launcher }} --config {{ ai_host_agent_config_file }}
+Restart=on-failure
+RestartSec=5
+
+# --- Identity: no privileges --------------------------------------------------------------------
+User={{ ai_host_agent_user }}
+Group={{ ai_host_agent_user }}
+# journalctl reads the system journal through this group. Not PrivateUsers=: that would
+# unmap the group and blind journalctl.
+SupplementaryGroups={{ ai_host_agent_groups | join(' ') }}
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+SystemCallFilter=@system-service
+# Not ~@resources: journalctl raises its own RLIMIT_NOFILE to open every journal file.
+SystemCallFilter=~@privileged
+SystemCallArchitectures=native
+SystemCallErrorNumber=EPERM
+
+# --- Sandbox -----------------------------------------------------------------------------------
+# Everything is read-only; the agent writes nothing (logs go to journald via stderr).
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+# It needs only /proc/self (mountinfo); other users' processes stay hidden.
+# Host check (README): `systemctl show` must still work under it, else "default" via inventory.
+ProtectProc={{ ai_host_agent_protect_proc }}
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+# cgroupfs read-only: memory.current is only read.
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# AF_UNIX for systemctl's D-Bus call and journald's stdout stream
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+# Bounded by design (16 handlers + 16 rejects + timers + children); this is the backstop.
+TasksMax={{ ai_host_agent_tasks_max }}
+MemoryMax={{ ai_host_agent_memory_max }}
+{% if ai_host_agent_ip_allowlist | bool %}
+# Network exposure is firewalld's job (module G: policy homelab-ai-only, 11510 from ai-box only).
+# Defence in depth: the unit's sockets talk only to loopback, this PC's and ai-box's tailnet addresses.
+IPAddressDeny=any
+IPAddressAllow={{ ai_host_agent_ip_allow | join(' ') }}
+{% else %}
+# Network exposure is firewalld's job (module G: policy homelab-ai-only, 11510 from ai-box only).
+# The IP allowlist is off (ai_host_agent_ip_allowlist: false).
+{% endif %}
+
+[Install]
+WantedBy=multi-user.target

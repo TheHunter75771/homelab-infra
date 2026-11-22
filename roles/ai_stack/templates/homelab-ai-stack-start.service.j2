@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Homelab ai stack: recreate tailnet-published containers that came up without their bindings
+Documentation=file://{{ ai_stack_start_script }}
+After=docker.service tailscaled.service
+PartOf=docker.service
+Requisite=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={{ ai_stack_start_script }}
+TimeoutStartSec={{ ai_stack_tailnet_wait_seconds + 180 }}
+
+[Install]
+WantedBy=docker.service

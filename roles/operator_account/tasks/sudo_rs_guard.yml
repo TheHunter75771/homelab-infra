@@ -1,0 +1,63 @@
+---
+# sudo-rs reads the same sudoers rule as classic sudo but writes no I/O log, so a full_logged account must
+# not be able to execute it. Group bits ---: members of the deny group can't run it; everyone else (other
+# r-x) still can, so Noah's own sudo is unchanged. dpkg-statoverride keeps the mode across package upgrades.
+- name: The sudo-rs guard is supported on this host
+  ansible.builtin.assert:
+    that:
+      - operator_account_os_family == 'Debian'
+    fail_msg: >-
+      sudo-rs found at {{ operator_account_sudo_rs | join(', ') }} on a non-Debian host. sudo-rs has no I/O
+      logging, and this role only knows how to deny it persistently with dpkg-statoverride. Ask the Lead.
+    quiet: true
+
+- name: Look up the sudo-rs deny group
+  ansible.builtin.getent:
+    database: group
+    key: "{{ operator_sudo_rs_deny_group }}"
+    fail_key: false
+
+- name: The sudo-rs deny group exists
+  ansible.builtin.group:
+    name: "{{ operator_sudo_rs_deny_group }}"
+    system: true
+    state: present
+
+- name: Read the existing stat overrides of the sudo-rs binaries
+  ansible.builtin.command:
+    argv: [dpkg-statoverride, --list, "{{ item }}"]
+  loop: "{{ operator_account_sudo_rs }}"
+  register: operator_account_statoverride
+  changed_when: false
+  failed_when: operator_account_statoverride.rc not in [0, 1]
+  check_mode: false
+
+- name: No foreign stat override is in the way
+  ansible.builtin.assert:
+    that:
+      - item.stdout | length == 0 or item.stdout | trim == 'root ' ~ operator_sudo_rs_deny_group ~ ' 4705 ' ~ item.item
+    fail_msg: "{{ item.item }} already has a different stat override ({{ item.stdout | trim }}); not replacing it. Ask the Lead."
+    quiet: true
+  loop: "{{ operator_account_statoverride.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: The sudo-rs binaries are not executable by the deny group (persistent)
+  ansible.builtin.command:
+    argv: [dpkg-statoverride, --update, --add, root, "{{ operator_sudo_rs_deny_group }}", "4705", "{{ item.item }}"]
+  loop: "{{ operator_account_statoverride.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.stdout | length == 0
+  changed_when: true
+
+# Repairs drift (someone chmod'ed it, or dpkg didn't reapply) without touching the override itself.
+- name: The sudo-rs binaries have the override's owner and mode
+  ansible.builtin.file:
+    path: "{{ item }}"
+    owner: root
+    group: "{{ operator_sudo_rs_deny_group }}"
+    mode: "04705"
+  loop: "{{ operator_account_sudo_rs }}"
+  # In check mode a group that is only about to be created can't be looked up.
+  when: not ansible_check_mode or ansible_facts.getent_group[operator_sudo_rs_deny_group] is not none

@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  author: homelab-infra
+  description: The daily read-only Money Hub digest on ai-box (hardened oneshot + timer, IP-filtered, writes the AI Library)
+  license: MIT
+  min_ansible_version: "2.17"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - all
+dependencies: []

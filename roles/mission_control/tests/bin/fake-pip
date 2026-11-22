@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+"""Fake pip for role mission_control's offline test (tasks/venv.yml). Called as
+  fake-pip <venv dir> install ... -r <lock>
+It appends its argv (JSON) to $MC_TEST_PIP_LOG and "installs" every name==version of the lock: a
+<name>-<version>.dist-info/METADATA in the venv's site-packages (importlib.metadata sees it) and an empty module for
+the push stack's import names, so the role's probe, drift check and import check run for real without a network.
+A lock holding a hash of 64 zeros (a "flipped" hash) is refused with exit 1, as pip --require-hashes would."""
+import glob
+import json
+import os
+import re
+import sys
+
+venv, args = sys.argv[1], sys.argv[2:]
+with open(os.environ["MC_TEST_PIP_LOG"], "a", encoding="utf-8") as fh:
+    fh.write(json.dumps(args) + "\n")
+lock = args[args.index("-r") + 1]
+# A flipped hash (the test writes 64 zeros) fails the way pip --require-hashes does, before installing anything.
+if "--hash=sha256:" + "0" * 64 in open(lock, encoding="utf-8").read():
+    print("ERROR: THESE PACKAGES DO NOT MATCH THE HASHES FROM THE REQUIREMENTS FILE.", file=sys.stderr)
+    sys.exit(1)
+site = glob.glob(os.path.join(venv, "lib", "python3*", "site-packages"))[0]
+MODULES = {"pywebpush": "pywebpush", "py-vapid": "py_vapid", "http-ece": "http_ece", "cryptography": "cryptography"}
+for line in open(lock, encoding="utf-8"):
+    m = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==(\S+)", line)
+    if not m:
+        continue
+    name, version = m.group(1), m.group(2)
+    info = os.path.join(site, "%s-%s.dist-info" % (re.sub(r"[-.]+", "_", name), version))
+    os.makedirs(info, exist_ok=True)
+    with open(os.path.join(info, "METADATA"), "w", encoding="utf-8") as fh:
+        fh.write("Metadata-Version: 2.1\nName: %s\nVersion: %s\n" % (name, version))
+    mod = MODULES.get(re.sub(r"[-_.]+", "-", name).lower())
+    if mod:
+        open(os.path.join(site, mod + ".py"), "w").close()

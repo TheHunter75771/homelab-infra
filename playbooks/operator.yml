@@ -1,0 +1,26 @@
+---
+# AI accounts (docs/CONTRACTS.md §12.13): `claude` (operator, full sudo, I/O-logged) and `localai`
+# (no sudo, no login). Role operator_account.
+#   Servers: .venv/bin/ansible-playbook playbooks/operator.yml -l media_servers:ai_servers </dev/null 2>&1 | cat
+#   Gaming PC (Noah, once, typing his sudo password):
+#            .venv/bin/ansible-playbook playbooks/operator.yml -l workstations -K
+# Servers first need `claude` in ssh_hardening_allow_users (site.yml / ai-server.yml) before it can log in.
+- name: AI accounts on the servers
+  hosts: media_servers:ai_servers
+  become: true
+  gather_facts: true
+  gather_subset:
+    - "!all"
+    - min
+  roles:
+    - role: operator_account
+
+- name: AI accounts on the gaming PC (loopback-only SSH for claude)
+  hosts: workstations
+  become: true
+  gather_facts: true
+  gather_subset:
+    - "!all"
+    - min
+  roles:
+    - role: operator_account

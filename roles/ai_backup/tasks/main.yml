@@ -1,0 +1,8 @@
+---
+# Role ai_backup has two halves on two hosts; use tasks_from (docs/CONTRACTS.md §12.28):
+#   include_role: {name: ai_backup, tasks_from: stage}        ai-box
+#   include_role: {name: ai_backup, tasks_from: export_key}   ai-box, after stage
+#   include_role: {name: ai_backup, tasks_from: pull}         gaming PC (root)
+- name: Refuse a bare role call
+  ansible.builtin.fail:
+    msg: Role ai_backup needs tasks_from stage, export_key or pull (README).

@@ -1,0 +1,77 @@
+---
+# Fixed by the contract (§12.16.4) and module R.
+research_gate_user: rgate
+research_gate_app_dir: /opt/research-gate
+research_gate_config_dir: /etc/research-gate
+research_gate_config_file: "{{ research_gate_config_dir }}/config.json"
+research_gate_service: research-gate.service
+research_gate_unit_dir: /etc/systemd/system
+research_gate_python: /usr/bin/python3
+# Owner/group of root-owned files rgate must read (config.json: root:rgate 0640). The tests override them.
+research_gate_root_owner: root
+research_gate_group: "{{ research_gate_user }}"
+# R's launcher (it puts its own directory first on sys.path, so it works under `python3 -I`) and the three
+# packages beside it: the only entries kept under /opt/research-gate.
+research_gate_launcher: "{{ research_gate_app_dir }}/research-gate"
+research_gate_packages: [research_gate, forge, library]
+research_gate_app_entries: "{{ research_gate_packages + ['research-gate'] }}"
+# §12.11 (Lead, module L): the share carries this sentinel file; the library's own layout has 35-forge/.
+research_gate_sentinel_name: .ai-library-sentinel
+research_gate_sentinel: "{{ research_gate_library_root }}/{{ research_gate_sentinel_name }}"
+research_gate_forge_dir: "{{ research_gate_library_root }}/35-forge"
+# Paths ProtectHome/ProtectSystem hide or make read-only in ways ReadWritePaths can't fix, plus system dirs.
+research_gate_library_forbidden_re: '^/(home|root|run|proc|sys|dev|etc|usr|boot|bin|sbin|lib|lib64|opt|var|tmp)(/|$)'
+
+# SearXNG's pinned address and container port: the inventory's values, else role searxng's defaults.
+research_gate_searxng_ipv4: >-
+  {{ searxng_ipv4 | default(research_gate_searxng_role_defaults.searxng_ipv4 | default('')) }}
+research_gate_searxng_port: >-
+  {{ searxng_container_port | default(research_gate_searxng_role_defaults.searxng_container_port | default(0)) }}
+research_gate_searxng_url: "http://{{ research_gate_searxng_ipv4 }}:{{ research_gate_searxng_port }}"
+research_gate_ip_allow:
+  - "{{ research_gate_searxng_ipv4 }}/32"
+  - "{{ research_gate_dns_stub }}/32"
+
+# /etc/research-gate/config.json: R's keys, all of them, nothing else. ipv4_only is fixed true (Lead,
+# 2026-10-27): the unit has no AF_INET6 (RestrictAddressFamilies), so R must use only IPv4 answers.
+research_gate_config: >-
+  {{ {'library_root': research_gate_library_root,
+      'searxng_url': research_gate_searxng_url,
+      'poll_interval': research_gate_poll_interval | int,
+      'results_per_query': research_gate_results_per_query | int,
+      'max_bytes': research_gate_max_bytes | int,
+      'fetch_timeout': research_gate_fetch_timeout | int,
+      'max_redirects': research_gate_max_redirects | int,
+      'user_agent': research_gate_user_agent,
+      'ipv4_only': true} }}
+research_gate_config_keys:
+  - fetch_timeout
+  - ipv4_only
+  - library_root
+  - max_bytes
+  - max_redirects
+  - poll_interval
+  - results_per_query
+  - searxng_url
+  - user_agent
+# The contract's minimum deny set (§12.16.4); preflight asserts research_gate_ip_deny covers each of them.
+research_gate_ip_deny_required:
+  - 127.0.0.0/8
+  - ::1/128
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  - 100.64.0.0/10
+  - 169.254.0.0/16
+  - fe80::/10
+  - fc00::/7
+# config.json's deploy-time check (`validate`; %s is the candidate file): R's own loader from the installed
+# code (unknown keys, ranges, URL and User-Agent rules), then exactly R's keys (the role renders every one) and
+# ipv4_only exactly true (the unit can't open IPv6 sockets).
+# -I -B: nothing from the environment or the working directory, no bytecode in the root-owned install.
+research_gate_config_validate: >-
+  {{ research_gate_python }} -I -B -c
+  "import sys; sys.path.insert(0, sys.argv[3]); from research_gate.config import load; load(sys.argv[1]);
+  import json; c = json.load(open(sys.argv[1])); k = set(sys.argv[2].split(','));
+  assert set(c) == k, sorted(set(c) ^ k); assert c['ipv4_only'] is True, 'ipv4_only must be true'"
+  %s {{ research_gate_config_keys | join(',') }} {{ research_gate_app_dir }}

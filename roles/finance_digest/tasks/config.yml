@@ -1,0 +1,49 @@
+---
+# /etc/finance-digest: root:fdigest 0750; config.json root:fdigest 0640 (no secrets); notion.json root:fdigest
+# 0640 (the Notion token) only when Notion is configured, removed otherwise. Absent or a real directory before
+# anything is written (Reviewer F: never write through a symlink).
+- name: Config | the config directory is a real directory (before any write)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    finance_digest_guard_dirs: ["{{ finance_digest_config_dir }}"]
+
+- name: Config | directory
+  ansible.builtin.file:
+    path: "{{ finance_digest_config_dir }}"
+    state: directory
+    owner: "{{ finance_digest_root_owner }}"
+    group: "{{ finance_digest_group }}"
+    mode: "0750"
+
+# Validated with D's own loader from the installed code (vars/main.yml finance_digest_config_validate).
+- name: Config | config.json
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ finance_digest_config_file }}"
+    owner: "{{ finance_digest_root_owner }}"
+    group: "{{ finance_digest_group }}"
+    mode: "0640"
+    follow: false
+    validate: "{{ finance_digest_config_validate }}"
+
+# The token is a secret: no_log hides the task's arguments, result and diff at any verbosity (tests/run.sh
+# greps a -vvv --diff run for a canary token, as text and base64).
+- name: Config | notion.json (Notion on)
+  ansible.builtin.copy:
+    content: "{{ finance_digest_notion_json }}\n"
+    dest: "{{ finance_digest_notion_file }}"
+    owner: "{{ finance_digest_root_owner }}"
+    group: "{{ finance_digest_group }}"
+    mode: "0640"
+    follow: false
+    validate: "{{ finance_digest_notion_validate }}"
+  diff: false
+  no_log: true
+  when: finance_digest_notion_on | bool
+
+- name: Config | notion.json removed (Notion off)
+  ansible.builtin.file:
+    path: "{{ finance_digest_notion_file }}"
+    state: absent
+  no_log: true
+  when: not finance_digest_notion_on | bool

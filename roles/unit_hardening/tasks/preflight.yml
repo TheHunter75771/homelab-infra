@@ -1,0 +1,303 @@
+---
+# Read-only. Refuses an unknown or unloaded unit, a DynamicUser unit, a oneshot marked restart: true, any unit
+# whose own directives or whose code (the files its Exec*/EnvironmentFile lines name, and their app directories)
+# use tailscaled's local API, a root unit that can't run in its own PID namespace (Q6-1), and the restart of a
+# busy unit (Q6-4). tailscaled itself must be there: the role pins its runtime directory.
+- name: Preflight | read each unit and tailscaled (systemctl cat)
+  ansible.builtin.command:
+    argv: ["{{ unit_hardening_systemctl }}", cat, --no-pager, "{{ item }}"]
+  loop: "{{ unit_hardening_units | map(attribute='unit') | list + [unit_hardening_tailscaled_unit] }}"
+  register: uh_cat
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Preflight | every unit is known to systemd (systemctl cat finds it)
+  vars:
+    uh_unknown: "{{ uh_cat.results | rejectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
+  ansible.builtin.assert:
+    that: uh_unknown | length == 0
+    fail_msg: "systemctl cat finds no unit file for {{ uh_unknown | join(', ') }}"
+    quiet: true
+
+- name: Preflight | read each unit's state (systemctl show)
+  ansible.builtin.command:
+    argv:
+      - "{{ unit_hardening_systemctl }}"
+      - show
+      - --property=LoadState
+      - --property=ActiveState
+      - --property=SubState
+      - --property=Type
+      - --property=MainPID
+      - --property=User
+      - --property=DynamicUser
+      - --property=BindPaths
+      - --property=BindReadOnlyPaths
+      - --property=CapabilityBoundingSet
+      - "{{ item }}"
+  loop: "{{ unit_hardening_units | map(attribute='unit') | list + [unit_hardening_tailscaled_unit] }}"
+  register: uh_show_pre
+  changed_when: false
+  check_mode: false
+
+- name: Preflight | collect each unit's directives, exec paths and state
+  vars:
+    uh_own_dropins: >-
+      {{ unit_hardening_units | map(attribute='unit')
+         | map('regex_replace', '^(.*)$', unit_hardening_unit_dir ~ '/\1.d/' ~ unit_hardening_dropin_name) | list }}
+  ansible.builtin.set_fact:
+    uh_pre: >-
+      {% set ns = namespace(out={}) %}{% for u in unit_hardening_units %}{% set lines = uh_cat.results[loop.index0].stdout
+      | unit_hardening_lines(uh_own_dropins) %}{% set props = uh_show_pre.results[loop.index0].stdout
+      | unit_hardening_props %}{% set root = props.User | default('') in unit_hardening_root_users
+      and props.DynamicUser | default('no') != 'yes' %}{% set ns.out = ns.out | combine({u.unit: {
+        'restart': u.restart,
+        'props': props,
+        'root': root,
+        'user': props.User | default(''),
+        'via_bus': root and u.unit in unit_hardening_systemctl_via_bus,
+        'run_allow': u.run_allow | default([]),
+        'advisory': ((['root + system bus'] if root and u.run_allow | default([])
+                       | unit_hardening_denied_ancestors([unit_hardening_bus_socket]) | length > 0 else [])
+                     + (['root + CAP_SYS_ADMIN'] if root and 'cap_sys_admin' in (props.CapabilityBoundingSet
+                        | default('')).split() else [])) | join(', '),
+        'run_binds': (props.BindPaths | default('') | unit_hardening_bind_sources
+                      + props.BindReadOnlyPaths | default('') | unit_hardening_bind_sources)
+                     | select('match', '^/run(/|$)') | list,
+        'uses': lines | unit_hardening_uses(unit_hardening_uses_re),
+        'pidns': lines | unit_hardening_matches(unit_hardening_pidns_re),
+        'paths': lines | unit_hardening_exec_paths}}) %}{% endfor %}{{ ns.out }}
+    uh_tailscaled_pre: "{{ uh_show_pre.results[-1].stdout | unit_hardening_props }}"
+
+- name: Preflight | every unit is loaded (not masked, not a broken unit file)
+  vars:
+    uh_bad: "{{ uh_pre | dict2items | rejectattr('value.props.LoadState', 'equalto', 'loaded') | map(attribute='key') | list }}"
+  ansible.builtin.assert:
+    that: uh_bad | length == 0
+    fail_msg: >-
+      not loaded: {% for u in uh_bad %}{{ u }} (LoadState={{ uh_pre[u].props.LoadState | default('?') }}){{ '' if loop.last else ', ' }}{% endfor %}
+    quiet: true
+
+- name: Preflight | tailscaled.service is loaded (the role pins its runtime directory)
+  ansible.builtin.assert:
+    that: uh_tailscaled_pre.LoadState | default('') == 'loaded'
+    fail_msg: "{{ unit_hardening_tailscaled_unit }} is not loaded (LoadState={{ uh_tailscaled_pre.LoadState | default('?') }})"
+    quiet: true
+
+- name: Preflight | no unit uses DynamicUser (its uid changes per run; the same-uid sweep can't follow it)
+  vars:
+    uh_bad: "{{ uh_pre | dict2items | selectattr('value.props.DynamicUser', 'defined')
+               | selectattr('value.props.DynamicUser', 'equalto', 'yes') | map(attribute='key') | list }}"
+  ansible.builtin.assert:
+    that: uh_bad | length == 0
+    fail_msg: "DynamicUser=yes is not supported: {{ uh_bad | join(', ') }}"
+    quiet: true
+
+- name: Preflight | restart is false for every oneshot (the role never forces a run)
+  vars:
+    uh_bad: >-
+      {{ uh_pre | dict2items | selectattr('value.restart') | selectattr('value.props.Type', 'equalto', 'oneshot')
+         | map(attribute='key') | list }}
+  ansible.builtin.assert:
+    that: uh_bad | length == 0
+    fail_msg: >-
+      Type=oneshot with restart: true: {{ uh_bad | join(', ') }}. A oneshot (a timer's job, a backup, an
+      on-demand build) picks the drop-in up at its next run; set restart: false.
+    quiet: true
+
+- name: Preflight | no unit's own directives use tailscaled's socket
+  vars:
+    uh_bad: "{{ uh_pre | dict2items | selectattr('value.uses') | list }}"
+  ansible.builtin.assert:
+    that: uh_bad | length == 0
+    fail_msg: >-
+      these units name tailscaled's socket or CLI in their unit files (they need it: list them in
+      unit_hardening_excluded with a reason instead):
+      {% for e in uh_bad %}{{ e.key }}: {{ e.value.uses | join(' | ') }}{{ '' if loop.last else '; ' }}{% endfor %}
+    quiet: true
+
+- name: Preflight | scan the files each unit runs (and their app directories) for tailscaled use
+  ansible.builtin.command:
+    argv: ["{{ unit_hardening_python }}", -I, -B, -c, "{{ lookup('ansible.builtin.file', 'scan_exec.py') }}"]
+    stdin: >-
+      {{ {'res': {'uses': unit_hardening_uses_re, 'pidns': unit_hardening_pidns_re},
+          'units': uh_pre | unit_hardening_paths_by_unit,
+          'broad': unit_hardening_scan_broad,
+          'max_files': unit_hardening_scan_max_files | int,
+          'max_bytes': unit_hardening_scan_max_bytes | int} | to_json }}
+  register: uh_scan_raw
+  changed_when: false
+  check_mode: false
+
+- name: Preflight | keep the scan report
+  ansible.builtin.set_fact:
+    uh_scan: "{{ uh_scan_raw.stdout | from_json }}"
+
+- name: Preflight | the scan read everything it named, within its limits
+  vars:
+    uh_bad: >-
+      {{ uh_scan | dict2items | selectattr('value.over_limit') | list
+         + uh_scan | dict2items | selectattr('value.unreadable') | list }}
+  ansible.builtin.assert:
+    that:
+      - uh_scan.keys() | sort == uh_pre.keys() | sort
+      - uh_bad | length == 0
+    fail_msg: >-
+      the scan can't vouch for: {% for e in uh_bad %}{{ e.key }} (over_limit={{ e.value.over_limit }},
+      unreadable={{ e.value.unreadable | join(', ') }}){{ '' if loop.last else '; ' }}{% endfor %}
+    quiet: true
+
+- name: Preflight | nothing the units run uses tailscaled's socket
+  vars:
+    uh_bad: "{{ uh_scan | dict2items | selectattr('value.hits.uses') | list }}"
+  ansible.builtin.assert:
+    that: uh_bad | length == 0
+    fail_msg: >-
+      these units' code uses tailscaled's socket or CLI (they need it: list them in unit_hardening_excluded with
+      a reason instead): {% for e in uh_bad %}{{ e.key }}: {% for h in e.value.hits.uses %}{{ h.file }}
+      ({{ h.matches | join(', ') }}){% if not loop.last %}, {% endif %}{% endfor %}{{ '' if loop.last else '; ' }}{% endfor %}
+    quiet: true
+
+# Q6-1: a root unit gets PrivatePIDs=yes. It can't take it when it is Type=forking (systemd refuses: the kernel
+# kills the namespace with its init), or when its directives or code use something that needs host PIDs or
+# /run/systemd/private (unit_hardening_pidns_re). `systemctl` is accepted for units in
+# unit_hardening_systemctl_via_bus (the drop-in then sets SYSTEMCTL_FORCE_BUS=1).
+- name: Preflight | every root unit can run in its own PID namespace (PrivatePIDs=yes)
+  vars:
+    uh_blockers: >-
+      {% set ns = namespace(out={}) %}{% for u, v in uh_pre | dictsort if v.root %}{% set tokens = (v.pidns
+      + uh_scan[u].hits.pidns | map(attribute='matches') | flatten) | unique
+      | reject('in', ['systemctl'] if v.via_bus else []) | sort %}{% set why = (['Type=forking'] if v.props.Type
+      | default('') == 'forking' else []) + tokens %}{% if why %}{% set ns.out = ns.out | combine({u: {'why': why,
+      'files': uh_scan[u].hits.pidns | map(attribute='file') | list}}) %}{% endif %}{% endfor %}{{ ns.out }}
+  ansible.builtin.assert:
+    that: uh_blockers | length == 0
+    fail_msg: >-
+      these root units can't take PrivatePIDs=yes, which a root unit needs (Reviewer Q, Q6-1: without it, it reaches
+      the socket through /proc/<pid>/root of another root process): {% for u, b in uh_blockers | dictsort %}{{ u }}:
+      {{ b.why | join(', ') }}{% if b.files %} (in {{ b.files | join(', ') }}){% endif %}{{ '' if loop.last else '; ' }}{% endfor %}.
+      The Lead decides: fix the code, or (systemctl only) list the unit in unit_hardening_systemctl_via_bus so its
+      systemctl uses the D-Bus system bus, or leave the unit out.
+    quiet: true
+
+- name: Preflight | unit_hardening_systemctl_via_bus names root units only (among the declared ones)
+  vars:
+    uh_bad: >-
+      {{ unit_hardening_systemctl_via_bus | select('in', uh_pre.keys() | list)
+         | reject('in', uh_pre | dict2items | selectattr('value.root') | map(attribute='key') | list) | list }}
+  ansible.builtin.assert:
+    that: uh_bad | length == 0
+    fail_msg: "not root units (they get no PrivatePIDs, so systemctl keeps working): {{ uh_bad | join(', ') }}"
+    quiet: true
+
+# Q8-1: a root unit's /run becomes an empty read-only tmpfs with only its run_allow bound in. Non-root units keep the
+# InaccessiblePaths hiding (nothing under /run hands them root), so run_allow on one is a mistake.
+- name: Preflight | run_allow is only for root units (non-root units keep the InaccessiblePaths hiding)
+  vars:
+    uh_bad: "{{ uh_pre | dict2items | rejectattr('value.root') | selectattr('value.run_allow') | map(attribute='key') | list }}"
+  ansible.builtin.assert:
+    that: uh_bad | length == 0
+    fail_msg: "run_allow on non-root units: {{ uh_bad | join(', ') }}"
+    quiet: true
+
+- name: Preflight | a root unit whose systemctl uses the bus has the bus in its run_allow
+  vars:
+    uh_bad: >-
+      {{ uh_pre | dict2items | selectattr('value.via_bus')
+         | rejectattr('value.run_allow', 'superset', unit_hardening_bus_needs) | map(attribute='key') | list }}
+  ansible.builtin.assert:
+    that: uh_bad | length == 0
+    fail_msg: >-
+      {{ uh_bad | join(', ') }}: unit_hardening_systemctl_via_bus needs run_allow to hold
+      {{ unit_hardening_bus_needs | join(' and ') }} (the bus, and "booted with systemd"); such a unit is only
+      ADVISORY (root + system bus)
+    quiet: true
+
+- name: Preflight | no root unit binds anything else from /run (only its run_allow)
+  vars:
+    uh_bad: >-
+      {% set ns = namespace(out=[]) %}{% for u, v in uh_pre | dictsort if v.root %}{% for b in v.run_binds
+      if b not in v.run_allow %}{% set ns.out = ns.out + [u ~ ': ' ~ b] %}{% endfor %}{% endfor %}{{ ns.out }}
+  ansible.builtin.assert:
+    that: uh_bad | length == 0
+    fail_msg: >-
+      root units that bind more of /run than their run_allow: {{ uh_bad | join(', ') }}. Add it to run_allow
+      (if it's safe) or remove it from the unit.
+    quiet: true
+
+# Q6-4: would this converge restart a unit that may be busy (Ollama with a model loaded)? The same decision as
+# apply.yml: restart: true, and its drop-in would change (a check-mode render) or its running process still sees
+# the socket. Asked only then, so a converge with nothing to change never touches a busy GPU.
+- name: Preflight | would each drop-in change (check mode only)
+  ansible.builtin.template:
+    src: no-tailscaled.conf.j2
+    dest: "{{ unit_hardening_root }}{{ unit_hardening_unit_dir }}/{{ item.unit }}.d/{{ unit_hardening_dropin_name }}"
+    owner: "{{ unit_hardening_owner }}"
+    group: "{{ unit_hardening_group }}"
+    mode: "0644"
+  loop: "{{ unit_hardening_units | selectattr('restart') | selectattr('unit', 'in', unit_hardening_busy_urls.keys() | list) | list }}"
+  loop_control:
+    label: "{{ item.unit }}"
+  vars:
+    uh_root: "{{ uh_pre[item.unit].root }}"
+    uh_via_bus: "{{ uh_pre[item.unit].via_bus }}"
+    uh_run_allow: "{{ uh_pre[item.unit].run_allow }}"
+  check_mode: true
+  register: uh_busy_would
+
+- name: Preflight | look into the busy-checked units' namespaces
+  ansible.builtin.command:
+    argv: ["{{ unit_hardening_python }}", -I, -B, -c, "{{ lookup('ansible.builtin.file', 'ns_probe.py') }}"]
+    stdin: >-
+      {{ {'proc': unit_hardening_proc, 'root': unit_hardening_root, 'dir': unit_hardening_tailscale_dir,
+          'socket': unit_hardening_socket,
+          'pids': dict(uh_busy_would.results | map(attribute='item.unit')
+                  | zip(uh_busy_would.results | map(attribute='item.unit') | map('extract', uh_pre)
+                        | map(attribute='props.MainPID') | map('int')))} | to_json }}
+  when: uh_busy_would.results | length > 0
+  register: uh_busy_probe
+  changed_when: false
+  check_mode: false
+
+- name: Preflight | ask each unit that would be restarted whether it is busy
+  vars:
+    uh_probe: "{{ (uh_busy_probe.stdout | default('{\"units\": {}}') | from_json).units }}"
+  ansible.builtin.uri:
+    url: "{{ unit_hardening_busy_urls[item.item.unit] }}"
+    method: GET
+    return_content: true
+    timeout: 5
+    status_code: [200]
+  loop: "{{ uh_busy_would.results }}"
+  loop_control:
+    label: "{{ item.item.unit }}"
+  when: >-
+    uh_pre[item.item.unit].props.ActiveState | default('') == 'active'
+    and (item is changed or (uh_probe[item.item.unit].pid > 0 and uh_probe[item.item.unit].socket != 'absent'))
+  register: uh_busy
+  failed_when: false
+  check_mode: false
+
+- name: Preflight | no busy unit would be restarted (Ollama /api/ps shows no loaded model)
+  vars:
+    uh_bad: >-
+      {% set ns = namespace(out=[]) %}{% for r in uh_busy.results | default([]) if r is not skipped %}{% set
+      models = ((r.content | default('') | from_json).models | default(none)) if (r.status | default(0)) == 200
+      and (r.content | default('')) is match('^\s*[{]') else none %}{% if models is none or models
+      | length > 0 %}{% set ns.out = ns.out + [r.item.item.unit ~ ': ' ~ ('cannot tell (' ~ (r.msg | default('no
+      answer')) ~ ')' if models is none else (models | map(attribute='name') | join(', ')) ~ ' loaded')] %}{% endif
+      %}{% endfor %}{{ ns.out }}
+  ansible.builtin.assert:
+    that: unit_hardening_allow_busy_restart or uh_bad | length == 0
+    fail_msg: >-
+      refusing to restart a busy unit: {{ uh_bad | join('; ') }}. A restart unloads the model(s). Converge when the
+      GPU is idle (nothing in /api/ps), or pass -e unit_hardening_allow_busy_restart=true to restart anyway.
+    quiet: true
+
+- name: Preflight | what the scan read
+  ansible.builtin.debug:
+    msg: >-
+      {% for u, r in uh_scan | dictsort %}{{ u }}: {{ r.scanned }} files ({{ r.files | join(' ') }};
+      walked {{ r.walked | join(' ') or 'nothing' }}){% if r.skipped %}; skipped {{ r.skipped | join(', ') }}{% endif %}
+      {{ '' if loop.last else ' || ' }}{% endfor %}

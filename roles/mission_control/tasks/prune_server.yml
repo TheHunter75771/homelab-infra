@@ -1,0 +1,23 @@
+---
+# /opt/mission-control/server holds the mission_control package and nothing else (no tests, README, example).
+- name: Server dir | the server dirs are real directories (before the find and prune)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    mission_control_guard_dirs:
+      - "{{ mission_control_server_dir }}"
+      - "{{ mission_control_server_dir }}/mission_control"
+
+- name: Server dir | entries
+  ansible.builtin.find:
+    paths: "{{ mission_control_server_dir }}"
+    file_type: any
+    hidden: true
+  register: mission_control_server_found
+
+- name: Server dir | anything but the package is removed
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ mission_control_server_found.files | map(attribute='path') | reject('equalto', mission_control_server_dir ~ '/mission_control') | sort }}"
+  register: mission_control_server_pruned
+  notify: Restart mission-control

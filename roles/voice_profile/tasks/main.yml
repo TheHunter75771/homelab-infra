@@ -1,0 +1,30 @@
+---
+# Role voice_profile (docs/CONTRACTS.md §12.21, module H7). Hosts: ai_servers, after the AI Library share is
+# mounted (playbooks/ai-library.yml), the research gate (rgate, playbooks/research.yml) and the AI stack (the
+# broker).
+# Order: inputs, the library mount and no build running -> Python + account -> the archive folder -> code ->
+# config -> unit (never started) -> read-only check (`status` in the unit's sandbox; never a build).
+
+- name: Preflight checks
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Python and account
+  ansible.builtin.import_tasks: base.yml
+
+- name: The archive folder in the library (90-archive/40-writing)
+  ansible.builtin.import_tasks: library.yml
+
+- name: Code (voice_profile, library)
+  ansible.builtin.import_tasks: install.yml
+
+- name: Config
+  ansible.builtin.import_tasks: config.yml
+
+- name: Unit (on demand only)
+  ansible.builtin.import_tasks: service.yml
+
+- name: Read-only check
+  ansible.builtin.include_tasks: verify.yml
+  when:
+    - voice_profile_verify | bool
+    - not ansible_check_mode

@@ -1,0 +1,76 @@
+---
+# The drop-ins were checked on their own (sshd -t -f) before install; this checks them in context:
+# the host's whole sshd config parses, and the effective per-connection settings are what we want.
+# If not, the drop-ins THIS run changed are removed again (a drop-in only ever adds restrictions for its
+# own account, so the host falls back to its previous sshd config) and the play fails before the reload
+# handler runs. Drop-ins this run didn't touch are left alone.
+- name: Check the operator drop-ins in the full sshd config
+  vars:
+    loopback_accts: "{{ operator_accounts_resolved | selectattr('sshd_mode', 'equalto', 'loopback') | list }}"
+    deny_accts: "{{ operator_accounts_resolved | selectattr('sshd_mode', 'equalto', 'deny') | list }}"
+  block:
+    - name: Full sshd configuration is valid
+      ansible.builtin.command:
+        argv: ["{{ operator_account_sshd }}", -t]
+      changed_when: false
+      check_mode: false
+
+    - name: Effective sshd settings per account and source
+      ansible.builtin.command:
+        argv:
+          - "{{ operator_account_sshd }}"
+          - -T
+          - -C
+          - "user={{ item.0.name }},addr={{ item.1 }},host=probe,laddr=127.0.0.1,lport=22"
+      loop: "{{ (loopback_accts + deny_accts) | product([operator_account_probe_addr] + operator_account_loopback) | list }}"
+      loop_control:
+        label: "{{ item.0.name }} from {{ item.1 }}"
+      register: operator_account_sshd_eff
+      changed_when: false
+      check_mode: false
+
+    - name: Loopback-only accounts are refused off-loopback, allowed on loopback, key-only
+      vars:
+        acct: "{{ item.item.0 }}"
+        remote: "{{ item.item.1 == operator_account_probe_addr }}"
+      ansible.builtin.assert:
+        that:
+          - (('denyusers ' ~ acct.name) in item.stdout_lines) == (remote | bool)
+          - "'pubkeyauthentication yes' in item.stdout_lines"
+          - "'passwordauthentication no' in item.stdout_lines"
+          - "'kbdinteractiveauthentication no' in item.stdout_lines"
+          - "'authenticationmethods publickey' in item.stdout_lines"
+          # Some other AllowUsers in the host's config would lock the account out even from loopback.
+          - >-
+            (remote | bool) or item.stdout_lines | select('match', '^allowusers ') | list | length == 0 or
+            item.stdout_lines | select('match', '^allowusers ' ~ acct.name ~ '(@|$)') | list | length > 0
+        fail_msg: >-
+          sshd's effective config for {{ acct.name }} from {{ item.item.1 }} is wrong (refused: {{ remote }} expected;
+          or a non-key login is allowed; or another AllowUsers shuts it out). An earlier sshd setting wins.
+        quiet: true
+      loop: "{{ operator_account_sshd_eff.results | selectattr('item.0.sshd_mode', 'equalto', 'loopback') }}"
+      loop_control:
+        label: "{{ item.item.0.name }} from {{ item.item.1 }}"
+
+    - name: Deny accounts are refused from everywhere
+      ansible.builtin.assert:
+        that:
+          - ('denyusers ' ~ item.item.0.name) in item.stdout_lines
+        fail_msg: "sshd would not refuse {{ item.item.0.name }} from {{ item.item.1 }}."
+        quiet: true
+      loop: "{{ operator_account_sshd_eff.results | selectattr('item.0.sshd_mode', 'equalto', 'deny') }}"
+      loop_control:
+        label: "{{ item.item.0.name }} from {{ item.item.1 }}"
+
+  rescue:
+    - name: Remove the drop-ins this run changed (the host keeps its previous sshd config)
+      ansible.builtin.file:
+        path: "{{ operator_account_sshd_dropin_dir }}/20-operator-{{ item }}.conf"
+        state: absent
+      loop: "{{ operator_account_sshd_changed | default([]) }}"
+
+    - name: Fail with the sshd error
+      ansible.builtin.fail:
+        msg: >-
+          The operator sshd drop-ins failed in context (rolled back: {{ operator_account_sshd_changed | default([]) }}):
+          {{ ansible_failed_result.msg | default('') }} {{ ansible_failed_result.stderr | default('') }}

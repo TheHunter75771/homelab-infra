@@ -1,0 +1,21 @@
+---
+# Open WebUI nightly backup (docs/CONTRACTS.md §12.28). Run as the operator account `claude`. Play 1 stages the
+# archive on ai-box and exports the pull key; play 2 installs the gaming PC's root pull timer with it.
+- name: Open WebUI backup (ai-box stage)
+  hosts: ai_servers
+  become: true
+  gather_facts: false
+  tasks:
+    - {name: Stage, ansible.builtin.include_role: {name: ai_backup, tasks_from: stage}}
+    - {name: Export the pull key for play 2, ansible.builtin.include_role: {name: ai_backup, tasks_from: export_key}}
+
+- name: Open WebUI backup (gaming PC pull)
+  hosts: workstations_root
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Pull
+      ansible.builtin.include_role: {name: ai_backup, tasks_from: pull}
+      vars:
+        ai_backup_pull_private_key: "{{ hostvars[groups['ai_servers'][0]].ai_backup_pull_private_key | default('') }}"
+        ai_backup_pull_host_pubkey: "{{ hostvars[groups['ai_servers'][0]].ai_backup_host_pubkey | default('') }}"

@@ -1,0 +1,16 @@
+---
+galaxy_info:
+  role_name: mc_notify_client
+  namespace: homelab
+  author: homelab-infra
+  description: mc-notify (push to the phone through Mission Control's POST /api/notify) and notify-failure@.service
+  license: MIT
+  min_ansible_version: "2.17"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - all
+    - name: Fedora
+      versions:
+        - all
+dependencies: []

@@ -1,0 +1,141 @@
+---
+# Fixed by the contract (§12.18.1, §12.18.3) and module D.
+finance_digest_user: fdigest
+# §12.18.1: supplementary group rgate (the library mount is uid/gid rgate, dir_mode 0770), never docker. Roles
+# research_gate and ai_library_share own the rgate account; this role only joins its group.
+finance_digest_library_group: rgate
+finance_digest_app_dir: /opt/finance-digest
+finance_digest_config_dir: /etc/finance-digest
+finance_digest_config_file: "{{ finance_digest_config_dir }}/config.json"
+finance_digest_notion_file: "{{ finance_digest_config_dir }}/notion.json"
+finance_digest_service: finance-digest.service
+finance_digest_timer: finance-digest.timer
+finance_digest_unit_dir: /etc/systemd/system
+finance_digest_python: /usr/bin/python3
+# Owner/group of the root-owned files fdigest must read (config.json, notion.json: root:fdigest 0640). The tests
+# override them.
+finance_digest_root_owner: root
+finance_digest_group: "{{ finance_digest_user }}"
+# D's launcher (it puts its own directory first on sys.path, so it works under `python3 -I`) and the two
+# packages beside it: the only entries kept under /opt/finance-digest.
+finance_digest_launcher: "{{ finance_digest_app_dir }}/finance-digest"
+finance_digest_packages: [finance_digest, library]
+finance_digest_app_entries: "{{ finance_digest_packages + ['finance-digest'] }}"
+# §12.11: the share carries this sentinel; the library's own layout has 50-finance/ (the only writable path).
+finance_digest_sentinel: "{{ finance_digest_library_root }}/.ai-library-sentinel"
+finance_digest_finance_dir: "{{ finance_digest_library_root }}/50-finance"
+# Paths ProtectHome/ProtectSystem hide or make read-only in ways ReadWritePaths can't fix, plus system dirs.
+finance_digest_library_forbidden_re: '^/(home|root|run|proc|sys|dev|etc|usr|boot|bin|sbin|lib|lib64|opt|var|tmp)(/|$)'
+
+# Notion is on exactly when both values are set (preflight refuses one without the other).
+finance_digest_notion_on: >-
+  {{ (finance_digest_notion_token | default('') | string | length > 0)
+     and (finance_digest_notion_page_id | default('') | string | length > 0) }}
+
+finance_digest_moneyhub_url: "{{ moneyhub_url | default('') }}"
+finance_digest_moneyhub_ip: "{{ finance_digest_moneyhub_url | finance_digest_url_host }}"
+finance_digest_broker_url: "http://{{ tailnet_ip | default('') }}:{{ finance_digest_broker_port }}"
+
+# §12.18.3 IP filter. Allowed: Money Hub's address, ai-box's tailnet address (the broker's published address,
+# where the replies come from), the broker's DNAT target range, the resolver stub. Denied: everything else
+# without Notion; with Notion, only the private/special ranges (finance_digest_ip_deny_public), so the public
+# internet (api.notion.com) is reachable while the LAN, loopback and the rest of the tailnet stay closed.
+finance_digest_ip_allow: >-
+  {{ [finance_digest_moneyhub_ip ~ '/32', (tailnet_ip | default('')) ~ '/32']
+     + finance_digest_broker_ranges + [finance_digest_dns_stub ~ '/32'] }}
+finance_digest_ip_deny: "{{ finance_digest_ip_deny_public if finance_digest_notion_on | bool else ['any'] }}"
+# The contract's minimum deny set when the public internet is open (as research_gate's §12.16.4).
+finance_digest_ip_deny_required:
+  - 127.0.0.0/8
+  - ::1/128
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  - 100.64.0.0/10
+  - 169.254.0.0/16
+  - fe80::/10
+  - fc00::/7
+
+# /etc/finance-digest/config.json: D's keys (apps/finance-digest/finance_digest/config.py; its loader refuses
+# unknown keys). D's other keys (model, timeouts, bills window) keep D's defaults unless set in
+# finance_digest_config_extra.
+finance_digest_config: >-
+  {{ {'moneyhub_url': finance_digest_moneyhub_url,
+      'broker_url': finance_digest_broker_url,
+      'library_root': finance_digest_library_root,
+      'timezone': finance_digest_timezone,
+      'ai_summary': finance_digest_ai_summary | bool,
+      'notion_file': finance_digest_notion_file}
+     | combine(finance_digest_config_extra) }}
+# /etc/finance-digest/notion.json (Notion on only; no_log everywhere it is touched).
+finance_digest_notion_json: >-
+  {{ {'token': finance_digest_notion_token | default('') | string,
+      'page_id': finance_digest_notion_page_id | default('') | string} | to_nice_json(indent=2, sort_keys=true) }}
+
+# config.json's deploy-time check (`validate`; %s is the candidate file): D's own loader from the installed
+# code. -I -B: nothing from the environment or the working directory, no bytecode in the root-owned install.
+finance_digest_config_validate: >-
+  {{ finance_digest_python }} -I -B -c
+  "import sys; sys.path.insert(0, sys.argv[2]); from finance_digest.config import load; load(sys.argv[1])"
+  %s {{ finance_digest_app_dir }}
+# notion.json's check: D's own reader (exactly token + page_id, token printable ASCII 1-256, page id 32 hex).
+# Its error messages never hold the token; the task is no_log anyway.
+finance_digest_notion_validate: >-
+  {{ finance_digest_python }} -I -B -c
+  "import sys; sys.path.insert(0, sys.argv[2]); from finance_digest.notion import load_config;
+  assert load_config(sys.argv[1]) is not None"
+  %s {{ finance_digest_app_dir }}
+
+# The unit's [Service] sandbox, one `Key=Value` per entry. The unit template renders exactly these, and the
+# post-deploy --dry-run (tasks/verify.yml) runs under the same list through systemd-run, so the check proves
+# the real sandbox and IP filter (the DNAT and ProcSubset lessons of §12.15/§12.17 were both found live).
+finance_digest_sandbox:
+  - "User={{ finance_digest_user }}"
+  - "Group={{ finance_digest_user }}"
+  - "WorkingDirectory={{ finance_digest_app_dir }}"
+  - "UMask=0027"
+  - "MemoryMax={{ finance_digest_memory_max }}"
+  - "TasksMax={{ finance_digest_tasks_max }}"
+  - "NoNewPrivileges=yes"
+  - "ProtectSystem=strict"
+  - "ProtectHome=yes"
+  - "PrivateTmp=yes"
+  - "ReadOnlyPaths=/run"
+  - "ReadWritePaths={{ finance_digest_finance_dir }}"
+  - "RestrictAddressFamilies=AF_INET AF_UNIX"
+  - "CapabilityBoundingSet="
+  - "AmbientCapabilities="
+  - "SystemCallFilter=@system-service"
+  - "SystemCallFilter=~@privileged"
+  - "SystemCallErrorNumber=EPERM"
+  - "SystemCallArchitectures=native"
+  - "PrivateDevices=yes"
+  - "PrivateIPC=yes"
+  - "ProtectKernelTunables=yes"
+  - "ProtectKernelModules=yes"
+  - "ProtectKernelLogs=yes"
+  - "ProtectControlGroups=yes"
+  - "ProtectClock=yes"
+  - "ProtectHostname=yes"
+  - "ProtectProc=invisible"
+  - "RestrictNamespaces=yes"
+  - "RestrictRealtime=yes"
+  - "RestrictSUIDSGID=yes"
+  - "LockPersonality=yes"
+  - "MemoryDenyWriteExecute=yes"
+  - "RemoveIPC=yes"
+  - "IPAddressDeny={{ finance_digest_ip_deny | join(' ') }}"
+  - "IPAddressAllow={{ finance_digest_ip_allow | join(' ') }}"
+
+# The digest command (the unit's ExecStart without the dry-run flag).
+finance_digest_argv:
+  - "{{ finance_digest_python }}"
+  - -I
+  - -B
+  - "{{ finance_digest_launcher }}"
+  - --config
+  - "{{ finance_digest_config_file }}"
+  - run
+# The verify's --dry-run must print an entry with D's freshness line (finance_digest/facts.py: the normal
+# line, or the ⚠ line that replaces it when the sync is failing or its status can't be read).
+finance_digest_verify_freshness_re: '(?m)^(Data freshness: last good sync |⚠ BANK SYNC IS FAILING[.] |⚠ Money Hub sync status is unavailable )'

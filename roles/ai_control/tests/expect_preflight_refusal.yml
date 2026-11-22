@@ -1,0 +1,37 @@
+---
+# One refusal case for test_ai_control.yml: case = {name, vars, task}. The case's vars are passed as
+# include params (they outrank the test's set_fact values); every other input keeps its good value.
+- name: Preflight refuses {{ case.name }}
+  block:
+    - name: Preflight with {{ case.name }}
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+      vars:
+        ai_control_agent_token: "{{ case.vars.get('ai_control_agent_token', test_canary) }}"
+        ai_control_userns_sysctl: "{{ case.vars.get('ai_control_userns_sysctl', test_tmp ~ '/userns-1') }}"
+        ai_control_agent_port: "{{ case.vars.get('ai_control_agent_port', 11510) }}"
+        ai_control_config_extra: "{{ case.vars.get('ai_control_config_extra', {}) }}"
+        ai_control_helper_config_extra: "{{ case.vars.get('ai_control_helper_config_extra', {}) }}"
+        ai_control_user: "{{ case.vars.get('ai_control_user', lookup('ansible.builtin.pipe', 'id -un')) }}"
+        ai_control_agent_defaults_file: "{{ case.vars.get('ai_control_agent_defaults_file', test_repo ~ '/roles/ai_host_agent/defaults/main.yml') }}"
+        ai_control_container_allow: "{{ case.vars.get('ai_control_container_allow') }}"
+        ai_stack_ollama_cpu_ip: "{{ case.vars.get('ai_stack_ollama_cpu_ip', '172.20.0.2') }}"
+        ai_control_serve_extra_handlers: "{{ case.vars.get('ai_control_serve_extra_handlers', []) }}"
+        ai_control_guard_allow_users: "{{ case.vars.get('ai_control_guard_allow_users', ['root']) }}"
+        ai_control_tailscale_iface: "{{ case.vars.get('ai_control_tailscale_iface', 'tailscale0') }}"
+        ai_control_iface_check_argv: "{{ case.vars.get('ai_control_iface_check_argv', ['/usr/bin/true']) }}"
+        ai_control_tailnet_ip6: "{{ case.vars.get('ai_control_tailnet_ip6', 'fd7a:115c:a1e0::a') }}"
+        tailnet_ip: "{{ case.vars.get('tailnet_ip', '100.64.0.10') }}"
+
+    - name: Not reached
+      ansible.builtin.set_fact:
+        ctl_test_refused_by: ""
+  rescue:
+    - name: Note which task refused
+      ansible.builtin.set_fact:
+        ctl_test_refused_by: "{{ ansible_failed_task.name }}"
+
+- name: Refused by the expected check for {{ case.name }}
+  ansible.builtin.assert:
+    that: ctl_test_refused_by == case.task
+    fail_msg: "{{ case.name }}: refused by '{{ ctl_test_refused_by }}', expected '{{ case.task }}'"
+    quiet: true

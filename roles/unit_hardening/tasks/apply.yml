@@ -1,0 +1,46 @@
+---
+# daemon-reload when a file changed; then restart (try-restart: only if running) each restart: true unit whose
+# drop-in changed, or whose running process still sees tailscaled.sock (a run that stopped between the write and
+# the restart heals on the next converge). Namespace settings take effect only at a (re)start: a reload does
+# nothing for them. restart: false units (every oneshot) pick the drop-in up at their next start.
+- name: Apply | daemon-reload (a drop-in changed)
+  ansible.builtin.command:
+    argv: ["{{ unit_hardening_systemctl }}", daemon-reload]
+  when: uh_dropins is changed or uh_tailscaled_dropin is changed or uh_removed is changed
+  changed_when: true
+
+- name: Apply | read the running restart-true units' MainPIDs
+  ansible.builtin.command:
+    argv: ["{{ unit_hardening_systemctl }}", show, --property=MainPID, --value, "{{ item.unit }}"]
+  loop: "{{ unit_hardening_units | selectattr('restart') | list }}"
+  loop_control:
+    label: "{{ item.unit }}"
+  register: uh_apply_pids
+  changed_when: false
+  check_mode: false
+
+- name: Apply | look into each one's namespace
+  ansible.builtin.command:
+    argv: ["{{ unit_hardening_python }}", -I, -B, -c, "{{ lookup('ansible.builtin.file', 'ns_probe.py') }}"]
+    stdin: >-
+      {{ {'proc': unit_hardening_proc, 'root': unit_hardening_root, 'dir': unit_hardening_tailscale_dir,
+          'socket': unit_hardening_socket,
+          'pids': dict(uh_apply_pids.results | map(attribute='item.unit')
+                       | zip(uh_apply_pids.results | map(attribute='stdout') | map('int')))} | to_json }}
+  register: uh_apply_probe
+  changed_when: false
+  check_mode: false
+
+- name: Apply | restart the units whose drop-in changed or that still see the socket
+  vars:
+    uh_changed: "{{ uh_dropins.results | selectattr('changed') | map(attribute='item.unit') | list }}"
+    uh_probe: "{{ (uh_apply_probe.stdout | from_json).units }}"
+  ansible.builtin.command:
+    argv: ["{{ unit_hardening_systemctl }}", try-restart, "{{ item.unit }}"]
+  loop: "{{ unit_hardening_units | selectattr('restart') | list }}"
+  loop_control:
+    label: "{{ item.unit }}"
+  when: >-
+    item.unit in uh_changed
+    or (uh_probe[item.unit].pid > 0 and uh_probe[item.unit].socket != 'absent')
+  changed_when: true

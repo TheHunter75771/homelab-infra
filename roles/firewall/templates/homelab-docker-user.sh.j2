@@ -2,27 +2,58 @@
 # {{ ansible_managed }}
 # DOCKER-USER guard, run by homelab-docker-user.service after docker.service.
 # Docker-published ports bypass UFW's INPUT rules, so forwarded traffic is filtered here:
+{% if wifi_iface is defined %}
 #   - new or invalid connections arriving on the Wi-Fi uplink ({{ wifi_iface }}) are dropped, so
 #     nothing can reach a container from it, while replies to the containers' own outbound
 #     traffic still flow when the Wi-Fi is the active (failover) route;
+{% endif %}
+{% if wifi_iface is defined %}
 #   - tailnet-range sources are dropped unless they arrive on {{ firewall_tailnet_iface }}
 #     (the backup Wi-Fi hands out addresses inside {{ firewall_tailnet_v4 }});
+{% else %}
+#   - tailnet-range sources are dropped unless they arrive on {{ firewall_tailnet_iface }};
+{% endif %}
+{% if tailnet_ip is defined %}
+#   - new connections to a port published on this host's tailnet address ({{ tailnet_ip }}{{ ', ' ~ tailnet_ip6 if tailnet_ip6 is defined else '' }})
+#     are dropped unless they arrive on {{ firewall_tailnet_iface }}: a LAN host could otherwise route to
+#     that address via the LAN interface, and Docker's DNAT would forward it past UFW;
+{% endif %}
 #   - forwarded DNS (53/udp+tcp) is dropped: containers resolve through the host's stub on
 #     {{ docker_dns_ip }} (DNS-over-TLS upstream), never straight to a plaintext server.
 # Idempotent: each rule is checked (-C) before it's inserted (-I). Every rule carries a tag made
 # of its name and a fingerprint of its exact match, so any change to a rule gives it a new tag.
 # After the declared rules are in place, tagged rules that are no longer declared are deleted.
 # Declared rules are never removed, so re-running never opens a gap.
+{% if wifi_iface is defined %}
 {% set wifi_match = '-i ' ~ (wifi_iface | quote) ~ ' -m conntrack --ctstate NEW,INVALID' %}
+{% endif %}
 {% set tailnet4_match = '-s ' ~ firewall_tailnet_v4 ~ ' ! -i ' ~ (firewall_tailnet_iface | quote) %}
 {% set tailnet6_match = '-s ' ~ firewall_tailnet_v6 ~ ' ! -i ' ~ (firewall_tailnet_iface | quote) %}
+{% if tailnet_ip is defined %}
+{% set tsdst4_match = '! -i ' ~ (firewall_tailnet_iface | quote) ~ ' -m conntrack --ctstate NEW --ctorigdst ' ~ (tailnet_ip | quote) %}
+{% endif %}
+{% if tailnet_ip6 is defined %}
+{% set tsdst6_match = '! -i ' ~ (firewall_tailnet_iface | quote) ~ ' -m conntrack --ctstate NEW --ctorigdst ' ~ (tailnet_ip6 | quote) %}
+{% endif %}
 {% set dnsudp_match = '-p udp --dport 53' %}
 {% set dnstcp_match = '-p tcp --dport 53' %}
+{% if wifi_iface is defined %}
 {% set wifi_tag = 'wifi-' ~ (wifi_match | hash('sha1'))[:10] %}
+{% endif %}
 {% set tailnet4_tag = 'tailnet4-' ~ (tailnet4_match | hash('sha1'))[:10] %}
 {% set tailnet6_tag = 'tailnet6-' ~ (tailnet6_match | hash('sha1'))[:10] %}
 {% set dnsudp_tag = 'dns-udp-' ~ (dnsudp_match | hash('sha1'))[:10] %}
 {% set dnstcp_tag = 'dns-tcp-' ~ (dnstcp_match | hash('sha1'))[:10] %}
+{% if tailnet_ip is defined %}
+{% set tsdst4_tag = 'tsdst4-' ~ (tsdst4_match | hash('sha1'))[:10] %}
+{% endif %}
+{% if tailnet_ip6 is defined %}
+{% set tsdst6_tag = 'tsdst6-' ~ (tsdst6_match | hash('sha1'))[:10] %}
+{% endif %}
+{% set v4_tags = ([wifi_tag] if wifi_iface is defined else []) + [tailnet4_tag]
+   + ([tsdst4_tag] if tailnet_ip is defined else []) + [dnsudp_tag, dnstcp_tag] %}
+{% set v6_tags = ([wifi_tag] if wifi_iface is defined else []) + [tailnet6_tag]
+   + ([tsdst6_tag] if tailnet_ip6 is defined else []) + [dnsudp_tag, dnstcp_tag] %}
 set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -72,17 +103,27 @@ if ! iptables -w -S DOCKER-USER >/dev/null 2>&1; then
 	echo "DOCKER-USER chain is missing; is Docker running with its iptables firewall backend?" >&2
 	exit 1
 fi
+{% if wifi_iface is defined %}
 ensure iptables {{ wifi_tag }} {{ wifi_match }}
+{% endif %}
 ensure iptables {{ tailnet4_tag }} {{ tailnet4_match }}
+{% if tailnet_ip is defined %}
+ensure iptables {{ tsdst4_tag }} {{ tsdst4_match }}
+{% endif %}
 ensure iptables {{ dnsudp_tag }} {{ dnsudp_match }}
 ensure iptables {{ dnstcp_tag }} {{ dnstcp_match }}
-prune iptables {{ wifi_tag }} {{ tailnet4_tag }} {{ dnsudp_tag }} {{ dnstcp_tag }}
+prune iptables {{ v4_tags | join(' ') }}
 
 # Docker creates the IPv6 chain when ip6tables support is on (the default since Docker 27).
 if ip6tables -w -S DOCKER-USER >/dev/null 2>&1; then
+{% if wifi_iface is defined %}
 	ensure ip6tables {{ wifi_tag }} {{ wifi_match }}
+{% endif %}
 	ensure ip6tables {{ tailnet6_tag }} {{ tailnet6_match }}
+{% if tailnet_ip6 is defined %}
+	ensure ip6tables {{ tsdst6_tag }} {{ tsdst6_match }}
+{% endif %}
 	ensure ip6tables {{ dnsudp_tag }} {{ dnsudp_match }}
 	ensure ip6tables {{ dnstcp_tag }} {{ dnstcp_match }}
-	prune ip6tables {{ wifi_tag }} {{ tailnet6_tag }} {{ dnsudp_tag }} {{ dnstcp_tag }}
+	prune ip6tables {{ v6_tags | join(' ') }}
 fi

@@ -1,0 +1,28 @@
+---
+# The embedding model is on both backends (docs/CONTRACTS.md §12.22; Reviewer L, L-5): the broker's embed
+# alias maps it on the GPU and the CPU, and vectors only match if both run the same model. So, with
+# ai_embed_model set, the gaming PC's ollama_rocm_extra_models (role ollama_rocm pulls them) must list it,
+# compared the way ollama_rocm compares names. Read through hostvars; skipped, with a message, when the
+# gaming PC isn't in this inventory.
+
+- name: Preflight | the embedding model is pulled on the gaming PC too (ollama_rocm_extra_models)
+  ansible.builtin.assert:
+    that:
+      - ai_stack_embed_model_listed in ai_stack_pc_extra_listed
+    fail_msg: >-
+      ai_embed_model {{ ai_embed_model | to_json }} isn't in the gaming PC's ollama_rocm_extra_models
+      ({{ ai_stack_pc_host }}: {{ ai_stack_pc_extra_models | to_json }}). The broker's {{ ai_stack_embed_alias }}
+      alias would send GPU embeddings to a model the PC doesn't have. Add it there (and run playbooks/gaming-pc-ai.yml).
+    success_msg: "{{ ai_embed_model }} is also in {{ ai_stack_pc_host }}'s ollama_rocm_extra_models."
+  when:
+    - ai_embed_model is defined
+    - ai_stack_pc_host | length > 0
+
+- name: Preflight | no gaming PC in this inventory, so the embedding model can't be checked there
+  ansible.builtin.debug:
+    msg: >-
+      Not checked: no workstations_root host in this inventory, so ai_embed_model {{ ai_embed_model | to_json }}
+      couldn't be compared with the gaming PC's ollama_rocm_extra_models. Make sure the PC pulls it too.
+  when:
+    - ai_embed_model is defined
+    - ai_stack_pc_host | length == 0

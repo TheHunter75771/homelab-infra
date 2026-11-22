@@ -16,3 +16,13 @@ vapid_public_key: "{{ vault_vapid_public_key }}"
 vapid_private_key: "{{ vault_vapid_private_key }}"
 # Apple rejects some VAPID subjects (e.g. mailto:…@localhost). An https URL is known to work on iPhone.
 vapid_subject: "https://{{ public_watch_host }}"
+# Declared inbound UFW rules (docs/CONTRACTS.md §7, §12.2). The role prefixes comments with "homelab: ".
+firewall_allow_rules:
+  - { port: 22, proto: tcp, iface: tailscale0, comment: "ssh over tailnet" }
+  - { port: 22, proto: tcp, iface: "{{ lan_iface }}", from: "{{ gaming_pc_lan_ip }}", comment: "ssh from workstation" }
+  - { port: 8096, proto: tcp, iface: "{{ lan_iface }}", from: "{{ lan_cidr }}", comment: "jellyfin lan" }
+  - { port: 9999, proto: tcp, iface: tailscale0, comment: "wol-relay over tailnet" }
+# §12.13: the operator account may SSH in (from the gaming PC only, via key from=).
+ssh_hardening_allow_users: ["{{ admin_user }}", "{{ automation_user }}", "{{ backup_pull_user }}", "{{ operator_user }}"]
+operator_key_from: ["{{ gaming_pc_tailnet_ip }}", "{{ gaming_pc_lan_ip }}"]
+operator_key_from_extra: ["{{ gaming_pc_tailnet_ip6 }}"]

@@ -1,0 +1,39 @@
+---
+# One venv run for test_mission_control.yml: venv.yml against a real `python3 -m venv` in the scratch dir and the
+# fake pip (tests/bin/fake-pip). Params: venv_case (name), venv_want_pip_runs (total pip runs logged after it),
+# venv_break (optional shell run first; $VENV and $SITE are set).
+- name: Venv | break it first for {{ venv_case }}
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      VENV="{{ test_tmp }}/opt/mission-control/venv"
+      SITE=$(ls -d "$VENV"/lib/python3*/site-packages)
+      {{ venv_break }}
+  changed_when: true
+  when: venv_break | default('') | length > 0
+
+- name: Venv | run venv.yml for {{ venv_case }}
+  ansible.builtin.include_tasks: ../tasks/venv.yml
+  vars:
+    mission_control_pip_argv: ["{{ test_bin }}/fake-pip", "{{ test_tmp }}/opt/mission-control/venv.new"]
+
+- name: Venv | pip runs so far, and what the venv holds now for {{ venv_case }}
+  ansible.builtin.command:
+    argv:
+      - "{{ test_tmp }}/opt/mission-control/venv/bin/python3"
+      - -I
+      - -c
+      - "import json, importlib.metadata as m; print(json.dumps({d.metadata['Name']: d.version for d in m.distributions()}))"
+  register: test_venv_now
+  changed_when: false
+
+- name: Venv | exactly the locks, after the expected number of pip runs for {{ venv_case }}
+  vars:
+    runs: "{{ lookup('ansible.builtin.file', test_tmp ~ '/pip.log', errors='ignore').splitlines() | length }}"
+  ansible.builtin.assert:
+    that:
+      - runs | int == venv_want_pip_runs
+      - test_venv_now.stdout | from_json | mission_control_dist_drift(mission_control_pins) == []
+      - (mission_control_venv_drift | length == 0) == (venv_case == 'idempotent')
+    fail_msg: "{{ venv_case }}: {{ runs }} pip runs (want {{ venv_want_pip_runs }}); drift seen {{ mission_control_venv_drift }}"
+    quiet: true

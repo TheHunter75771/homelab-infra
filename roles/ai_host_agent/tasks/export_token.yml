@@ -1,0 +1,49 @@
+---
+# Export the agent token to later plays (§12.15.7). The playbook includes this after the role:
+#   - ansible.builtin.include_role: {name: ai_host_agent, tasks_from: export_token}
+# It sets the host fact `ai_host_agent_token` on this host; play 2 passes
+# hostvars[<this host>].ai_host_agent_token to role ai_control as ai_control_agent_token. It also
+# exports ai_host_agent_exported_port, the port the agent serves, which ai_control checks it calls.
+# Every task that holds the value is no_log. In check mode before the first real run the file
+# doesn't exist yet: the fact is then "" and role ai_control skips writing it (check mode only).
+- name: Export token | is there a token file
+  ansible.builtin.stat:
+    path: "{{ ai_host_agent_token_file }}"
+    follow: false
+    get_checksum: false
+  register: ai_host_agent_export_stat
+
+- name: Export token | the token file exists (role ai_host_agent creates it)
+  ansible.builtin.assert:
+    that:
+      - ai_host_agent_export_stat.stat.isreg | default(false) or ansible_check_mode
+    fail_msg: "{{ ai_host_agent_token_file }} is missing or not a regular file; run role ai_host_agent first."
+    quiet: true
+
+- name: Export token | read it
+  ansible.builtin.slurp:
+    src: "{{ ai_host_agent_token_file }}"
+  register: ai_host_agent_export_slurp
+  no_log: true
+  when: ai_host_agent_export_stat.stat.isreg | default(false)
+
+- name: Export token | set the fact
+  ansible.builtin.set_fact:
+    ai_host_agent_token: >-
+      {{ (ai_host_agent_export_slurp.content | b64decode | trim) if ai_host_agent_export_slurp is not skipped else '' }}
+    ai_host_agent_export_slurp: {}
+  no_log: true
+
+# The same rule the agent applies (one token68 string of at least 32 characters), so ai-box never
+# gets a token the agent would refuse. no_log: a failure must not print the value.
+- name: Export token | the token is well-formed
+  ansible.builtin.assert:
+    that:
+      - ai_host_agent_token is match('^[A-Za-z0-9._~+/=-]{32,}$')
+    quiet: true
+  no_log: true
+  when: ai_host_agent_token | length > 0 or not ansible_check_mode
+
+- name: Export token | the port the agent serves (not secret)
+  ansible.builtin.set_fact:
+    ai_host_agent_exported_port: "{{ ai_host_agent_port | int }}"

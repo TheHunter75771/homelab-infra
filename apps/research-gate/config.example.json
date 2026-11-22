@@ -1,0 +1,11 @@
+{
+  "library_root": "/mnt/ai-library",
+  "searxng_url": "http://127.0.0.1:8888",
+  "poll_interval": 60,
+  "results_per_query": 8,
+  "max_bytes": 5242880,
+  "fetch_timeout": 30,
+  "max_redirects": 3,
+  "user_agent": "homelab-research-gate/1 (fetches only pages a human approved)",
+  "ipv4_only": false
+}

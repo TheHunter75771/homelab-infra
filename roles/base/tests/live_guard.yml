@@ -1,0 +1,38 @@
+---
+# Safety guard of tests/test_sysctl_live*.yml, run before anything is written and again before the
+# scratch directory is deleted. Writes go to base_sysctl_proc_dir and the cleanup deletes
+# live_test_tmp.path recursively, so both must be the scratch directory this run created:
+# - live_test_tmp came from this run's tempfile task (an -e override has no "changed");
+# - it resolves (symlinks followed) to a directory directly under the system temp dir, named the way
+#   those tempfile tasks name it;
+# - base_sysctl_proc_dir is exactly <that directory>/proc, resolved, and nowhere under /proc;
+# - <that directory>/proc, once it exists, is a real directory, not a symlink.
+- name: Look at the scratch tree's proc directory
+  ansible.builtin.stat:
+    path: "{{ live_test_tmp.path | default('') }}/proc"
+    follow: false
+  register: live_guard_proc
+  check_mode: false
+
+- name: The test only touches the scratch directory this run created
+  ansible.builtin.assert:
+    that:
+      - live_test_tmp is changed
+      - live_guard_tmp_real is match('^' ~ (live_guard_tmp_base | regex_escape) ~ '/[^/]+$')
+      # The name the tests' own tempfile tasks give it (default prefix "ansible.", mkdtemp's 8 random
+      # characters, suffix .sysctl-live or .sysctl-live-check): a forged {"path": ..., "changed": true}
+      # can't point the cleanup at another directory.
+      - live_guard_tmp_real | basename is match('^ansible\.[a-z0-9_]{8}\.sysctl-live(-check)?$')
+      - live_guard_proc_real == live_guard_tmp_real ~ '/proc'
+      - live_guard_proc_real is not match('^/proc(/|$)')
+      - not live_guard_proc.stat.exists or (live_guard_proc.stat.isdir and not live_guard_proc.stat.islnk)
+    fail_msg: >-
+      Refusing to write to or delete the test's scratch paths: live_test_tmp={{ live_test_tmp | default('unset') }}
+      (resolves to {{ live_guard_tmp_real }}, must be a fresh ansible.*.sysctl-live[-check] directory under {{ live_guard_tmp_base }}),
+      base_sysctl_proc_dir={{ base_sysctl_proc_dir | default('unset') }} (resolves to {{ live_guard_proc_real }}),
+      proc is a symlink: {{ live_guard_proc.stat.islnk | default(false) }}.
+    quiet: true
+  vars:
+    live_guard_tmp_base: "{{ lookup('ansible.builtin.env', 'TMPDIR') | default('/tmp', true) | realpath }}"
+    live_guard_tmp_real: "{{ live_test_tmp.path | default('/') | realpath }}"
+    live_guard_proc_real: "{{ base_sysctl_proc_dir | default('/proc/sys') | realpath }}"

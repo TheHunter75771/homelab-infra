@@ -1,0 +1,10 @@
+---
+# Order matters: handlers run in this order, so the unit is reloaded before the restart.
+- name: Reload systemd for gpu-gate
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Restart gpu-gate
+  ansible.builtin.systemd_service:
+    name: gpu-gate.service
+    state: restarted

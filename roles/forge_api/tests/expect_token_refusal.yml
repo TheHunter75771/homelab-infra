@@ -1,0 +1,37 @@
+---
+# One token refusal case for test_forge_api.yml: case = {name, refused_by}. The directory tok-<name> holds a
+# symlink named token (link: to a victim file holding "keep"; dangling: to a missing "target"). token.yml must
+# refuse, the victim must be untouched and the dangling target never created.
+- name: Token case | token.yml through the symlink, case {{ case.name }}
+  block:
+    - name: Token case | token.yml ({{ case.name }})
+      ansible.builtin.include_tasks: ../tasks/token.yml
+      vars:
+        forge_api_config_dir: "{{ test_tmp }}/tok-{{ case.name }}"
+        forge_api_token_file: "{{ test_tmp }}/tok-{{ case.name }}/token"
+
+    - name: Token case | not reached ({{ case.name }})
+      ansible.builtin.set_fact:
+        fa_test_token_by: ""
+  rescue:
+    - name: Token case | note which task refused ({{ case.name }})
+      ansible.builtin.set_fact:
+        fa_test_token_by: "{{ ansible_failed_task.name }}"
+
+- name: Token case | read what is there ({{ case.name }})
+  ansible.builtin.command:
+    argv: [find, "{{ test_tmp }}/tok-{{ case.name }}", -mindepth, "1", -printf, "%P|%m|%y|%l|%s\n"]
+  register: fa_test_tokdir
+  changed_when: false
+
+- name: Token case | refused by the expected task, nothing written through the link ({{ case.name }})
+  vars:
+    want:
+      link: ['token|777|l|victim|6', 'victim|644|f||5']
+      dangling: ['token|777|l|target|6']
+  ansible.builtin.assert:
+    that:
+      - fa_test_token_by == case.refused_by
+      - fa_test_tokdir.stdout_lines | sort == want[case.name]
+    fail_msg: "{{ case.name }}: refused by '{{ fa_test_token_by }}'; {{ fa_test_tokdir.stdout_lines }}"
+    quiet: true

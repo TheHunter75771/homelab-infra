@@ -1,0 +1,26 @@
+---
+# Role finance_digest (docs/CONTRACTS.md §12.18.3). Hosts: ai_servers, after the AI Library share is mounted
+# (playbooks/ai-library.yml) and the AI stack is up (the broker).
+# Order: inputs + library mount -> Python + account -> code -> config (+ optional Notion file) -> unit + timer
+# -> a sandboxed --dry-run as fdigest.
+
+- name: Preflight checks
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Python and account
+  ansible.builtin.import_tasks: base.yml
+
+- name: Code (finance_digest, library)
+  ansible.builtin.import_tasks: install.yml
+
+- name: Config
+  ansible.builtin.import_tasks: config.yml
+
+- name: Unit and timer
+  ansible.builtin.import_tasks: service.yml
+
+- name: Read-only check (a dry run in the real sandbox)
+  ansible.builtin.include_tasks: verify.yml
+  when:
+    - finance_digest_verify | bool
+    - not ansible_check_mode

@@ -1,0 +1,59 @@
+---
+# One refusal case for test_voice_profile.yml: case = {name, vars, task, active?}. The case's vars are passed as
+# include params (they outrank the test's set_fact values); every other input keeps its good value (test_good).
+# `active` sets the fake systemctl's build state (idle by default).
+- name: The fake build state for {{ case.name }}
+  ansible.builtin.copy:
+    content: "{{ case.active | default('idle') }}\n"
+    dest: "{{ lookup('ansible.builtin.env', 'VP_TEST_ACTIVE') }}"
+    mode: "0644"
+
+- name: Preflight refuses {{ case.name }}
+  block:
+    - name: Preflight with {{ case.name }}
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+      vars:
+        tailnet_ip: "{{ case.vars.get('tailnet_ip', test_good.tailnet_ip) }}"
+        voice_profile_broker_port: "{{ case.vars.get('voice_profile_broker_port', 11434) }}"
+        voice_profile_library_cap: "{{ case.vars.get('voice_profile_library_cap', '500GB') }}"
+        voice_profile_memory_max: "{{ case.vars.get('voice_profile_memory_max', '256M') }}"
+        voice_profile_tasks_max: "{{ case.vars.get('voice_profile_tasks_max', 32) }}"
+        voice_profile_timeout_start: "{{ case.vars.get('voice_profile_timeout_start', '40min') }}"
+        voice_profile_user: "{{ case.vars.get('voice_profile_user', 'vprof') }}"
+        voice_profile_settings: >-
+          {{ case.vars.settings_whole if 'settings_whole' in case.vars
+             else (test_good.settings | combine(case.vars.get('settings', {}))) }}
+        voice_profile_broker_ranges: "{{ case.vars.get('voice_profile_broker_ranges', test_good.broker_ranges) }}"
+        voice_profile_ip_deny: "{{ case.vars.get('voice_profile_ip_deny', ['any']) }}"
+        searxng_subnet: "{{ case.vars.get('searxng_subnet', '172.29.16.0/28') }}"
+        voice_profile_library_root: "{{ case.vars.get('voice_profile_library_root', test_good.library_root) }}"
+        voice_profile_library_mount: "{{ case.vars.get('voice_profile_library_mount', test_good.library_mount) }}"
+        voice_profile_library_forbidden_re: "{{ case.vars.get('voice_profile_library_forbidden_re', test_good.forbidden_re) }}"
+        voice_profile_library_group: "{{ case.vars.get('voice_profile_library_group', test_good.library_group) }}"
+        voice_profile_pkg_src: "{{ case.vars.get('voice_profile_pkg_src', test_good.pkg_src) }}"
+        voice_profile_launcher_src: "{{ case.vars.get('voice_profile_launcher_src', test_good.launcher_src) }}"
+        voice_profile_library_src_dir: "{{ case.vars.get('voice_profile_library_src_dir', test_good.library_src_dir) }}"
+
+    - name: Not reached
+      ansible.builtin.set_fact:
+        vp_test_refused_by: ""
+        vp_test_refused_msg: ""
+  rescue:
+    - name: Note which task refused
+      ansible.builtin.set_fact:
+        vp_test_refused_by: "{{ ansible_failed_task.name }}"
+        vp_test_refused_msg: "{{ ansible_failed_result.msg | default('') }}"
+
+- name: Back to an idle build after {{ case.name }}
+  ansible.builtin.file:
+    path: "{{ lookup('ansible.builtin.env', 'VP_TEST_ACTIVE') }}"
+    state: absent
+
+- name: Refused by the expected check for {{ case.name }}
+  ansible.builtin.assert:
+    that:
+      - vp_test_refused_by == case.task
+      # Where a case names it, the refusal is the role's own message (not a template error).
+      - case.msg is not defined or case.msg in vp_test_refused_msg
+    fail_msg: "{{ case.name }}: refused by '{{ vp_test_refused_by }}' ({{ vp_test_refused_msg | default('') }}), expected '{{ case.task }}'"
+    quiet: true

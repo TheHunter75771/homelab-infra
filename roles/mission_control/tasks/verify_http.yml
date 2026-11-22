@@ -1,0 +1,55 @@
+---
+# MC1 answers only when the identity header (set by tailscale serve) is Noah's login. From localhost, as tailscale
+# serve would forward it: with the header, 200; without it or with another login, 403. /healthz (no identity) is
+# the start-up wait. no_log on the request that carries the login (private host_vars); the asserts print only the
+# status codes. tests/test_mission_control.yml runs this file against tests/fake_server.py.
+- name: Verify | /healthz (waits for the start)
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ mission_control_listen_port }}/healthz"
+    status_code: 200
+    timeout: 5
+  register: mission_control_health
+  until: mission_control_health.status | default(-1) == 200
+  retries: "{{ mission_control_verify_retries }}"
+  delay: "{{ mission_control_verify_delay }}"
+
+- name: Verify | GET with Noah's identity header on {{ mission_control_verify_path }}
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ mission_control_listen_port }}{{ mission_control_verify_path }}"
+    headers: "{{ {mission_control_identity_header: mission_control_noah_login} }}"
+    status_code: [200, 400, 401, 403, 404, 405, 500, 502, 503]
+    timeout: 30
+  register: mission_control_http_with
+  failed_when: false
+  no_log: true
+
+- name: Verify | GET without the header on {{ mission_control_verify_path }}
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ mission_control_listen_port }}{{ mission_control_verify_path }}"
+    status_code: [200, 400, 401, 403, 404, 405, 500, 502, 503]
+    timeout: 30
+  register: mission_control_http_without
+  failed_when: false
+
+- name: Verify | another login is refused too
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ mission_control_listen_port }}{{ mission_control_verify_path }}"
+    headers: "{{ {mission_control_identity_header: 'someone-else@example.invalid'} }}"
+    status_code: [200, 400, 401, 403, 404, 405, 500, 502, 503]
+    timeout: 30
+  register: mission_control_http_other
+  failed_when: false
+
+- name: Verify | 200 for Noah, 403 without the header and for another login
+  ansible.builtin.assert:
+    that:
+      - mission_control_http_with.status | default(-1) == 200
+      - mission_control_http_without.status | default(-1) == 403
+      - mission_control_http_other.status | default(-1) == 403
+    fail_msg: >-
+      {{ mission_control_verify_path }} on 127.0.0.1:{{ mission_control_listen_port }}: with Noah's login
+      {{ mission_control_http_with.status | default('no answer') }} (want 200), without the header
+      {{ mission_control_http_without.status | default('no answer') }} (want 403), another login
+      {{ mission_control_http_other.status | default('no answer') }} (want 403).
+      Check `journalctl -u {{ mission_control_service }}` and allowed_login in {{ mission_control_config_file }}.
+    quiet: true

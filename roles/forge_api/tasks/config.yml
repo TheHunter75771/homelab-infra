@@ -1,0 +1,23 @@
+---
+# /etc/forge-api/config.json root:rgate 0640 (no secret in it: the token is a separate file). The directory and
+# its guard come first in token.yml. Switched off without an approver, the config isn't rendered (nothing runs).
+# Validated before install with exactly F's keys and F's own `check-config` from the installed code, which also
+# loads the token (vars/main.yml forge_api_config_validate; `--require-library` when switched on).
+- name: Config | config.json
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ forge_api_config_file }}"
+    owner: "{{ forge_api_root_owner }}"
+    group: "{{ forge_api_group }}"
+    mode: "0640"
+    follow: false
+    validate: "{{ forge_api_config_validate }}"
+  notify: Restart forge-api
+  when: forge_api_config_wanted | bool
+
+- name: Config | not rendered yet (switched off, no approver)
+  ansible.builtin.debug:
+    msg: >-
+      forge_api_approver_user_id isn't set, so {{ forge_api_config_file }} isn't rendered and forge-api stays off.
+      Set it (host_vars) before switching forge_api_enabled on.
+  when: not (forge_api_config_wanted | bool)

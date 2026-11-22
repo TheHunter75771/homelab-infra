@@ -1,0 +1,13 @@
+---
+# The keys ollama-cpu's compose definition fixes (§12.23: OLLAMA_NO_CLOUD; the bind address OLLAMA_HOST) may
+# not come from ai_stack_ollama_env. Its own file so tests/test_render.yml runs it with sample values.
+- name: Preflight | ai_stack_ollama_env doesn't set the keys the compose file fixes
+  ansible.builtin.assert:
+    that:
+      - ai_stack_ollama_env is mapping
+      - "'OLLAMA_NO_CLOUD' not in ai_stack_ollama_env"
+      - "'OLLAMA_HOST' not in ai_stack_ollama_env"
+    fail_msg: >-
+      ai_stack_ollama_env must be a mapping without OLLAMA_NO_CLOUD (fixed to 1 in the compose file, §12.23)
+      or OLLAMA_HOST.
+    quiet: true

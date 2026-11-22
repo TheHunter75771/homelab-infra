@@ -1,0 +1,21 @@
+---
+# verify_serve.yml against one status --json shaped input: serve_case = {name, json, want: pass|fail}.
+- name: Verify serve for {{ serve_case.name }}
+  block:
+    - name: Verify serve | verify_serve.yml for {{ serve_case.name }}
+      ansible.builtin.include_tasks: ../tasks/verify_serve.yml
+      vars:
+        mission_control_serve_status_json: "{{ serve_case.json }}"
+    - name: Passed
+      ansible.builtin.set_fact:
+        test_serve_got: pass
+  rescue:
+    - name: Failed
+      ansible.builtin.set_fact:
+        test_serve_got: "{{ 'fail' if ansible_failed_task.name == 'Verify | the serve config has both handlers' else 'error: ' ~ ansible_failed_task.name }}"
+
+- name: Verify serve | outcome for {{ serve_case.name }}
+  ansible.builtin.assert:
+    that: test_serve_got == serve_case.want
+    fail_msg: "{{ serve_case.name }}: {{ test_serve_got }}, want {{ serve_case.want }}"
+    quiet: true

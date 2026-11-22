@@ -1,0 +1,70 @@
+---
+# §12.15.7: the bearer token is generated ONCE, on this host, if the file is absent, and never
+# rotated by a converge. It never passes through Ansible: Python on the host writes 64 hex chars
+# from secrets.token_hex(32) straight into a new file (O_CREAT|O_EXCL|O_NOFOLLOW, so an existing
+# file or a planted symlink is never written through), chowned and chmodded before the write.
+# Rotation is manual: delete the file and converge both plays (README).
+- name: Token | is there a token file already
+  ansible.builtin.stat:
+    path: "{{ ai_host_agent_token_file }}"
+    follow: false
+    get_checksum: false
+  register: ai_host_agent_token_stat
+
+# The agent refuses a symlink or a non-regular file; say so here, before the restart, without
+# touching it.
+- name: Token | an existing token is a regular file (never a symlink)
+  ansible.builtin.assert:
+    that:
+      - ai_host_agent_token_stat.stat.isreg | default(false)
+      - not (ai_host_agent_token_stat.stat.islnk | default(false))
+    fail_msg: >-
+      {{ ai_host_agent_token_file }} exists but isn't a regular file. Remove it by hand; the role then
+      generates a new token (and play 2 copies it to ai-box).
+    quiet: true
+  when: ai_host_agent_token_stat.stat.exists
+
+- name: Token | generate it on the host (only when absent)
+  ansible.builtin.command:
+    argv:
+      - "{{ ai_host_agent_python }}"
+      - -I
+      - -B
+      - -c
+      - |
+        import grp, os, pwd, secrets, sys
+        path, owner, group = sys.argv[1:4]
+        uid, gid = pwd.getpwnam(owner).pw_uid, grp.getgrnam(group).gr_gid
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            os.fchown(fd, uid, gid)
+            os.fchmod(fd, 0o640)
+            data = (secrets.token_hex(32) + "\n").encode("ascii")
+            while data:
+                data = data[os.write(fd, data):]
+            os.fsync(fd)
+        except BaseException:
+            os.close(fd)
+            os.unlink(path)
+            raise
+        os.close(fd)
+      - "{{ ai_host_agent_token_file }}"
+      - "{{ ai_host_agent_token_owner }}"
+      - "{{ ai_host_agent_token_group }}"
+  changed_when: true
+  no_log: true
+  when: not ai_host_agent_token_stat.stat.exists
+  notify: Restart ai-host-agent
+
+# Owner and mode only (never the content): root:aictl-agent 0640, as the agent requires.
+- name: Token | owner and mode
+  ansible.builtin.file:
+    path: "{{ ai_host_agent_token_file }}"
+    state: file
+    follow: false
+    owner: "{{ ai_host_agent_token_owner }}"
+    group: "{{ ai_host_agent_token_group }}"
+    mode: "0640"
+  register: ai_host_agent_token_perms
+  when: ai_host_agent_token_stat.stat.exists or not ansible_check_mode
+  notify: Restart ai-host-agent

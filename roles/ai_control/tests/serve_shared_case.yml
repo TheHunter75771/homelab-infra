@@ -1,0 +1,17 @@
+---
+# One inventory for the cross-check play in test_ai_control.yml: shared_case = {name, vars, want}. The case's vars
+# are include params (they outrank both roles' defaults); unset ones get role ai_control's default values (443, 8095).
+- name: Both roles declare the expected set for {{ shared_case.name }}
+  vars:
+    ai_control_serve_extra_handlers: "{{ shared_case.vars.get('ai_control_serve_extra_handlers', []) }}"
+    ai_control_serve_port: "{{ shared_case.vars.get('ai_control_serve_port', 443) }}"
+    ai_control_listen_port: "{{ shared_case.vars.get('ai_control_listen_port', 8095) }}"
+  ansible.builtin.assert:
+    that:
+      - ai_control_serve_handlers == shared_case.want
+      - mission_control_serve_handlers == shared_case.want
+      - ai_control_serve_handlers == mission_control_serve_handlers
+    fail_msg: >-
+      {{ shared_case.name }}: ai_control {{ ai_control_serve_handlers | to_json }};
+      mission_control {{ mission_control_serve_handlers | to_json }}; want {{ shared_case.want | to_json }}
+    quiet: true

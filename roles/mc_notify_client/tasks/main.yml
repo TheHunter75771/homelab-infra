@@ -1,0 +1,142 @@
+---
+# Role mc_notify_client (B2-CONTRACT.md §5). Order: inputs, the CLI, config dir + config.json + token, the unit, a
+# read-only check that the installed CLI runs. Nothing is sent: the first push is the first real failure (or Noah's
+# own `mc-notify --title test --tag test`).
+
+- name: Preflight | role inputs
+  ansible.builtin.assert:
+    that:
+      - mc_notify_client_scope in ['system', 'user']
+      # User scope: every path hangs off the connecting user's home, so it must be a real absolute path, never `/`.
+      - >-
+        mc_notify_client_system | bool
+        or (mc_notify_client_home is string and mc_notify_client_home is match('^/[A-Za-z0-9._-][A-Za-z0-9._/-]*\\Z')
+            and mc_notify_client_home is not search('(^|/)[.]{1,2}(/|$)|//|/$'))
+      # Plain absolute paths: they go into the unit (ExecStart=, Environment=) unquoted.
+      - mc_notify_client_cli is match('^/[A-Za-z0-9._/-]+\\Z')
+      - mc_notify_client_config_file is match('^/[A-Za-z0-9._/-]+\\Z')
+      - mc_notify_client_token_file is match('^/[A-Za-z0-9._/-]+\\Z')
+      - mc_notify_client_unit_dir is match('^/[A-Za-z0-9._/-]+\\Z')
+      - >-
+        [mc_notify_client_cli, mc_notify_client_config_file, mc_notify_client_token_file, mc_notify_client_unit_dir]
+        | select('search', '(^|/)[.]{1,2}(/|$)|//') | list | length == 0
+      # Mission Control's notify route over the tailnet, TLS verified by name: https://<name>.ts.net[:port]/api/notify.
+      - mc_notify_client_url is string
+      - mc_notify_client_url is match(mc_notify_client_url_re)
+      - mc_notify_client_url_port | int in range(1, 65536)
+    fail_msg: >-
+      Check the mc_notify_client inputs: mc_notify_client_scope system or user (it is '{{ mc_notify_client_scope }}');
+      plain absolute paths (user scope: the connecting user's home from facts, '{{ mc_notify_client_home }}');
+      mc_notify_client_url https://<ai-box's tailnet name>.ts.net[:port]/api/notify, no user info, query or fragment
+      (default: ai-box on this host's tailnet_fqdn suffix, :8443; it is '{{ mc_notify_client_url }}').
+    quiet: true
+
+# The token comes from the vault: only this no_log task reads it; the check below prints only the verdict.
+- name: Preflight | the token, checked without printing it
+  ansible.builtin.set_fact:
+    mc_notify_client_token_ok: >-
+      {{ mc_notify_client_token is string and mc_notify_client_token is match('^[!-~]{32,256}\Z') }}
+  no_log: true
+
+- name: Preflight | the token is set and is 32-256 visible ASCII characters
+  ansible.builtin.assert:
+    that: mc_notify_client_token_ok | bool
+    fail_msg: >-
+      mc_notify_client_token (vault only) must be this host's sender token, 32-256 visible ASCII characters with no
+      spaces: the same value as mission_control_notify_tokens[<this sender>] for ai-box. It is never printed.
+    quiet: true
+
+# u+rwx only adds bits: an existing ~/.local/bin keeps its mode.
+- name: CLI | the user's bin directory (user scope)
+  ansible.builtin.file:
+    path: "{{ mc_notify_client_cli | dirname }}"
+    state: directory
+    mode: u+rwx
+  when: not mc_notify_client_system | bool
+
+- name: CLI | mc-notify (Python standard library only)
+  ansible.builtin.copy:
+    src: "{{ mc_notify_client_role_dir }}/files/mc_notify.py"
+    dest: "{{ mc_notify_client_cli }}"
+    owner: "{{ mc_notify_client_owner }}"
+    group: "{{ mc_notify_client_group }}"
+    mode: "0755"
+
+# KEEP THIS ORDER: the guard, the 0700 directory, config.json, then the token (tests/test_mc_notify_client.yml checks
+# it). The directory must be real (never a symlink, so nothing is written elsewhere) and 0700 before anything goes in:
+# the token's copy goes through a 0600 temporary file and a rename, but when it replaces an existing file the new one
+# briefly carries the old file's mode, and only the 0700 directory around it keeps that instant private.
+- name: Config | the directory, before anything goes in
+  ansible.builtin.stat:
+    path: "{{ mc_notify_client_config_dir }}"
+    follow: false
+    get_checksum: false
+  register: mc_notify_client_dir_stat
+
+- name: Config | the directory is absent or a real directory (never a symlink)
+  ansible.builtin.assert:
+    that: not mc_notify_client_dir_stat.stat.exists or (mc_notify_client_dir_stat.stat.isdir and not mc_notify_client_dir_stat.stat.islnk)
+    fail_msg: >-
+      {{ mc_notify_client_config_dir }} exists but isn't a real directory (a symlink or a file). Nothing is written
+      through it; fix it by hand.
+    quiet: true
+
+# 0700: nobody else looks inside (a caller who can't see /etc/mc-notify/config.json falls through to their own
+# ~/.config/mc-notify; mc_notify.py's docstring).
+- name: Config | directory (0700)
+  ansible.builtin.file:
+    path: "{{ mc_notify_client_config_dir }}"
+    state: directory
+    owner: "{{ mc_notify_client_owner }}"
+    group: "{{ mc_notify_client_group }}"
+    mode: "0700"
+
+# Not a secret, but whoever can write it can send the token elsewhere: 0600, and mc-notify refuses a config that
+# group or others can write.
+- name: Config | config.json (url and token_file; 0600)
+  ansible.builtin.copy:
+    content: "{{ mc_notify_client_config | to_nice_json(indent=2, sort_keys=true) }}\n"
+    dest: "{{ mc_notify_client_config_file }}"
+    owner: "{{ mc_notify_client_owner }}"
+    group: "{{ mc_notify_client_group }}"
+    mode: "0600"
+    follow: false
+
+# The token is a secret: no_log hides the task's arguments, result and diff at any verbosity (tests/run.sh greps a
+# -vvv --diff run for a canary token, as text and base64). 0600: mc-notify refuses anything looser.
+- name: Config | the token (vault; 0600)
+  ansible.builtin.copy:
+    content: "{{ mc_notify_client_token }}\n"
+    dest: "{{ mc_notify_client_token_file }}"
+    owner: "{{ mc_notify_client_owner }}"
+    group: "{{ mc_notify_client_group }}"
+    mode: "0600"
+    follow: false
+  diff: false
+  no_log: true
+
+- name: Unit | the user's unit directory (user scope)
+  ansible.builtin.file:
+    path: "{{ mc_notify_client_unit_dir }}"
+    state: directory
+    mode: u+rwx
+  when: not mc_notify_client_system | bool
+
+# A template unit: nothing to enable. A unit opts in with OnFailure=notify-failure@%n.service (README).
+- name: Unit | notify-failure@.service
+  ansible.builtin.template:
+    src: "{{ mc_notify_client_role_dir }}/templates/{{ mc_notify_client_unit_src }}"
+    dest: "{{ mc_notify_client_unit_dir }}/{{ mc_notify_client_unit }}"
+    owner: "{{ mc_notify_client_owner }}"
+    group: "{{ mc_notify_client_group }}"
+    mode: "0644"
+  notify: Reload systemd for mc-notify
+
+# Read-only: the installed file runs under its shebang's interpreter (/usr/bin/python3 -I). Sends nothing.
+- name: Verify | mc-notify runs (--help)
+  ansible.builtin.command:
+    argv: ["{{ mc_notify_client_cli }}", --help]
+  register: mc_notify_client_help
+  changed_when: false
+  failed_when: mc_notify_client_help.rc != 0 or mc_notify_client_help.stdout is not search('--unit')
+  when: not ansible_check_mode

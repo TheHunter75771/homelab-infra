@@ -1,0 +1,14 @@
+---
+# Order matters: handlers run in this order, so the unit is reloaded before anything restarts.
+- name: Reload systemd for skill-drafter
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+# Only when the drafter is switched on; with skill_drafter_enabled false it stays stopped (tasks/service.yml).
+# A restart during a broker call loses that call (the CPU model can take up to `timeout`): its `start` line in
+# drafter-log.md has no result and counts as one of the round's max_attempts (3); the next pass tries again.
+- name: Restart skill-drafter
+  ansible.builtin.systemd_service:
+    name: "{{ skill_drafter_service }}"
+    state: restarted
+  when: skill_drafter_enabled | bool

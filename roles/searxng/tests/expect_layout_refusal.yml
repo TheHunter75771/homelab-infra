@@ -1,0 +1,56 @@
+---
+# One symlink case for test_searxng.yml: case = {name, kind (dir|file|dangling), root, link, task, victim}. The scratch project dir gets real dirs up to
+# `link`, which is made a symlink to a victim (a dir holding one sentinel, or for .env a file). layout.yml must
+# refuse at `task` before writing through it, and the victim must be untouched.
+- name: Layout case | set up the victim and the link for {{ case.name }}
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      v="{{ test_tmp }}/victim-{{ case.name }}"
+      mkdir -p "$(dirname "{{ case.link }}")"
+      if [ "{{ case.kind }}" = file ]; then
+        echo keep > "$v"; chmod 0644 "$v"
+      elif [ "{{ case.kind }}" = dangling ]; then
+        rm -rf "$v"
+      else
+        mkdir -p "$v"; echo keep > "$v/sentinel"; chmod 0644 "$v/sentinel"; chmod 0700 "$v"
+      fi
+      ln -sfn "$v" "{{ case.link }}"
+    executable: /bin/bash
+  changed_when: true
+
+- name: Layout case | run layout.yml through the link for {{ case.name }}
+  block:
+    - name: Layout case | layout for {{ case.name }}
+      ansible.builtin.include_tasks: ../tasks/layout.yml
+      vars:
+        searxng_dir: "{{ case.root }}"
+        searxng_config_dir: "{{ case.root }}/config"
+
+    - name: Layout case | not reached for {{ case.name }}
+      ansible.builtin.set_fact:
+        sx_test_layout_by: ""
+  rescue:
+    - name: Layout case | note which task refused for {{ case.name }}
+      ansible.builtin.set_fact:
+        sx_test_layout_by: "{{ ansible_failed_task.name }}"
+
+- name: Layout case | read the victim for {{ case.name }}
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      v="{{ test_tmp }}/victim-{{ case.name }}"
+      if [ ! -e "$v" ] && [ ! -L "$v" ]; then echo absent; exit 0; fi
+      find "$v" -printf '%P|%m|%y\n' | LC_ALL=C sort
+      if [ -d "$v" ]; then cat "$v/sentinel"; else cat "$v"; fi
+    executable: /bin/bash
+  register: sx_test_victim
+  changed_when: false
+
+- name: Layout case | refused by the expected check, victim untouched for {{ case.name }}
+  ansible.builtin.assert:
+    that:
+      - sx_test_layout_by == case.task
+      - sx_test_victim.stdout_lines == case.victim
+    fail_msg: "refused by '{{ sx_test_layout_by }}' (expected '{{ case.task }}'); victim: {{ sx_test_victim.stdout_lines }}"
+    quiet: true

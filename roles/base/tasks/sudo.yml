@@ -1,0 +1,83 @@
+---
+# Classic sudo instead of sudo-rs (Noah, docs/CONTRACTS.md §12.13). Ubuntu 26.04 ships both behind the
+# "sudo" alternative: sudo-rs (/usr/lib/cargo/bin/sudo, priority 50, the auto choice) and classic sudo
+# (/usr/bin/sudo.ws, priority 40), each with visudo, sudoedit and the man pages as slaves. Selecting the
+# classic one in manual mode switches /usr/bin/sudo and /usr/sbin/visudo together, and a later sudo-rs
+# upgrade can't switch it back. Ansible itself becomes through /usr/bin/sudo.ws (group_vars
+# ansible_become_exe), so the switch can't break the running play. Both implementations read the same
+# /etc/sudoers and /etc/sudoers.d.
+- name: Read the sudo alternatives
+  ansible.builtin.command:
+    argv: [update-alternatives, --query, sudo]
+  register: base_sudo_alternatives
+  changed_when: false
+  failed_when: base_sudo_alternatives.rc not in [0, 2]
+  check_mode: false
+  when: base_sudo_wanted
+
+- name: Decide whether to switch
+  ansible.builtin.import_tasks: sudo_decide.yml
+  when: base_sudo_wanted
+
+# Before switching: classic sudo must parse the sudoers files and keep the admin's and the automation
+# user's root access (tasks/sudo_probe.yml asks classic sudo itself: passwordless root for an account
+# without a usable password and for the automation user, root with a password for an admin who has one),
+# and no rules may live only in /etc/sudoers-rs (sudo-rs reads it when it exists, classic sudo never does).
+# Read-only, so they also run in check mode.
+- name: Look for sudo-rs's own sudoers file
+  ansible.builtin.stat:
+    path: /etc/sudoers-rs
+  register: base_sudo_rs_sudoers
+  when: base_sudo_wanted and base_sudo_managed
+
+- name: No rules live only in /etc/sudoers-rs
+  ansible.builtin.assert:
+    that:
+      - not base_sudo_rs_sudoers.stat.exists
+    fail_msg: >-
+      /etc/sudoers-rs exists. sudo-rs reads it instead of /etc/sudoers, classic sudo ignores it, so its rules would
+      silently stop applying. Move them into /etc/sudoers.d (check with visudo.ws -c), remove it, then re-run.
+    quiet: true
+  when: base_sudo_wanted and base_sudo_managed
+
+- name: Classic visudo accepts the sudoers files
+  ansible.builtin.command:
+    argv: ["{{ base_sudo_visudo }}", -c]
+  changed_when: false
+  check_mode: false
+  when: base_sudo_wanted and base_sudo_managed
+
+- name: Classic sudo gives the admin and automation users passwordless root
+  ansible.builtin.import_tasks: sudo_probe.yml
+  when: base_sudo_wanted and base_sudo_managed
+
+- name: Switch sudo to the classic implementation
+  ansible.builtin.import_tasks: sudo_switch.yml
+  when: base_sudo_wanted and base_sudo_managed
+
+- name: Read what /usr/bin/sudo, /usr/sbin/visudo and the alternative are now
+  ansible.builtin.command:
+    argv: "{{ item }}"
+  loop:
+    - [/usr/bin/sudo, --version]
+    - [readlink, -f, /usr/sbin/visudo]
+    - [update-alternatives, --query, sudo]
+  environment:
+    LC_ALL: C
+  register: base_sudo_now
+  changed_when: false
+  when: base_sudo_wanted and base_sudo_managed and not ansible_check_mode
+
+- name: Sudo and visudo are classic, and the choice is manual
+  ansible.builtin.assert:
+    that:
+      - base_sudo_now.results[0].stdout_lines | first is match('^Sudo version ')
+      - base_sudo_now.results[1].stdout == base_sudo_visudo
+      - "'Status: manual' in base_sudo_now.results[2].stdout_lines"
+      - "('Value: ' ~ base_sudo_alternative) in base_sudo_now.results[2].stdout_lines"
+    fail_msg: >-
+      /usr/bin/sudo --version: {{ base_sudo_now.results[0].stdout_lines | first | default('') }};
+      /usr/sbin/visudo -> {{ base_sudo_now.results[1].stdout }};
+      alternative: {{ base_sudo_now.results[2].stdout_lines | select('match', '^(Status|Value): ') | list }}
+    quiet: true
+  when: base_sudo_wanted and base_sudo_managed and not ansible_check_mode

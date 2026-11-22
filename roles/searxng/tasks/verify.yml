@@ -1,0 +1,109 @@
+---
+# Read-only host checks (§12.16.4, Integrator checks): the pinned address, the loopback-only publish, the
+# hardening as Docker applied it, and a JSON search answered on 127.0.0.1:8888 and on the address the gate uses.
+# Field-limited (Reviewer F): the full inspect carries Config.Env, which holds SEARXNG_SECRET (env_file). Only
+# the fields the asserts use are printed, each through `json`, and Config.Env is never asked for. no_log as well,
+# so even a future format change can't print the environment.
+- name: Verify | inspect the container (only the checked fields)
+  ansible.builtin.command:
+    argv:
+      - docker
+      - inspect
+      - --type
+      - container
+      - --format
+      - >-
+        {% raw %}{"user": {{json .Config.User}}, "networks": {{json .NetworkSettings.Networks}},
+        "read_only": {{json .HostConfig.ReadonlyRootfs}}, "cap_drop": {{json .HostConfig.CapDrop}},
+        "cap_add": {{json .HostConfig.CapAdd}}, "security_opt": {{json .HostConfig.SecurityOpt}},
+        "privileged": {{json .HostConfig.Privileged}}, "pids_limit": {{json .HostConfig.PidsLimit}},
+        "network_mode": {{json .HostConfig.NetworkMode}}}{% endraw %}
+      - "{{ searxng_container }}"
+  register: searxng_inspect
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Verify | the container exists (inspect answered)
+  ansible.builtin.assert:
+    that: searxng_inspect.rc == 0
+    fail_msg: "docker inspect {{ searxng_container }} failed (rc {{ searxng_inspect.rc }}); is the container up?"
+    quiet: true
+
+- name: Verify | pinned address, one network, hardening as declared
+  vars:
+    c: "{{ searxng_inspect.stdout | from_json }}"
+    nets: "{{ c.networks }}"
+  ansible.builtin.assert:
+    that:
+      - c.keys() | sort == ['cap_add', 'cap_drop', 'network_mode', 'networks', 'pids_limit', 'privileged', 'read_only', 'security_opt', 'user']
+      - nets.keys() | list == [searxng_network]
+      - nets[searxng_network].IPAddress == searxng_ipv4
+      - c.user == searxng_uid ~ ':' ~ searxng_gid
+      - c.read_only is sameas true
+      - c.cap_drop == ['ALL']
+      - c.cap_add is none or c.cap_add | length == 0
+      - c.security_opt is contains('no-new-privileges:true')
+      - c.privileged is sameas false
+      - c.pids_limit == searxng_pids_limit | int
+      - c.network_mode == searxng_network
+    fail_msg: >-
+      {{ searxng_container }}: networks {{ nets | dict2items | map(attribute='key') | list }}, address
+      {{ nets[searxng_network].IPAddress | default('none') }} (want {{ searxng_ipv4 }}), user {{ c.user }},
+      read-only {{ c.read_only }}, cap_drop {{ c.cap_drop }}, cap_add {{ c.cap_add }}, privileged {{ c.privileged }},
+      pids {{ c.pids_limit }}, network mode {{ c.network_mode }}.
+    quiet: true
+
+- name: Verify | read the publish
+  ansible.builtin.command:
+    argv: [docker, port, "{{ searxng_container }}"]
+  register: searxng_ports
+  changed_when: false
+
+- name: Verify | published on loopback only, port {{ searxng_publish_port }}
+  ansible.builtin.assert:
+    that:
+      - searxng_ports.stdout_lines == [searxng_container_port ~ '/tcp -> ' ~ searxng_publish_host ~ ':' ~ searxng_publish_port]
+    fail_msg: "docker port {{ searxng_container }}: {{ searxng_ports.stdout_lines }}"
+    quiet: true
+
+- name: Verify | /healthz on the loopback publish and on the address the gate uses
+  ansible.builtin.uri:
+    url: "{{ item }}/healthz"
+    status_code: 200
+    timeout: 5
+  loop:
+    - "http://{{ searxng_publish_host }}:{{ searxng_publish_port }}"
+    - "http://{{ searxng_ipv4 }}:{{ searxng_container_port }}"
+  register: searxng_health
+  until: searxng_health.status | default(0) == 200
+  retries: "{{ searxng_verify_retries }}"
+  delay: "{{ searxng_verify_delay }}"
+
+# 200 with a JSON body proves the json format is on. The engines need the internet; an offline engine shows
+# up in unresponsive_engines, not as an error, so the result count isn't asserted.
+- name: Verify | a JSON search answers on 127.0.0.1:{{ searxng_publish_port }}
+  ansible.builtin.uri:
+    url: "http://{{ searxng_publish_host }}:{{ searxng_publish_port }}/search?q=test&format=json"
+    status_code: 200
+    return_content: true
+    timeout: 30
+  register: searxng_search
+  until: searxng_search.status | default(0) == 200
+  retries: 3
+  delay: "{{ searxng_verify_delay }}"
+
+- name: Verify | the answer is SearXNG's JSON
+  ansible.builtin.assert:
+    that:
+      - searxng_search.json is defined and searxng_search.json is mapping
+      - searxng_search.json.query == 'test'
+      - searxng_search.json.results is sequence
+    fail_msg: "Not SearXNG JSON: {{ searxng_search.content | default('') | truncate(300) }}"
+    quiet: true
+
+- name: Verify | engine reach (information only)
+  ansible.builtin.debug:
+    msg: >-
+      {{ searxng_search.json.results | length }} results;
+      unresponsive engines: {{ searxng_search.json.unresponsive_engines | default([]) }}

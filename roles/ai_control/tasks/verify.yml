@@ -1,0 +1,106 @@
+---
+# Read-only checks after start (skipped in check mode). Nothing here changes the host: the only
+# helper op used is `containers` (read-only by design), and every HTTP call is a GET.
+- name: Verify | the guard, the server and the helper socket are active
+  ansible.builtin.command:
+    argv: [systemctl, is-active, "{{ ai_control_guard_unit }}", "{{ ai_control_service }}", "{{ ai_control_helper_socket_unit }}"]
+  register: ai_control_active
+  changed_when: false
+  failed_when: ai_control_active.stdout_lines != ['active', 'active', 'active']
+
+- name: Verify | /healthz on the loopback port (waits for the start)
+  ansible.builtin.uri:
+    url: http://127.0.0.1:{{ ai_control_listen_port }}/healthz
+    status_code: 200
+    timeout: 5
+  register: ai_control_health
+  until: ai_control_health.status | default(-1) == 200
+  retries: "{{ ai_control_verify_retries }}"
+  delay: "{{ ai_control_verify_delay }}"
+
+- name: Verify | the web app is served at / with the strict CSP
+  ansible.builtin.uri:
+    url: http://127.0.0.1:{{ ai_control_listen_port }}/
+    status_code: 200
+    timeout: 5
+  register: ai_control_index
+  failed_when: >-
+    ai_control_index.status != 200
+    or not (ai_control_index.content_type | default('')).startswith('text/html')
+    or "default-src 'self'" not in (ai_control_index.content_security_policy | default(''))
+
+# A fixed, read-only client for the helper protocol (one JSON line per connection). "send" sends
+# {"op":"containers"}; "peek" only reads (a refused peer gets "forbidden" before anything is sent).
+# It prints a reduced reply: ok, the error code, Docker's state and each container's name and state.
+- name: Verify | helper probe client
+  ansible.builtin.set_fact:
+    ai_control_probe: |
+      import json, socket, sys
+      path, mode = sys.argv[1], sys.argv[2]
+      s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+      s.settimeout(15)
+      s.connect(path)
+      if mode == "send":
+          s.sendall(b'{"op":"containers"}\n')
+      buf = b""
+      try:
+          while b"\n" not in buf and len(buf) < 1048576:
+              chunk = s.recv(65536)
+              if not chunk:
+                  break
+              buf += chunk
+      except OSError as exc:
+          print(json.dumps({"ok": None, "error": "socket: %s" % exc.__class__.__name__}))
+          sys.exit(0)
+      r = json.loads(buf.split(b"\n", 1)[0] or b"{}")
+      d = r.get("data") or {}
+      print(json.dumps({"ok": r.get("ok"), "error": (r.get("error") or {}).get("code"),
+                        "docker": d.get("docker"),
+                        "containers": [[c.get("name"), c.get("state")] for c in d.get("containers") or []]}))
+
+# As aictl, the server's own account (setpriv: no PAM, no shell; aictl has no login).
+- name: Verify | the helper answers `containers` for aictl
+  ansible.builtin.command:
+    argv:
+      - setpriv
+      - --reuid={{ ai_control_user }}
+      - --regid={{ ai_control_user }}
+      - --init-groups
+      - --no-new-privs
+      - --
+      - "{{ ai_control_python }}"
+      - -I
+      - -B
+      - -c
+      - "{{ ai_control_probe }}"
+      - "{{ ai_control_helper_socket }}"
+      - send
+  register: ai_control_probe_aictl
+  changed_when: false
+
+- name: Verify | the helper's containers reply is complete
+  vars:
+    reply: "{{ ai_control_probe_aictl.stdout | from_json }}"
+  ansible.builtin.assert:
+    that:
+      - reply.ok == true
+      - reply.docker == 'active'
+      - reply.containers | map('first') | list == ai_control_helper_containers
+      - reply.containers | selectattr('1', 'equalto', 'missing') | list | length == 0
+    fail_msg: "helper reply for aictl: {{ ai_control_probe_aictl.stdout }}"
+    quiet: true
+
+- name: Verify | the helper refuses any other peer (root here)
+  ansible.builtin.command:
+    argv: ["{{ ai_control_python }}", -I, -B, -c, "{{ ai_control_probe }}", "{{ ai_control_helper_socket }}", peek]
+  register: ai_control_probe_root
+  changed_when: false
+  failed_when: (ai_control_probe_root.stdout | from_json).error != 'forbidden'
+
+# End to end through S: tasks/verify_summary.yml (tested offline against a fake /api/summary).
+- name: Verify | the summary shows the required services ok
+  ansible.builtin.include_tasks: verify_summary.yml
+
+# Reviewer Q: the local-access guard, live (tasks/verify_guard.yml).
+- name: Verify | the local-access guard holds
+  ansible.builtin.include_tasks: verify_guard.yml

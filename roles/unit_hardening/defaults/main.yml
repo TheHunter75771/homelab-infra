@@ -1,0 +1,32 @@
+---
+# Role unit_hardening (docs/CONTRACTS.md §12.30, H15; Reviewer Q, Q2-1). Inputs the Lead declares per host.
+
+# The service units whose sandbox must not reach tailscaled's local API. Each entry is exactly
+# {unit: <name>.service, restart: <bool>}:
+#   - restart: true  -> the role restarts the unit (systemctl try-restart: only if it is running) when its drop-in
+#                       changed, or when its running process still sees tailscaled.sock. Long-running services.
+#   - restart: false -> never restarted by the role; the drop-in takes effect at the unit's next start. Required
+#                       for Type=oneshot units (timers, backups, on-demand builds): the role never forces a run.
+# Empty (the default): the role checks its inputs and does nothing else.
+unit_hardening_units: []
+
+# Units whose drop-in this role removes (retiring the hardening for a unit, e.g. one being uninstalled). Removing
+# never restarts anything; a running unit keeps its hidden /run/tailscale until its next start.
+unit_hardening_remove: []
+
+# Verify: seconds between the two state reads (a unit that crash-loops after its restart shows a new MainPID or
+# NRestarts). The tests set 0.
+unit_hardening_verify_settle: 5
+
+# Root units only (Reviewer Q, Q6-1): units whose `systemctl` calls may go over the D-Bus system bus instead of
+# /run/systemd/private. Under PrivatePIDs=yes the private socket's peer (PID 1) has no pid in the unit's namespace,
+# so systemctl's peer check fails (ENODATA); the drop-in then adds Environment=SYSTEMCTL_FORCE_BUS=1. Without
+# this, the preflight refuses a root unit whose code calls systemctl (README, "Root units").
+unit_hardening_systemctl_via_bus: []
+
+# Q6-4: before restarting a unit listed here, the preflight asks its URL (Ollama's /api/ps) whether a model is
+# loaded and refuses the restart while one is (or while it can't tell), unless
+# -e unit_hardening_allow_busy_restart=true. Only consulted when the unit would actually be restarted.
+unit_hardening_busy_urls:
+  ollama.service: "http://{{ gaming_pc_tailnet_ip | default('') }}:11434/api/ps"
+unit_hardening_allow_busy_restart: false

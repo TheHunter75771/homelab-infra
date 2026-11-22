@@ -1,0 +1,57 @@
+---
+# Read-only checks after start (not in check mode). Nothing here changes the host: GETs to the local server, a
+# read of the serve config, a transient probe unit (UDP sends to the discard port and TCP connects, no data) and a
+# journal read. tests/test_mission_control.yml runs the verify_*.yml files against fakes.
+- name: Verify | the guard, the server and the briefing timer are active
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - is-active
+      - "{{ mission_control_guard_unit }}"
+      - "{{ mission_control_service }}"
+      - "{{ mission_control_briefing_timer }}"
+  register: mission_control_active
+  changed_when: false
+  failed_when: mission_control_active.stdout_lines != ['active', 'active', 'active']
+
+- name: Verify | all three are enabled (the briefing service itself is static)
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - is-enabled
+      - "{{ mission_control_guard_unit }}"
+      - "{{ mission_control_service }}"
+      - "{{ mission_control_briefing_timer }}"
+      - "{{ mission_control_briefing_service }}"
+  register: mission_control_enabled
+  changed_when: false
+  failed_when: mission_control_enabled.stdout_lines != ['enabled', 'enabled', 'enabled', 'static']
+
+- name: Verify | `mission-control check-config` as mc in the units' sandbox (config, VAPID file, state dir)
+  ansible.builtin.include_tasks: verify_check_config.yml
+
+- name: Verify | a VAPID token signs with the real key and subject
+  ansible.builtin.include_tasks: verify_vapid_sign.yml
+
+- name: Verify | the identity check (200 with Noah's login, 403 without)
+  ansible.builtin.include_tasks: verify_http.yml
+
+- name: Verify | read the live serve config
+  ansible.builtin.command:
+    argv: [tailscale, serve, status, --json]
+  register: mission_control_serve_live
+  changed_when: false
+
+- name: Verify | :8443 is Mission Control and AI Control's 443 is untouched
+  ansible.builtin.include_tasks: verify_serve.yml
+  vars:
+    mission_control_serve_status_json: "{{ mission_control_serve_live.stdout }}"
+
+- name: Verify | the local-access guard (8097 root only; :8443 only from the tailscale interface; survives ufw reload)
+  ansible.builtin.include_tasks: verify_guard.yml
+
+- name: Verify | the IP filter, probed from inside the units' own sandbox
+  ansible.builtin.include_tasks: verify_egress.yml
+
+- name: Verify | no secrets in the journal
+  ansible.builtin.include_tasks: verify_journal.yml

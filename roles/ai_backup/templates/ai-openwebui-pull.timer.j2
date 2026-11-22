@@ -1,0 +1,12 @@
+# {{ ansible_managed }}
+# Role ai_backup (docs/CONTRACTS.md §12.28): daily at 06:30; this PC is often off then, so it catches up at boot.
+[Unit]
+Description=Daily pull of ai-box's Open WebUI backups
+
+[Timer]
+OnCalendar={{ ai_backup_pull_calendar }}
+Persistent=true
+Unit={{ ai_backup_pull_service }}
+
+[Install]
+WantedBy=timers.target

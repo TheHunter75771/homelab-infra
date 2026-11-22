@@ -15,6 +15,10 @@
     line: IPV6=yes
   notify: Reload ufw
 
+# Before UFW is enabled or reloaded below, so its next start already applies the fixed file.
+- name: UFW's sysctl file agrees with role base
+  ansible.builtin.import_tasks: ufw_sysctl.yml
+
 # A DOCKER-USER block in UFW's own files (the ufw-docker recipe) would flush the guard's rules
 # on every UFW reload. Refuse to run on top of one.
 - name: Look for DOCKER-USER in UFW's rule files
@@ -72,6 +76,24 @@
   community.general.ufw:
     state: enabled
   when: "'Status: active' not in firewall_status.stdout"
+
+# A UFW start since role base last ran (boot order, or the enable above) may have applied the old
+# file, so put the live values right now; from here on UFW's file and base's file agree. Every run,
+# not only when the file changed: a half-finished earlier run must not leave them off.
+- name: Read the live martian-logging settings
+  ansible.builtin.slurp:
+    src: "/proc/sys/net/ipv4/conf/{{ item }}/log_martians"
+  loop: "{{ firewall_martians_conf }}"
+  register: firewall_martians_live
+
+- name: Martian logging is on now
+  ansible.builtin.command:
+    argv: [sysctl, -w, "net.ipv4.conf.{{ item.item }}.log_martians=1"]
+  loop: "{{ firewall_martians_live.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.content | b64decode | trim != '1'
+  changed_when: true
 
 - name: Prune rules that are not declared
   when: not ansible_check_mode

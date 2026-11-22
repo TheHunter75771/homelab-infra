@@ -1,0 +1,22 @@
+---
+# No recent AVC denial for the agent's uid. Clean means exactly: ausearch exits 1 and prints
+# "<no matches>". rc 0 is denials found; a missing ausearch, or any other error, fails too (never a
+# silent pass). tests/test_ai_host_agent.yml runs this with stub ausearch programs.
+- name: Verify | the agent's uid
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ ai_host_agent_user }}"
+
+- name: Verify | ausearch finds no AVC for the agent's uid
+  ansible.builtin.command:
+    argv:
+      - "{{ ai_host_agent_ausearch }}"
+      - --message
+      - AVC,USER_AVC
+      - --start
+      - recent
+      - --uid
+      - "{{ ansible_facts.getent_passwd[ai_host_agent_user][1] }}"
+  register: ai_host_agent_avc
+  changed_when: false
+  failed_when: ai_host_agent_avc.rc != 1 or '<no matches>' not in ai_host_agent_avc.stderr

@@ -1,0 +1,27 @@
+---
+# Input: ai_stack_webui_search (the checker's registered result). See verify_search.yml.
+- name: Search | report and check the effective search settings
+  vars:
+    ai_stack_search: "{{ ai_stack_webui_search.stdout | default('') | regex_search('^\\{.*\\}$') | default('{}', true) | from_json }}"
+    # none when the checker printed nothing usable (a crash, rc 2): never treated as "all fine".
+    ai_stack_search_settings: "{{ ai_stack_search.settings | default(none) }}"
+    ai_stack_search_bad: >-
+      {{ (ai_stack_search_settings or {}) | dict2items | rejectattr('value.ok')
+         | map(attribute='key') | select('in', ai_stack_webui_search_expected.keys() | list) | list }}
+    ai_stack_search_line: >-
+      {% for key, value in (ai_stack_search_settings or {}).items() %}{{ key }}={{ value.effective | to_json }}{{
+      ' (passages ' ~ value.passages ~ ')' if value.passages is defined else '' }}{{
+      '' if value.ok else ' [want ' ~ (value.expected | to_json) ~ ']' }}{{ '; ' if not loop.last else '' }}{% endfor %}
+  ansible.builtin.assert:
+    that:
+      - not (ai_stack_verify_search_settings | bool) or ai_stack_webui_search.rc | default(-1) in [0, 1]
+      - not (ai_stack_verify_search_settings | bool) or ai_stack_search_settings is mapping
+      - not (ai_stack_verify_search_settings | bool) or ai_stack_search_bad | length == 0
+    fail_msg: >-
+      Open WebUI's search settings ({{ ai_stack_search.source | default('unreadable: ' ~ (ai_stack_search.error
+      | default(ai_stack_webui_search.stderr | default('')))) }}): {{ ai_stack_search_line }}. Wrong:
+      {{ ai_stack_search_bad | join(', ') or 'cannot tell' }}. Fix: Admin Panel > Settings > Documents (README,
+      "Search settings"), Save, then re-run. Or set ai_stack_verify_search_settings: false until then.
+    success_msg: >-
+      Search settings ({{ ai_stack_search.source | default('unreadable') }}{{ '' if ai_stack_verify_search_settings
+      | bool else ', report only' }}): {{ ai_stack_search_line }}

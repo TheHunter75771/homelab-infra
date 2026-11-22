@@ -1,0 +1,28 @@
+---
+# /etc/skill-drafter: root:sdraft 0750; config.json root:sdraft 0640 (no secrets). Absent or a real directory
+# before anything is written (Reviewer F: never write through a symlink).
+- name: Config | the config directory is a real directory (before any write)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    skill_drafter_guard_dirs: ["{{ skill_drafter_config_dir }}"]
+
+- name: Config | directory
+  ansible.builtin.file:
+    path: "{{ skill_drafter_config_dir }}"
+    state: directory
+    owner: "{{ skill_drafter_root_owner }}"
+    group: "{{ skill_drafter_group }}"
+    mode: "0750"
+
+# Validated with K2's own loader from the installed code (vars/main.yml skill_drafter_config_validate). The
+# drafter reads its config once at start, so a change restarts it.
+- name: Config | config.json
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ skill_drafter_config_file }}"
+    owner: "{{ skill_drafter_root_owner }}"
+    group: "{{ skill_drafter_group }}"
+    mode: "0640"
+    follow: false
+    validate: "{{ skill_drafter_config_validate }}"
+  notify: Restart skill-drafter

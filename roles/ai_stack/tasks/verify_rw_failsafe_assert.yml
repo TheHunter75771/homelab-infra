@@ -1,0 +1,21 @@
+---
+# Input: ai_stack_rw_view_attrs (the `lsattr -d` loop of verify_skills.yml). Every read-write share that wasn't
+# mounted (an entry that ran) must have the immutable attribute (i) on its local directory.
+- name: Skills verify | read-write shares' local directories are immutable while not mounted
+  vars:
+    ai_stack_rw_not_immutable: >-
+      {%- set out = [] -%}
+      {%- for r in ai_stack_rw_view_attrs.results | default([]) if r.rc is defined -%}
+      {%- if r.rc != 0 or 'i' not in (r.stdout.split() | first | default('')) -%}
+      {%- set _ = out.append(r.item.share.view) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  ansible.builtin.assert:
+    that:
+      - ai_stack_rw_not_immutable | length == 0
+    fail_msg: >-
+      {{ ai_stack_rw_not_immutable | join(', ') }}: not immutable while its share isn't mounted, so open-webui could
+      write to ai-box's own disk through /payday-runs. Re-run the playbook (tasks/skills.yml sets chattr +i), or
+      stop open-webui until it is.
+    quiet: true

@@ -1,0 +1,24 @@
+---
+# The live serve config (mission_control_serve_status_json: `tailscale serve status --json`) has Mission Control on
+# :8443 and AI Control's 443 exactly as role ai_control declares it, both HTTPS, nothing funneled. (Role
+# tailscale_serve already asserted live == declared; this names the two handlers the contract cares about.)
+- name: Verify | the serve config has both handlers
+  vars:
+    live: "{{ mission_control_serve_status_json | from_json }}"
+    web: "{{ live.Web | default({}) }}"
+    aictl_key: "{{ tailnet_fqdn }}:{{ mission_control_aictl_serve_port }}"
+    own_key: "{{ tailnet_fqdn }}:{{ mission_control_serve_port }}"
+  ansible.builtin.assert:
+    that:
+      - live.TCP[mission_control_aictl_serve_port | string].HTTPS | default(false) == true
+      - live.TCP[mission_control_serve_port | string].HTTPS | default(false) == true
+      - >-
+        web[aictl_key].Handlers | default({}) == {'/': {'Proxy': mission_control_aictl_backend}}
+      - >-
+        web[own_key].Handlers | default({}) == {'/': {'Proxy': mission_control_serve_backend}}
+      - live.AllowFunnel | default({}) | length == 0
+    fail_msg: >-
+      tailscale serve status: {{ mission_control_serve_status_json }}. Want https {{ mission_control_aictl_serve_port }} / ->
+      {{ mission_control_aictl_backend }} (AI Control) and https {{ mission_control_serve_port }} / ->
+      {{ mission_control_serve_backend }} (Mission Control), no funnel.
+    quiet: true

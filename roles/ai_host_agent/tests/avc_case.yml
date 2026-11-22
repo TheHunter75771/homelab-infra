@@ -1,0 +1,39 @@
+---
+# One case for the offline test of tasks/verify_avc.yml: case = {name, rc, stderr, want}, or
+# {name, missing: true, want} for an ausearch that doesn't exist. want: pass | fail.
+- name: AVC case | stub ausearch for {{ case.name }}
+  ansible.builtin.copy:
+    dest: "{{ test_tmp }}/stub-ausearch-{{ case.name | regex_replace('[^a-z0-9]+', '-') }}"
+    content: |
+      #!/bin/sh
+      printf '%s\n' "{{ case.stdout | default('') }}"
+      printf '%s\n' "{{ case.stderr | default('') }}" >&2
+      exit {{ case.rc | default(1) }}
+    mode: "0755"
+  when: not case.missing | default(false)
+
+- name: AVC case | run verify_avc.yml for {{ case.name }}
+  block:
+    - name: AVC case | verify for {{ case.name }}
+      ansible.builtin.include_tasks: ../tasks/verify_avc.yml
+      vars:
+        ai_host_agent_user: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        ai_host_agent_ausearch: >-
+          {{ test_tmp ~ '/no-such-ausearch' if case.missing | default(false)
+             else test_tmp ~ '/stub-ausearch-' ~ (case.name | regex_replace('[^a-z0-9]+', '-')) }}
+
+    - name: AVC case | result for {{ case.name }}
+      ansible.builtin.set_fact:
+        agent_test_avc_result: pass
+  rescue:
+    - name: AVC case | result (refused) for {{ case.name }}
+      ansible.builtin.set_fact:
+        agent_test_avc_result: >-
+          {{ 'fail' if ansible_failed_task.name is search('ausearch finds no AVC for the agent')
+             else 'error: ' ~ ansible_failed_task.name }}
+
+- name: AVC case | outcome is as expected for {{ case.name }}
+  ansible.builtin.assert:
+    that: agent_test_avc_result == case.want
+    fail_msg: "{{ case.name }}: got {{ agent_test_avc_result }}, want {{ case.want }}"
+    quiet: true

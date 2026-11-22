@@ -1,0 +1,94 @@
+---
+# Both hosts: the library package (module L, apps/skill-library/library) and this role's helper
+# scripts -> ai_library_share_lib_dir, owned by ai_library_share_owner, 0755 dirs, 0644 files (every
+# script runs through an interpreter, never exec'd). Anything else in the dir is removed, so the dir
+# must be dedicated. tests/test_ai_library_share.yml runs this unprivileged into a scratch dir.
+- name: Install | find the library package modules
+  ansible.builtin.set_fact:
+    ai_library_share_modules: >-
+      {{ query('ansible.builtin.fileglob', ai_library_share_lib_src_dir ~ '/*.py') | map('basename') | sort }}
+
+- name: Install | the source tree is the library package
+  ansible.builtin.assert:
+    that:
+      - "'__init__.py' in ai_library_share_modules"
+      - "'core.py' in ai_library_share_modules"
+    fail_msg: "{{ ai_library_share_lib_src_dir }} doesn't hold the library package (apps/skill-library/library)."
+    quiet: true
+
+# The prune below deletes everything else in the dir: never point it at a shared directory.
+- name: Install | the install dir is a dedicated ai-library-share directory
+  ansible.builtin.assert:
+    that:
+      - ai_library_share_lib_dir is abs
+      - ai_library_share_lib_dir | basename == 'ai-library-share'
+    fail_msg: ai_library_share_lib_dir must be an absolute path ending in /ai-library-share (it is pruned), not {{ ai_library_share_lib_dir }}.
+    quiet: true
+
+- name: Install | guard the install dirs
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    ai_library_share_guard_dirs:
+      - "{{ ai_library_share_lib_dir }}"
+      - "{{ ai_library_share_lib_dir }}/{{ ai_library_share_package }}"
+
+- name: Install | directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ ai_library_share_owner }}"
+    group: "{{ ai_library_share_owner }}"
+    mode: "0755"
+  loop:
+    - "{{ ai_library_share_lib_dir }}"
+    - "{{ ai_library_share_lib_dir }}/{{ ai_library_share_package }}"
+  register: ai_library_share_install_dirs
+
+- name: Install | helper scripts
+  ansible.builtin.copy:
+    src: "{{ ai_library_share_files_dir }}/{{ item }}"
+    dest: "{{ ai_library_share_lib_dir }}/{{ item }}"
+    owner: "{{ ai_library_share_owner }}"
+    group: "{{ ai_library_share_owner }}"
+    mode: "0644"
+  loop: "{{ ai_library_share_scripts }}"
+  register: ai_library_share_install_scripts
+
+- name: Install | library package modules
+  ansible.builtin.copy:
+    src: "{{ ai_library_share_lib_src_dir }}/{{ item }}"
+    dest: "{{ ai_library_share_lib_dir }}/{{ ai_library_share_package }}/{{ item }}"
+    owner: "{{ ai_library_share_owner }}"
+    group: "{{ ai_library_share_owner }}"
+    mode: "0644"
+  loop: "{{ ai_library_share_modules }}"
+  register: ai_library_share_install_modules
+
+- name: Install | guard again right before the prune
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    ai_library_share_guard_dirs:
+      - "{{ ai_library_share_lib_dir }}"
+      - "{{ ai_library_share_lib_dir }}/{{ ai_library_share_package }}"
+
+- name: Install | find what is installed
+  ansible.builtin.find:
+    paths:
+      - "{{ ai_library_share_lib_dir }}"
+      - "{{ ai_library_share_lib_dir }}/{{ ai_library_share_package }}"
+    file_type: any
+    hidden: true
+  register: ai_library_share_installed
+
+- name: Install | anything else is removed (stale modules, bytecode caches, strays)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ ai_library_share_installed.files | map(attribute='path') | reject('in', ai_library_share_wanted) | sort }}"
+  vars:
+    ai_library_share_wanted: >-
+      {{ [ai_library_share_lib_dir ~ '/' ~ ai_library_share_package]
+         + (ai_library_share_scripts | map('regex_replace', '^', ai_library_share_lib_dir ~ '/') | list)
+         + (ai_library_share_modules
+            | map('regex_replace', '^', ai_library_share_lib_dir ~ '/' ~ ai_library_share_package ~ '/') | list) }}
+  register: ai_library_share_install_pruned

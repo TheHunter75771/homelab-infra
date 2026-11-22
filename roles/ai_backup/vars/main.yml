@@ -1,0 +1,148 @@
+---
+# Fixed by the contract (§12.28). The tests override the paths and owners to point at a scratch dir.
+ai_backup_owner: root
+# The archives' group: the pull account's own group (the tests use theirs).
+ai_backup_group: "{{ ai_backup_account }}"
+ai_backup_lib_dir: /usr/local/lib/ai-backup
+ai_backup_script: "{{ ai_backup_lib_dir }}/ai_backup.py"
+ai_backup_unit_dir: /etc/systemd/system
+
+# ai-box: the pull key pair (root only; generated once, never printed) and ai-box's own ssh host key (public).
+ai_backup_key_dir: /etc/ai-backup
+ai_backup_key_file: "{{ ai_backup_key_dir }}/pull_ed25519"
+ai_backup_key_comment: ai-openwebui-pull
+ai_backup_host_key_file: /etc/ssh/ssh_host_ed25519_key.pub
+# Empty: the account's ~/.ssh/authorized_keys (manage_dir). The tests point it at a scratch file.
+ai_backup_authorized_keys_path: ""
+# The pull key may only run a read-only rrsync of the staging dir, only from the PC's tailnet address(es);
+# restrict = no pty, no forwarding of any kind, no ~/.ssh/rc, no X11.
+ai_backup_authorized_key_options: >-
+  restrict,from="{{ ai_backup_pull_from | join(',') }}",command="{{ ai_backup_rrsync }} -ro {{ ai_backup_stage_dir }}"
+
+# PC: the private half and a known_hosts pinned to ai-box's host key (root only).
+ai_backup_pull_key_dir: /etc/ai-backup-pull
+ai_backup_pull_key_file: "{{ ai_backup_pull_key_dir }}/id_ed25519"
+ai_backup_pull_known_hosts: "{{ ai_backup_pull_key_dir }}/known_hosts"
+ai_backup_pull_dest: "{{ ai_backup_pull_dest_mount }}/{{ ai_backup_pull_subdir }}"
+ai_backup_findmnt: findmnt
+
+# Units.
+ai_backup_stage_service: ai-openwebui-backup.service
+ai_backup_stage_timer: ai-openwebui-backup.timer
+ai_backup_pull_service: ai-openwebui-pull.service
+ai_backup_pull_timer: ai-openwebui-pull.timer
+ai_backup_restore_service: ai-openwebui-restore-check.service
+
+ai_backup_stage_argv:
+  - "{{ ai_backup_python }}"
+  - -I
+  - -B
+  - "{{ ai_backup_script }}"
+  - stage
+  - --volume
+  - "{{ ai_backup_volume_dir }}"
+  - --env
+  - "{{ ai_backup_env_file }}"
+  - --out
+  - "{{ ai_backup_stage_dir }}"
+  - --group
+  - "{{ ai_backup_group }}"
+  - --keep
+  - "{{ ai_backup_stage_keep }}"
+  - --min-free-mb
+  - "{{ ai_backup_stage_min_free_mb }}"
+  - --sqlite-deadline
+  - "{{ ai_backup_sqlite_deadline }}"
+
+ai_backup_drive_argv: >-
+  {{ ['--mount', ai_backup_pull_dest_mount, '--subdir', ai_backup_pull_subdir]
+     + (ai_backup_pull_dest_fstypes | map('regex_replace', '^', '--fstype=') | list) }}
+
+ai_backup_pull_argv: >-
+  {{ [ai_backup_python, '-I', '-B', ai_backup_script, 'pull',
+      '--source', ai_backup_account ~ '@' ~ ai_backup_pull_host ~ ':',
+      '--key', ai_backup_pull_key_file, '--known-hosts', ai_backup_pull_known_hosts,
+      '--dest', ai_backup_pull_dest, '--keep', ai_backup_pull_keep | string,
+      '--max-age-hours', ai_backup_pull_max_age_hours | string,
+      '--max-remote', ai_backup_pull_max_remote | string, '--max-new', ai_backup_pull_max_new | string,
+      '--max-size', ai_backup_pull_max_size | string, '--min-free-mb', ai_backup_pull_min_free_mb | string,
+      '--max-future-minutes', ai_backup_pull_max_future_minutes | string] + ai_backup_drive_argv }}
+
+ai_backup_restore_argv: >-
+  {{ [ai_backup_python, '-I', '-B', ai_backup_script, 'restore-check', '--dir', ai_backup_pull_dest]
+     + ai_backup_drive_argv }}
+
+# The sandboxes (the tests compare the rendered [Service] sections against these lists).
+# Common to all three units.
+ai_backup_sandbox_common:
+  - "UMask=0077"
+  - "MemoryMax={{ ai_backup_memory_max }}"
+  - "NoNewPrivileges=yes"
+  - "ProtectSystem=strict"
+  - "ProtectHome=yes"
+  - "PrivateTmp=yes"
+  - "PrivateDevices=yes"
+  - "PrivateIPC=yes"
+  - "SystemCallFilter=@system-service"
+  - "SystemCallErrorNumber=EPERM"
+  - "SystemCallArchitectures=native"
+  - "ProtectKernelTunables=yes"
+  - "ProtectKernelModules=yes"
+  - "ProtectKernelLogs=yes"
+  - "ProtectControlGroups=yes"
+  - "ProtectClock=yes"
+  - "ProtectHostname=yes"
+  - "ProtectProc=invisible"
+  - "RestrictNamespaces=yes"
+  - "RestrictRealtime=yes"
+  - "RestrictSUIDSGID=yes"
+  - "LockPersonality=yes"
+  - "MemoryDenyWriteExecute=yes"
+  - "RemoveIPC=yes"
+  - "Nice=10"
+  - "IOSchedulingClass=idle"
+
+# ai-box: no network at all; reads the volume (read-only) and the .env; writes only the staging dir. Root keeps
+# CAP_DAC_READ_SEARCH (read whatever Open WebUI writes) and CAP_CHOWN (archives go to the pull account's group).
+ai_backup_stage_sandbox: >-
+  {{ ai_backup_sandbox_common + [
+       'TasksMax=16',
+       'PrivateNetwork=yes',
+       'RestrictAddressFamilies=AF_UNIX',
+       'IPAddressDeny=any',
+       'CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_CHOWN',
+       'AmbientCapabilities=',
+       'ReadOnlyPaths=' ~ ai_backup_volume_dir ~ ' ' ~ ai_backup_env_file,
+       'ReadWritePaths=' ~ ai_backup_stage_dir] }}
+
+# PC: LimitFSIZE caps every file the pull writes at the archive size limit, whatever sizes ai-box reports (rsync's
+# --max-size trusts them). It talks only to ai-box's tailnet address (IPv4; the systemd IP filter works for system services), writes only
+# the destination, no capabilities (root owns everything it touches).
+ai_backup_pull_sandbox: >-
+  {{ ai_backup_sandbox_common + [
+       'TasksMax=32',
+       'LimitFSIZE=' ~ ai_backup_pull_max_size,
+       'RestrictAddressFamilies=AF_INET AF_UNIX',
+       'IPAddressDeny=any',
+       'IPAddressAllow=' ~ ai_backup_pull_host,
+       'CapabilityBoundingSet=',
+       'AmbientCapabilities=',
+       'ReadOnlyPaths=' ~ ai_backup_pull_key_dir,
+       'ReadWritePaths=' ~ ai_backup_pull_dest] }}
+
+# PC restore-check: no network; its temp dir lives inside the destination (the backup drive, not RAM).
+ai_backup_restore_sandbox: >-
+  {{ ai_backup_sandbox_common + [
+       'TasksMax=16',
+       'PrivateNetwork=yes',
+       'RestrictAddressFamilies=AF_UNIX',
+       'IPAddressDeny=any',
+       'CapabilityBoundingSet=',
+       'AmbientCapabilities=',
+       'ReadWritePaths=' ~ ai_backup_pull_dest] }}
+
+# The destination and every folder between it and the drive mount (created root 0700, guarded against symlinks):
+# /mnt/backup/ai-box, /mnt/backup/ai-box/openwebui.
+ai_backup_pull_dest_chain: >-
+  {% set ns = namespace(acc=ai_backup_pull_dest_mount, out=[]) %}{% for p in ai_backup_pull_subdir.split('/') %}{%
+  set ns.acc = ns.acc ~ '/' ~ p %}{% set ns.out = ns.out + [ns.acc] %}{% endfor %}{{ ns.out }}

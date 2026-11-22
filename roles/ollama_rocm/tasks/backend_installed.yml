@@ -1,0 +1,20 @@
+---
+# After the install: the chosen backend's library is in the live tree. Without it Ollama doesn't
+# fail; it silently runs on the CPU. tests/test_render.yml runs this against scratch trees.
+- name: Look for the backend's library
+  ansible.builtin.stat:
+    path: "{{ ollama_rocm_lib }}/{{ ollama_rocm_backends[ollama_backend].library }}"
+    get_checksum: false
+  register: ollama_rocm_backend_lib
+  when: ollama_rocm_backends[ollama_backend].library | length > 0
+
+- name: The backend's library is installed
+  ansible.builtin.assert:
+    that:
+      - ollama_rocm_backend_lib.stat.exists
+      - ollama_rocm_backend_lib.stat.isreg
+    fail_msg: >-
+      ollama_backend={{ ollama_backend }} but {{ ollama_rocm_lib }}/{{ ollama_rocm_backends[ollama_backend].library }}
+      is missing: Ollama would fall back to the CPU. Check the release's tarball layout.
+    quiet: true
+  when: ollama_rocm_backends[ollama_backend].library | length > 0

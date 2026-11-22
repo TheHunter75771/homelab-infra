@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- {{ ansible_managed }} -->
+<!-- Apache Tika server config for ai-box (docs/CONTRACTS.md §12.18b), mounted read-only at /tika-config.xml.
+     Open WebUI 0.12.4 sends no Content-Type (Tika detects it) and no OCR header (only
+     X-Tika-PDFextractInlineImages, when PDF_EXTRACT_IMAGES is on, which it isn't), so OCR is decided here:
+       - images (png, jpeg, tiff, bmp, gif): Tesseract, declared after DefaultParser so it is the parser for
+         those types;
+       - PDFs: PDFParser with ocrStrategy {{ ai_stack_tika_pdf_ocr_strategy }} (auto: pages without a text layer are
+         rendered and OCRed, so a scanned PDF is read and a normal one isn't slowed down). -->
+<properties>
+  <parsers>
+    <parser class="org.apache.tika.parser.DefaultParser">
+      <parser-exclude class="org.apache.tika.parser.pdf.PDFParser"/>
+      <parser-exclude class="org.apache.tika.parser.ocr.TesseractOCRParser"/>
+    </parser>
+    <parser class="org.apache.tika.parser.pdf.PDFParser">
+      <params>
+        <param name="ocrStrategy" type="string">{{ ai_stack_tika_pdf_ocr_strategy }}</param>
+        <param name="ocrDPI" type="int">300</param>
+        <!-- Inline images of text pages are not OCRed one by one (auto already covers scanned pages). -->
+        <param name="extractInlineImages" type="bool">false</param>
+      </params>
+    </parser>
+    <parser class="org.apache.tika.parser.ocr.TesseractOCRParser">
+      <params>
+        <param name="language" type="string">{{ ai_stack_tika_ocr_language }}</param>
+        <param name="timeoutSeconds" type="int">{{ ai_stack_tika_ocr_timeout_seconds }}</param>
+        <param name="skipOcr" type="bool">false</param>
+      </params>
+    </parser>
+  </parsers>
+  <server>
+    <params>
+      <taskTimeoutMillis>{{ ai_stack_tika_task_timeout_ms }}</taskTimeoutMillis>
+      <forkedJvmArgs>
+        <arg>-Xmx{{ ai_stack_tika_worker_heap }}</arg>
+        <arg>-XX:+ExitOnOutOfMemoryError</arg>
+        <!-- PDFBox writes its font cache to the home directory by default; the root is read-only. -->
+        <arg>-Dpdfbox.fontcache=/tmp</arg>
+      </forkedJvmArgs>
+    </params>
+  </server>
+</properties>

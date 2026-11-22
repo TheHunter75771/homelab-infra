@@ -1,0 +1,38 @@
+---
+# One case of tests/test_sudo_switch.yml.
+- name: Forget earlier calls (case {{ sudo_case.name }})
+  ansible.builtin.file:
+    path: "{{ sudo_test_tmp.path }}/calls"
+    state: absent
+  check_mode: false
+
+- name: Decide and switch (case {{ sudo_case.name }})
+  vars:
+    base_sudo_alternatives: {rc: "{{ sudo_case.rc }}", stdout_lines: "{{ sudo_case.lines }}"}
+    base_sudo_alternative: "{{ sudo_case.alternative | default('/usr/bin/sudo.ws') }}"
+  block:
+    - name: The role's decision (case {{ sudo_case.name }})
+      ansible.builtin.include_tasks: ../tasks/sudo_decide.yml
+
+    - name: The role's switch, with the stub on PATH (case {{ sudo_case.name }})
+      ansible.builtin.include_tasks:
+        file: ../tasks/sudo_switch.yml
+        apply:
+          environment: "{{ sudo_test_env }}"
+      when: base_sudo_managed
+
+- name: Read the stub's calls (case {{ sudo_case.name }})
+  ansible.builtin.slurp:
+    src: "{{ sudo_test_tmp.path }}/calls"
+  register: sudo_test_calls
+  failed_when: false
+
+- name: The switch ran exactly when needed (case {{ sudo_case.name }})
+  ansible.builtin.assert:
+    that:
+      - sudo_test_called == ([sudo_test_expected] if sudo_case.switch and not ansible_check_mode else [])
+    fail_msg: "{{ sudo_case.name }}: calls {{ sudo_test_called }}, switch expected: {{ sudo_case.switch }}"
+    quiet: true
+  vars:
+    sudo_test_expected: "--set sudo {{ sudo_case.alternative | default('/usr/bin/sudo.ws') }}"
+    sudo_test_called: "{{ (sudo_test_calls.content | default('') | b64decode).splitlines() }}"

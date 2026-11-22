@@ -1,0 +1,233 @@
+---
+# Role inputs, checked before anything is written. Switched on, also the approver and the library mount.
+- name: Preflight | role ai_stack's defaults (the ai network's subnet, open-webui's pinned address)
+  ansible.builtin.include_vars:
+    file: "{{ forge_api_ai_stack_defaults_file }}"
+    name: forge_api_ai_stack_role_defaults
+
+- name: Preflight | the switch is a boolean
+  ansible.builtin.assert:
+    that: forge_api_enabled is boolean
+    fail_msg: forge_api_enabled must be true or false (got {{ forge_api_enabled }}).
+    quiet: true
+
+# §12.25: only Noah may approve. The tick endpoints compare `user` with this id; no default on purpose.
+- name: Preflight | the approver's Open WebUI user id (required when switched on)
+  ansible.builtin.assert:
+    that:
+      - not (forge_api_enabled | bool) or forge_api_config_wanted | bool
+      - not (forge_api_config_wanted | bool) or forge_api_approver_user_id is string
+      - not (forge_api_config_wanted | bool) or forge_api_approver_user_id is match(forge_api_user_id_re)
+    fail_msg: >-
+      Set forge_api_approver_user_id (host_vars) to Noah's Open WebUI user id (Admin Panel > Users): 1-64 of
+      A-Z a-z 0-9 . _ @ -. forge-api is never switched on without it.
+    quiet: true
+
+# Plain absolute paths: they go into the unit (ReadWritePaths, RequiresMountsFor, Assert*) unescaped.
+- name: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+  ansible.builtin.assert:
+    that:
+      - item is string
+      - item is match('^/[A-Za-z0-9._/-]+$')
+      - item is not search('//|/$|(^|/)[.]{1,2}(/|$)')
+      - item is not match(forge_api_library_forbidden_re)
+    fail_msg: >-
+      {{ item }} must be an absolute path of plain characters (A-Z a-z 0-9 . _ - /), with no //, trailing /, . or ..
+      components, and not under {{ forge_api_library_forbidden_re }} (the unit's ProtectHome/ProtectSystem/PrivateTmp
+      hide or lock those).
+    quiet: true
+  loop:
+    - "{{ forge_api_library_root }}"
+    - "{{ forge_api_library_mount }}"
+
+- name: Preflight | the library root is the mount or below it
+  ansible.builtin.assert:
+    that:
+      - >-
+        forge_api_library_root == forge_api_library_mount
+        or forge_api_library_root.startswith(forge_api_library_mount ~ '/')
+    fail_msg: >-
+      forge_api_library_root ({{ forge_api_library_root }}) must be forge_api_library_mount
+      ({{ forge_api_library_mount }}) or inside it.
+    quiet: true
+
+- name: Preflight | the unit's settings
+  ansible.builtin.assert:
+    that:
+      - forge_api_port | string is match('^[0-9]{1,4}$')
+      - forge_api_port | int >= 1 and forge_api_port | int <= 1023
+      - forge_api_memory_max | string is match('^[0-9]+[KMG]$')
+      - forge_api_tasks_max | string is match('^[0-9]{1,5}$')
+      - forge_api_limit_nofile | string is match('^[0-9]{2,6}$')
+      - forge_api_user is match('^[a-z_][a-z0-9_-]*$') and forge_api_user not in ['root', 'docker']
+    fail_msg: >-
+      Check the forge_api inputs: the port (a privileged one, 1-1023), MemoryMax like 256M, TasksMax and LimitNOFILE as plain
+      numbers (they go into the unit unescaped), and a plain account name (not root or docker).
+    quiet: true
+
+# Reviewer S / Lead: the port must stay privileged on this host, so only root (systemd) can ever bind it.
+- name: Preflight | the host's first unprivileged port
+  ansible.builtin.command:
+    argv: [sysctl, -n, net.ipv4.ip_unprivileged_port_start]
+  register: forge_api_unpriv_start
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Preflight | the port is privileged on this host
+  ansible.builtin.assert:
+    that:
+      - forge_api_unpriv_start.rc == 0
+      - forge_api_unpriv_start.stdout | trim is match('^[0-9]+$')
+      - forge_api_port | int < forge_api_unpriv_start.stdout | trim | int
+    fail_msg: >-
+      Port {{ forge_api_port }} must be below net.ipv4.ip_unprivileged_port_start (this host says
+      '{{ forge_api_unpriv_start.stdout | default('') | trim }}'), so no non-root process can bind it while the socket
+      is closed. Don't lower that sysctl on ai-box.
+    quiet: true
+
+# §12.25 + Lead decision F-1: bind the `ai` bridge's gateway, reachable by open-webui without NAT; the only
+# allowed peer is open-webui's pinned address on that network; never the host itself.
+- name: Preflight | the bind address, open-webui's address and the IP filter
+  vars:
+    forge_api_ip_issues: "{{ forge_api_ip_allow | forge_api_ip_problems(forge_api_ip_deny, forge_api_bind | trim) }}"
+  ansible.builtin.assert:
+    that:
+      - forge_api_ai_subnet | trim is match('^[0-9]{1,3}([.][0-9]{1,3}){3}/[0-9]{1,2}$')
+      - forge_api_bind | trim | forge_api_ip_in(forge_api_ai_subnet | trim)
+      - forge_api_webui_ip | trim | forge_api_ip_in(forge_api_ai_subnet | trim)
+      - forge_api_webui_ip | trim != forge_api_bind | trim
+      - forge_api_ip_issues | length == 0
+    fail_msg: >-
+      bind {{ forge_api_bind }} and open-webui {{ forge_api_webui_ip }} must be two different IPv4 addresses inside
+      the ai network {{ forge_api_ai_subnet }} (ai_stack_network_subnet / ai_stack_webui_ip /
+      ai_stack_network_gateway, or role ai_stack's defaults); IP filter allow {{ forge_api_ip_allow }} deny
+      {{ forge_api_ip_deny }}: {{ forge_api_ip_issues | join('; ') }}
+    quiet: true
+
+# The rule the verify requires in UFW (declared through role firewall, never written here): exactly from
+# open-webui to the bind address on the port, tcp, with a comment. Never from any.
+- name: Preflight | the UFW rule the API needs
+  vars:
+    forge_api_ufw_issues: >-
+      {{ forge_api_ufw_rule | forge_api_ufw_problems(forge_api_webui_ip | trim, forge_api_bind | trim, forge_api_port) }}
+  ansible.builtin.assert:
+    that: forge_api_ufw_issues | length == 0
+    fail_msg: "{{ forge_api_ufw_rule }}: {{ forge_api_ufw_issues | join('; ') }}"
+    quiet: true
+
+- name: Preflight | the app sources exist on the controller (modules F and L)
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ forge_api_launcher_src }}"
+    - "{{ forge_api_pkg_src }}/__init__.py"
+    - "{{ forge_api_pkg_src }}/__main__.py"
+    - "{{ forge_api_pkg_src }}/config.py"
+    - "{{ forge_api_library_src_dir }}/forge/__init__.py"
+    - "{{ forge_api_library_src_dir }}/library/__init__.py"
+  register: forge_api_src_stat
+  delegate_to: localhost
+  become: false
+
+- name: Preflight | require the app sources
+  ansible.builtin.assert:
+    that: forge_api_src_stat.results | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      Missing on the controller:
+      {{ forge_api_src_stat.results | rejectattr('stat.exists') | map(attribute='item') | join(', ') }}
+    quiet: true
+
+# F's own config rules (forge_api.config.validate), on the controller from the sources, before anything is
+# written (the host re-checks the file, with the token, at `validate:`).
+- name: Preflight | F's loader on the role's config
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -I
+      - -B
+      - -c
+      - |
+        import json, sys
+        sys.path[:0] = [sys.argv[1], sys.argv[2]]
+        from forge_api.config import validate
+        validate(json.loads(sys.argv[3]))
+      - "{{ forge_api_src_dir }}"
+      - "{{ forge_api_library_src_dir }}"
+      - "{{ forge_api_config | to_json }}"
+  register: forge_api_cfg_check
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  delegate_to: localhost
+  become: false
+  when: forge_api_config_wanted | bool
+
+- name: Preflight | F's loader accepts the config
+  ansible.builtin.assert:
+    that: forge_api_cfg_check.rc == 0
+    fail_msg: "The forge-api config is refused: {{ forge_api_cfg_check.stderr_lines | last | default('') }}"
+    quiet: true
+  when: forge_api_config_wanted | bool
+
+# --- Enabled only: the library must really be mounted (§12.11 mount safety). ---
+- name: Preflight | the library mount (enabled only)
+  when: forge_api_enabled | bool
+  block:
+    - name: Preflight | stat the library root without following links
+      ansible.builtin.stat:
+        path: "{{ forge_api_library_root }}"
+        follow: false
+        get_checksum: false
+      register: forge_api_root_stat
+
+    - name: Preflight | the library root is a real directory
+      ansible.builtin.assert:
+        that:
+          - forge_api_root_stat.stat.exists
+          - forge_api_root_stat.stat.isdir and not forge_api_root_stat.stat.islnk
+        fail_msg: "{{ forge_api_library_root }} is missing, or is a symlink or a file. forge-api stays off until the AI Library is mounted there."
+        quiet: true
+
+    - name: Preflight | which mount holds the library root
+      ansible.builtin.command:
+        argv: [findmnt, --noheadings, --first-only, --output, TARGET, --target, "{{ forge_api_library_root }}"]
+      register: forge_api_findmnt
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    # An unmounted share leaves an empty directory on the parent filesystem: findmnt then names that parent.
+    - name: Preflight | the library root is on the declared mount (not the disk under an empty mount point)
+      ansible.builtin.assert:
+        that:
+          - forge_api_findmnt.rc == 0
+          - forge_api_findmnt.stdout | trim == forge_api_library_mount
+          - forge_api_library_mount != '/'
+        fail_msg: >-
+          {{ forge_api_library_root }} is on mount '{{ forge_api_findmnt.stdout | default('') | trim }}', not on
+          forge_api_library_mount ({{ forge_api_library_mount }}). Is the AI Library share mounted? forge-api stays off.
+        quiet: true
+
+    - name: Preflight | stat the sentinel and the forge folder without following links
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+        get_checksum: false
+      loop:
+        - "{{ forge_api_sentinel }}"
+        - "{{ forge_api_forge_dir }}"
+      register: forge_api_lib_stat
+
+    - name: Preflight | the sentinel is a regular file and 35-forge a real folder (an initialized library)
+      vars:
+        sentinel: "{{ forge_api_lib_stat.results[0].stat }}"
+        forge: "{{ forge_api_lib_stat.results[1].stat }}"
+      ansible.builtin.assert:
+        that:
+          - sentinel.exists and sentinel.isreg and not sentinel.islnk
+          - forge.exists and forge.isdir and not forge.islnk
+        fail_msg: >-
+          {{ forge_api_sentinel }} must be a regular file (§12.11) and {{ forge_api_forge_dir }} a real folder
+          (ReadWritePaths needs it; systemd would follow a symlink there). This isn't the mounted AI Library.
+        quiet: true

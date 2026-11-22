@@ -1,0 +1,82 @@
+---
+# Role skill_drafter (docs/CONTRACTS.md §12.19, module H6): the Skill Forge drafter (module K2,
+# apps/skill-drafter) on ai-box. Long-running skill-drafter.service (`serve`, polls 35-forge/), user sdraft;
+# code at /opt/skill-drafter (K2's skill_drafter package plus apps/skill-library's forge and library,
+# read-only); config /etc/skill-drafter/config.json.
+
+# --- Inventory (host_vars, git-ignored) ---
+# tailnet_ip: ai-box's tailnet IPv4 (the broker publishes there; role ai_stack).
+# ai_stack_broker_port: the broker's published port (role ai_stack's default, 11434, when unset).
+
+# The switch. true (default): enabled and running; preflight first proves the library is mounted (the root on
+# its mount, the sentinel, 35-forge). false: installed only; a running drafter is stopped and disabled.
+skill_drafter_enabled: true
+
+# The AI Library on ai-box: role ai_library_share's client automount (§12.17.3; CIFS as uid/gid rgate, dir_mode
+# 0770, so sdraft writes through its supplementary group rgate). Absolute, plain characters only (it goes into
+# the unit unescaped), and not under /home, /root, /run, /tmp (ProtectHome / ProtectSystem / PrivateTmp).
+skill_drafter_library_root: /srv/ai-library
+# The mount point the library lives on: the root itself, or a parent of it. `findmnt --target <root>` must name
+# exactly this mount, and it can't be /.
+skill_drafter_library_mount: "{{ skill_drafter_library_root }}"
+# The library's size cap, as the library CLI takes it (AI_LIBRARY_CAP; decimal units unless "i": 500GB,
+# 750GiB). The unit sets it; forge.draft_skill refuses to file past it. Same default as the library (§12.11).
+skill_drafter_library_cap: 500GB
+
+# K2's config (apps/skill-drafter/config.example.json; the Lead's K2 decisions, 2026-10-27). K2's own loader
+# checks the ranges (preflight on the controller, `validate:` on the host).
+skill_drafter_model: assistant
+skill_drafter_poll_interval: 120
+skill_drafter_max_source_chars: 16000
+skill_drafter_num_ctx: 16384
+skill_drafter_timeout: 1200
+skill_drafter_max_attempts: 3
+
+# The broker: published by role ai_stack on ai-box's tailnet address.
+skill_drafter_broker_port: "{{ ai_stack_broker_port | default(11434) }}"
+# The tailnet range ai-box's address must sit in.
+skill_drafter_tailnet_range: 100.64.0.0/10
+
+# The host's DNS: the systemd-resolved stub (role dns). The broker URL is an IP literal, so nothing resolves a
+# name; the stub is allowed as for finance_digest.
+skill_drafter_dns_stub: 127.0.0.53
+
+# The broker is published on tailnet_ip with Docker's userland proxy off, so a connection to it is DNATed in
+# nat OUTPUT to the broker container's bridge address, and systemd's egress filter sees that rewritten
+# destination; the replies are un-NATed before delivery, so the ingress filter sees tailnet_ip (§12.15
+# Reviewer D, §12.16.4 research_gate, §12.18.3 finance_digest). Both must be allowed. The broker's container
+# address isn't pinned (queued for ai_stack P2), so the allow covers role docker's container range MINUS
+# SearXNG's pinned subnet: SearXNG forwards query strings to public search engines, so reaching it would be a
+# way out to the internet for the source texts and drafts. Override with the broker network's real subnet (or a
+# /32 once pinned) to narrow it.
+skill_drafter_docker_defaults_file: "{{ role_path }}/../docker/defaults/main.yml"
+skill_drafter_searxng_defaults_file: "{{ role_path }}/../searxng/defaults/main.yml"
+skill_drafter_docker_container_range: >-
+  {{ docker_address_pools_container
+     | default(skill_drafter_docker_role_defaults.docker_address_pools_container | default('')) }}
+skill_drafter_searxng_subnet: >-
+  {{ searxng_subnet | default(skill_drafter_searxng_role_defaults.searxng_subnet | default('')) }}
+skill_drafter_broker_ranges: >-
+  {{ skill_drafter_docker_container_range
+     | skill_drafter_exclude([skill_drafter_searxng_subnet] | select | list) }}
+
+# Unit limits. The drafter holds at most the prompt (16000 source chars plus the request, notes and previous
+# draft) and a 1 MiB reply; the library walk for the cap is a directory scan.
+skill_drafter_memory_max: 256M
+skill_drafter_tasks_max: 32
+skill_drafter_restart_sec: 30s
+
+# Sources on the controller: K2's launcher and package, and forge + library from apps/skill-library.
+skill_drafter_src_dir: "{{ role_path }}/../../apps/skill-drafter"
+skill_drafter_pkg_src: "{{ skill_drafter_src_dir }}/skill_drafter"
+skill_drafter_launcher_src: "{{ skill_drafter_src_dir }}/skill-drafter"
+skill_drafter_library_src_dir: "{{ role_path }}/../../apps/skill-library"
+# Owner of the installed code (the tests run unprivileged and override it).
+skill_drafter_owner: root
+
+# Post-start check (enabled, not in check mode): the unit is active and stays so without restarting, and
+# `skill-drafter status` as sdraft in the unit's sandbox exits 0.
+skill_drafter_verify: true
+skill_drafter_verify_retries: 10
+skill_drafter_verify_delay: 2
+skill_drafter_verify_timeout: 2min

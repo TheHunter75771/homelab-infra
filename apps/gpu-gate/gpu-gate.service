@@ -1,0 +1,62 @@
+# Reference unit for gpu-gate (CONTRACTS.md 12.4). The Ansible role `gpu_gate` installs the real
+# one; paths here (/opt/gpu-gate, /etc/gpu-gate/config.json) are the suggested layout.
+# Static check: systemd-analyze verify gpu-gate.service; systemd-analyze security --offline=yes
+[Unit]
+Description=gpu-gate: may ai-box borrow this GPU right now?
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -I /opt/gpu-gate/gpu-gate --config /etc/gpu-gate/config.json
+Restart=on-failure
+RestartSec=5
+
+# --- Identity: no privileges at all (CONTRACTS.md 12.9) -----------------------------------------
+# Same uid as Ollama, so its /proc/<pid>/fdinfo passes the kernel's same-uid ptrace-read check.
+# Everything else the gate reads is world-readable: gpu_busy_percent and every process's
+# comm, cmdline and stat. It never reads other users' exe links or environ.
+# Not CAP_SYS_PTRACE: that also opens /proc/<pid>/root|cwd of every process, which walks
+# straight past ProtectSystem/ProtectHome/PrivateTmp.
+User=ollama
+Group=ollama
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+# Sharing a uid means sharing ptrace rights: the gate can't use them (ptrace & co. filtered).
+SystemCallFilter=@system-service
+SystemCallFilter=~@debug process_vm_readv process_vm_writev process_madvise kcmp
+SystemCallArchitectures=native
+SystemCallErrorNumber=EPERM
+
+# --- Sandbox -----------------------------------------------------------------------------------
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+# Other users' pids must stay visible (ProtectProc=invisible would blind the gate);
+# only the pid directories are needed. ProtectSystem=strict also makes Ollama's model store
+# (same uid) read-only to the gate.
+ProtectProc=default
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+# Network exposure is firewalld's job (role ollama_rocm: policy homelab-ai-only, ANY -> HOST,
+# allows port 11500 from ai-box only).
+# Optional defence in depth, templated by the role (identifiers never go in the repo):
+# IPAddressDeny=any
+# IPAddressAllow=localhost <ai-box tailnet IP>
+
+[Install]
+WantedBy=multi-user.target

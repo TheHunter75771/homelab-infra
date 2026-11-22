@@ -1,0 +1,59 @@
+---
+# The drop-ins (one per declared unit, plus tailscaled's keep-the-directory drop-in), the tmpfiles.d entry, and
+# /run/tailscale itself for this boot. Nothing is restarted here (apply.yml).
+- name: Install | drop-in directories
+  ansible.builtin.file:
+    path: "{{ unit_hardening_root }}{{ unit_hardening_unit_dir }}/{{ item }}.d"
+    state: directory
+    owner: "{{ unit_hardening_owner }}"
+    group: "{{ unit_hardening_group }}"
+    mode: "0755"
+  loop: "{{ unit_hardening_units | map(attribute='unit') | list + [unit_hardening_tailscaled_unit] }}"
+
+- name: Install | each unit's drop-in hides /run/tailscale
+  ansible.builtin.template:
+    src: no-tailscaled.conf.j2
+    dest: "{{ unit_hardening_root }}{{ unit_hardening_unit_dir }}/{{ item.unit }}.d/{{ unit_hardening_dropin_name }}"
+    owner: "{{ unit_hardening_owner }}"
+    group: "{{ unit_hardening_group }}"
+    mode: "0644"
+  loop: "{{ unit_hardening_units }}"
+  loop_control:
+    label: "{{ item.unit }}"
+  vars:
+    uh_root: "{{ uh_pre[item.unit].root }}"
+    uh_via_bus: "{{ uh_pre[item.unit].via_bus }}"
+    uh_run_allow: "{{ uh_pre[item.unit].run_allow }}"
+  register: uh_dropins
+
+- name: Install | tailscaled keeps /run/tailscale when it stops or restarts
+  ansible.builtin.template:
+    src: tailscaled-keep-rundir.conf.j2
+    dest: "{{ unit_hardening_root }}{{ unit_hardening_unit_dir }}/{{ unit_hardening_tailscaled_unit }}.d/{{ unit_hardening_tailscaled_dropin_name }}"
+    owner: "{{ unit_hardening_owner }}"
+    group: "{{ unit_hardening_group }}"
+    mode: "0644"
+  register: uh_tailscaled_dropin
+
+- name: Install | tmpfiles.d creates /run/tailscale at boot
+  ansible.builtin.template:
+    src: tmpfiles.conf.j2
+    dest: "{{ unit_hardening_root }}{{ unit_hardening_tmpfiles }}"
+    owner: "{{ unit_hardening_owner }}"
+    group: "{{ unit_hardening_group }}"
+    mode: "0644"
+
+- name: Install | /run/tailscale exists now (tailscaled normally made it already)
+  ansible.builtin.file:
+    path: "{{ unit_hardening_root }}{{ unit_hardening_tailscale_dir }}"
+    state: directory
+    owner: "{{ unit_hardening_owner }}"
+    group: "{{ unit_hardening_group }}"
+    mode: "0755"
+
+- name: Install | retired units lose their drop-in
+  ansible.builtin.file:
+    path: "{{ unit_hardening_root }}{{ unit_hardening_unit_dir }}/{{ item }}.d/{{ unit_hardening_dropin_name }}"
+    state: absent
+  loop: "{{ unit_hardening_remove }}"
+  register: uh_removed

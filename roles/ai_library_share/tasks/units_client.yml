@@ -1,0 +1,21 @@
+---
+# Client units (§12.17.3): the tailnet wait, the CIFS mount and its automount. The mount unit is never
+# enabled: the automount mounts it on first access. tests/test_ai_library_share.yml renders these
+# into a scratch dir and runs systemd-analyze verify on them.
+- name: Units | tailnet wait, mount and automount
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ ai_library_share_unit_dir }}/{{ item.dest }}"
+    owner: "{{ ai_library_share_owner }}"
+    group: "{{ ai_library_share_owner }}"
+    mode: "0644"
+  loop:
+    - {src: ai-library-tailnet-wait.service.j2, dest: "{{ ai_library_share_wait_unit }}"}
+    - {src: ai-library.mount.j2, dest: "{{ ai_library_share_mount_unit }}"}
+    - {src: ai-library.automount.j2, dest: "{{ ai_library_share_automount_unit }}"}
+  loop_control:
+    label: "{{ item.dest }}"
+  register: ai_library_share_client_units
+  notify:
+    - Reload systemd for ai-library-share
+    - Remount ai-library

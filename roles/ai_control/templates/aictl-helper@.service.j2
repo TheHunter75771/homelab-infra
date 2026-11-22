@@ -1,0 +1,64 @@
+# {{ ansible_managed }}
+# One read-only request from ai-control (started by aictl-helper.socket, the connection on stdin).
+# Root, because the Docker socket, the system journal and /var/log/sudo-io are root's; boxed in: no
+# network namespace access, one capability, everything read-only, a 30 s lifetime.
+[Unit]
+Description=AI Control helper: one read-only request from ai-control
+Documentation=file://{{ ai_control_helper_script }}
+CollectMode=inactive-or-failed
+
+[Service]
+ExecStart={{ ai_control_python }} -I {{ ai_control_helper_script }}
+StandardInput=socket
+# Replies go only through the socket; a stray print can never corrupt the protocol.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aictl-helper
+RuntimeMaxSec=30
+TimeoutStopSec=5s
+UMask=0077
+
+NoNewPrivileges=yes
+# Reading the journal, /var/log/sudo-io and docker.sock needs no capability as root (all root-owned);
+# CAP_DAC_READ_SEARCH keeps reads working where sudo or journald use tighter modes or ACLs.
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=
+ProtectSystem=strict
+# Reviewer Q, Q-2: /run is an empty read-only tmpfs with only what the helper's tools use bound in (connecting to a
+# read-only bound socket is not a write), so tailscaled's local API (/run/tailscale/tailscaled.sock) isn't there:
+#   docker.sock                  the docker CLI (unix:///var/run/docker.sock; /var/run is /run);
+#   systemd/private, systemd/system  systemctl as root (its private bus; "booted with systemd" is that directory);
+#   dbus/system_bus_socket       systemctl's fallback bus;
+#   log/journal                  journalctl's volatile journal (the persistent one is /var/log/journal).
+# "-": may be absent (Docker not installed, no volatile journal); the helper then reports it instead of failing to start.
+# Each request is a fresh instance, so a recreated socket is always the current one.
+TemporaryFileSystem=/run:ro
+BindReadOnlyPaths=-/run/docker.sock /run/systemd/private /run/systemd/system -/run/dbus/system_bus_socket -/run/log/journal
+# tmpfs, not "yes": the docker CLI looks for ~/.docker (root's home); an empty tmpfs gives it a clean
+# "no config" instead of a permission error.
+ProtectHome=tmpfs
+PrivateTmp=yes
+PrivateDevices=yes
+# The Docker, systemd and D-Bus sockets are filesystem Unix sockets: they work from a private
+# network namespace. The helper never needs IP.
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+KeyringMode=private
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM

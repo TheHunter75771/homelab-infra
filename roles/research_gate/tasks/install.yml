@@ -1,0 +1,64 @@
+---
+# /opt/research-gate holds exactly what R's README lists plus the library code, all root-owned: the launcher
+# `research-gate` (0755) and three packages (0755 dirs, 0644 *.py): R's research_gate and apps/skill-library's
+# forge and library (§12.16.1: installed beside it, read-only). The launcher puts its own directory first on
+# sys.path, so under `python3 -I` the gate imports exactly these copies. Anything else (a removed file, a
+# stray, a test dir, R's tests and example config) is pruned.
+- name: Install | the code directories are real directories (before any write)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    research_gate_guard_dirs: "{{ [research_gate_app_dir] + (research_gate_packages | map('regex_replace', '^', research_gate_app_dir ~ '/') | list) }}"
+
+- name: Install | code directory
+  ansible.builtin.file:
+    path: "{{ research_gate_app_dir }}"
+    state: directory
+    owner: "{{ research_gate_owner }}"
+    group: "{{ research_gate_owner }}"
+    mode: "0755"
+
+- name: Install | packages
+  ansible.builtin.include_tasks: tree.yml
+  vars:
+    research_gate_tree_src: "{{ research_gate_pkg.src }}"
+    research_gate_tree_dest: "{{ research_gate_app_dir }}/{{ research_gate_pkg.name }}"
+    research_gate_tree_name: "{{ research_gate_pkg.name }}"
+  loop:
+    - {name: research_gate, src: "{{ research_gate_pkg_src }}"}
+    - {name: forge, src: "{{ research_gate_library_src_dir }}/forge"}
+    - {name: library, src: "{{ research_gate_library_src_dir }}/library"}
+  # Not `item`: the included file's own loops would shadow it (its vars are evaluated lazily).
+  loop_control:
+    loop_var: research_gate_pkg
+    label: "{{ research_gate_pkg.name }}"
+
+- name: Install | launcher
+  ansible.builtin.copy:
+    src: "{{ research_gate_launcher_src }}"
+    dest: "{{ research_gate_launcher }}"
+    owner: "{{ research_gate_owner }}"
+    group: "{{ research_gate_owner }}"
+    mode: "0755"
+    follow: false
+  notify: Restart research-gate
+
+- name: Install | the code directory is still a real directory (before the find and prune)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    research_gate_guard_dirs: ["{{ research_gate_app_dir }}"]
+
+- name: Install | entries of the code directory
+  ansible.builtin.find:
+    paths: "{{ research_gate_app_dir }}"
+    file_type: any
+    hidden: true
+  register: research_gate_app_found
+
+- name: Install | anything but the launcher and the three packages is removed
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: >-
+    {{ research_gate_app_found.files | map(attribute='path')
+       | reject('in', research_gate_app_entries | map('regex_replace', '^', research_gate_app_dir ~ '/') | list) | sort }}
+  notify: Restart research-gate

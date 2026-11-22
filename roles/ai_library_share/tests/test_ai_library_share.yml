@@ -1,0 +1,1020 @@
+---
+# Offline test for role ai_library_share (no root, nothing applied to this machine; documentation
+# addresses only: RFC 5737 / RFC 3849 / the CGNAT range). Run it through tests/run.sh, which also
+# runs the backup script's unit tests and checks that no password reaches the -vvv --diff output.
+# Real mountpoints stand in for the drives: the user's runtime dir (tmpfs) for the share drive, /tmp
+# (tmpfs) for the backup drive; plain directories stand in for unmounted drives. It runs the role's
+# own task files into scratch dirs (stub handlers and stub Samba programs):
+#   1. preflight_server.yml passes, and refuses: an unmounted share or backup drive, a wrong fs type,
+#      445 missing from module G's list, root as force user, a force user that doesn't own the drive,
+#      a symlinked library folder;
+#   2. install.yml: the library package + scripts, strays pruned, a third run changes nothing, a
+#      symlinked or shared install dir refused;
+#   3. library.yml: Library.init + sentinel once, a second run changes nothing, a non-library folder
+#      refused;
+#   4. password.yml: generated once (48 hex, 0600), smbpasswd gets it on stdin only (never argv), never
+#      rotated, re-set (same value) only when passdb lost the account, a symlink refused;
+#   5. export_credentials.yml: the fact equals the file (no_log asserts only), a symlink refused;
+#   6. smb_conf.yml: rendered and validated by the real testparm (strict), the effective config
+#      checked, a second run changes nothing, and a testparm warning blocks the install;
+#   7. the units: rendered by the role's task files, systemd-analyze verify clean, key lines checked;
+#   8. the client: preflight passes and refuses (no password and no file, weakening options, a
+#      symlinked mount point), credentials 0600 written once and kept when no password comes;
+#   9. verify pieces with stubs: the probe, the live mount options, the 445 listeners, the AVC check.
+- name: Role ai_library_share (server and client halves, offline)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  vars:
+    gaming_pc_tailnet_ip: 100.64.0.20
+    gaming_pc_tailnet_ip6: "2001:db8::20"
+    ai_box_tailnet_ip: 100.64.0.10
+    ai_box_tailnet_ip6: "2001:db8::10"
+    tailnet_ip: 100.64.0.10
+    ollama_rocm_policy_privileged_ports: [445]
+    ansible_managed: Ansible managed
+    # run.sh passes a scratch dir under /tmp, one under the runtime dir, and a synthetic canary.
+    test_tmp: ""
+    test_rt: ""
+    test_canary: ""
+    test_runtime: "{{ test_rt | dirname }}"
+    test_lib_package: "{{ playbook_dir }}/../../../apps/skill-library"
+  handlers:
+    - name: Reload systemd for ai-library-share
+      ansible.builtin.debug:
+        msg: reload requested
+    - name: Restart smb for ai-library-share
+      ansible.builtin.debug:
+        msg: smb restart requested
+    - name: Reload smb for ai-library-share
+      ansible.builtin.debug:
+        msg: smb reload requested
+    - name: Remount ai-library
+      ansible.builtin.debug:
+        msg: remount requested
+  tasks:
+    - name: Run.sh passed the scratch dirs and a canary
+      ansible.builtin.assert:
+        that:
+          - test_tmp is abs and test_tmp is match('^/tmp/')
+          - test_rt is abs and test_rt is match('^/run/user/[0-9]+/')
+          - test_rt | basename == test_tmp | basename
+          - test_canary is match('^[0-9a-f]{48}$')
+        fail_msg: Run this through roles/ai_library_share/tests/run.sh.
+        quiet: true
+
+    - name: Point the role at the scratch dirs, this user and the stubs
+      ansible.builtin.set_fact:
+        ai_library_share_share_mount: "{{ test_runtime }}"
+        ai_library_share_share_fstypes: [tmpfs]
+        ai_library_share_folder: "{{ test_tmp | basename }}"
+        ai_library_share_dir: "{{ test_rt }}"
+        ai_library_share_backup_mount: /tmp
+        ai_library_share_backup_fstypes: [tmpfs]
+        ai_library_share_backup_dir: "{{ test_tmp }}"
+        ai_library_share_force_user: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        ai_library_share_force_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
+        ai_library_share_lib_src_dir: "{{ playbook_dir }}/../../../apps/skill-library/library"
+        ai_library_share_files_dir: "{{ playbook_dir }}/../files"
+        ai_library_share_lib_dir: "{{ test_tmp }}/lib/ai-library-share"
+        ai_library_share_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        ai_library_share_secret_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        ai_library_share_secret_dir: "{{ test_tmp }}/etc/ai-library-share"
+        ai_library_share_password_file: "{{ test_tmp }}/etc/ai-library-share/ailib-password"
+        ai_library_share_smb_conf: "{{ test_tmp }}/etc/samba/smb.conf"
+        ai_library_share_client_dir: "{{ test_tmp }}/etc/ai-library"
+        ai_library_share_credentials_file: "{{ test_tmp }}/etc/ai-library/credentials"
+        ai_library_share_unit_dir: "{{ test_tmp }}/units"
+        ai_library_share_pdbedit: "{{ test_tmp }}/stub-pdbedit"
+        ai_library_share_smbpasswd: "{{ test_tmp }}/stub-smbpasswd"
+        ai_library_share_mount_point: "{{ test_tmp }}/mnt/ai-library"
+        ai_library_share_runuser: "{{ test_tmp }}/stub-runuser"
+        ai_library_share_chown: "{{ test_tmp }}/stub-chown"
+        ai_library_share_mount_unit: "{{ test_unit }}.mount"
+        ai_library_share_automount_unit: "{{ test_unit }}.automount"
+      vars:
+        test_unit: "{{ lookup('ansible.builtin.pipe', 'systemd-escape --path ' ~ test_tmp ~ '/mnt/ai-library') }}"
+
+    - name: Scratch dirs and stub programs (pdbedit's rc from a file; smbpasswd records argv + stdin; a warning testparm)
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          t="{{ test_tmp }}"
+          mkdir -p "$t/backup" "$t/etc/samba" "$t/mnt" "$t/units"
+          echo 1 > "$t/pdbedit.rc"
+          cat > "$t/stub-pdbedit" <<EOF
+          #!/bin/sh
+          exit \$(cat "$t/pdbedit.rc")
+          EOF
+          cat > "$t/stub-smbpasswd" <<EOF
+          #!/bin/sh
+          n=\$(ls "$t" | grep -c '^smbpasswd-stdin-' || true)
+          printf '%s\n' "\$*" >> "$t/smbpasswd-argv"
+          cat > "$t/smbpasswd-stdin-\$n"
+          EOF
+          cat > "$t/stub-testparm-warns" <<EOF
+          #!/bin/sh
+          testparm "\$@"
+          rc=\$?
+          echo "WARNING: a synthetic testparm warning" >&2
+          exit \$rc
+          EOF
+          cat > "$t/stub-runuser" <<EOF
+          #!/bin/sh
+          pre=""
+          for a; do [ "\$a" = "--" ] && break; pre="\$pre \$a"; done
+          printf '%s --\n' "\${pre# }" >> "$t/runuser-argv"
+          while [ "\$1" != "--" ]; do shift; done
+          shift
+          exec "\$@"
+          EOF
+          cat > "$t/stub-chown" <<EOF
+          #!/bin/sh
+          printf '%s\t%s\n' "\$PWD" "\$*" >> "$t/chown-args"
+          EOF
+          chmod 0755 "$t/stub-pdbedit" "$t/stub-smbpasswd" "$t/stub-testparm-warns" "$t/stub-runuser" "$t/stub-chown"
+        executable: /bin/bash
+      changed_when: true
+
+    # ---- 1. server preflight ----------------------------------------------------------------------
+    - name: Preflight (server) passes with the synthetic inputs
+      ansible.builtin.include_tasks: ../tasks/preflight_server.yml
+
+    - name: Preflight refuses an unmounted share drive (a plain directory)
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: share drive not mounted
+        refusal_file: ../tasks/preflight_server.yml
+        refusal_task: Preflight | refuse unless the share drive is a mountpoint of the expected type
+        ai_library_share_share_mount: "{{ test_tmp }}/mnt"
+        ai_library_share_dir: "{{ test_tmp }}/mnt/{{ test_tmp | basename }}"
+
+    - name: Preflight refuses the share drive with the wrong filesystem type
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: share drive not ntfs3
+        refusal_file: ../tasks/preflight_server.yml
+        refusal_task: Preflight | refuse unless the share drive is a mountpoint of the expected type
+        ai_library_share_share_fstypes: [ntfs3]
+
+    - name: Preflight refuses an unmounted backup drive
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: backup drive not mounted
+        refusal_file: ../tasks/preflight_server.yml
+        refusal_task: Preflight | refuse unless the backup drive is a mountpoint of the expected type
+        ai_library_share_backup_mount: "{{ test_tmp }}/backup"
+        ai_library_share_backup_dir: "{{ test_tmp }}/backup/{{ test_tmp | basename }}"
+
+    - name: Preflight refuses folders that aren't exactly <mount>/ai-library
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: "{{ item.name }}"
+        refusal_file: ../tasks/preflight_server.yml
+        refusal_task: Preflight | server inputs
+        ai_library_share_dir: "{{ item.dir | default(test_rt) }}"
+        ai_library_share_backup_dir: "{{ item.backup | default(test_tmp) }}"
+      loop:
+        - {name: library on the root disk, dir: "{{ test_tmp }}/ai-library"}
+        - {name: backup at the mount root, backup: /tmp}
+        - {name: backup with dotdot, backup: "{{ test_tmp }}/../restic"}
+        - {name: library with dotdot, dir: "{{ test_rt }}/../{{ test_rt | basename }}"}
+        - {name: backup with another name, backup: /tmp/restic}
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Preflight refuses when module G doesn't guard 445
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: 445 not in G's list
+        refusal_file: ../tasks/preflight_server.yml
+        refusal_task: Preflight | port 445 is in module G's privileged policy list
+        ollama_rocm_policy_privileged_ports: [11510]
+
+    - name: Preflight refuses root as the force user
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: force user root
+        refusal_file: ../tasks/preflight_server.yml
+        refusal_task: Preflight | server inputs
+        ai_library_share_force_user: root
+
+    - name: Preflight refuses a force user that doesn't own the share drive
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: force user not the owner
+        refusal_file: ../tasks/preflight_server.yml
+        refusal_task: Preflight | force user and group exist and own the share drive
+        ai_library_share_force_user: nobody
+
+    - name: Plant a symlinked library folder
+      ansible.builtin.shell:
+        cmd: ln -sfn "{{ test_tmp }}/backup" "{{ test_rt }}-linked"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Preflight refuses a symlinked library folder
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: symlinked library folder
+        refusal_file: ../tasks/preflight_server.yml
+        refusal_task: Guard | each directory is absent or a real directory (never a symlink)
+        ai_library_share_folder: "{{ test_rt | basename }}-linked"
+        ai_library_share_dir: "{{ test_rt }}-linked"
+        ai_library_share_backup_dir: "{{ test_tmp }}-linked"
+
+    # ---- 2. install -------------------------------------------------------------------------------
+    - name: Install 1
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Plant a stale module, a bytecode cache and a stray file
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          d="{{ ai_library_share_lib_dir }}"
+          echo old > "$d/library/removed.py"
+          mkdir -p "$d/library/__pycache__"
+          echo x > "$d/library/__pycache__/core.cpython-314.pyc"
+          echo x > "$d/README.md"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Install 2
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: List what was installed
+      ansible.builtin.find:
+        paths: "{{ ai_library_share_lib_dir }}"
+        recurse: true
+        hidden: true
+        file_type: any
+      register: test_installed
+
+    - name: Exactly the scripts and the package modules, strays removed
+      vars:
+        tree: >-
+          {{ test_installed.files | map(attribute='path')
+             | map('regex_replace', '^' ~ (ai_library_share_lib_dir | regex_escape) ~ '/', '') | sort }}
+        src_modules: "{{ query('ansible.builtin.fileglob', ai_library_share_lib_src_dir ~ '/*.py') | map('basename') | sort }}"
+      ansible.builtin.assert:
+        that:
+          - tree == (ai_library_share_scripts + ['library'] + (src_modules | map('regex_replace', '^', 'library/') | list)) | sort
+          - tree | select('search', 'pycache|README|removed') | list == []
+        fail_msg: "{{ tree }}"
+        quiet: true
+
+    - name: Install 3
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Install 3 changed nothing
+      ansible.builtin.assert:
+        that:
+          - ai_library_share_install_dirs is not changed
+          - ai_library_share_install_scripts is not changed
+          - ai_library_share_install_modules is not changed
+          - ai_library_share_install_pruned.results | default([]) | length == 0
+        quiet: true
+
+    - name: Install refuses a shared directory (not named ai-library-share)
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: shared install dir
+        refusal_file: ../tasks/install.yml
+        refusal_task: Install | the install dir is a dedicated ai-library-share directory
+        ai_library_share_lib_dir: "{{ test_tmp }}/lib"
+
+    - name: Plant a victim and a symlinked package dir
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          mkdir -p "{{ test_tmp }}/victim" "{{ test_tmp }}/lib2/ai-library-share"
+          echo keep > "{{ test_tmp }}/victim/sentinel"
+          ln -sfn "{{ test_tmp }}/victim" "{{ test_tmp }}/lib2/ai-library-share/library"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Install refuses a symlinked package dir before writing or pruning
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: symlinked package dir
+        refusal_file: ../tasks/install.yml
+        refusal_task: Guard | each directory is absent or a real directory (never a symlink)
+        ai_library_share_lib_dir: "{{ test_tmp }}/lib2/ai-library-share"
+
+    - name: The victim is untouched
+      ansible.builtin.find:
+        paths: "{{ test_tmp }}/victim"
+        hidden: true
+        file_type: any
+      register: test_victim
+      failed_when: test_victim.files | map(attribute='path') | map('basename') | list != ['sentinel']
+
+    # ---- 3. library -------------------------------------------------------------------------------
+    - name: Library 1 (absent, so created with its sentinel)
+      ansible.builtin.include_tasks: ../tasks/library.yml
+
+    - name: Library 1 created the layout and the sentinel
+      ansible.builtin.assert:
+        that:
+          - ai_library_share_init is changed
+          - "'README.md' in (ai_library_share_init.stdout | from_json)"
+          - "'.ai-library-sentinel' in (ai_library_share_init.stdout | from_json)"
+          - ai_library_share_sentinel_stat.stat.isreg
+        fail_msg: "{{ ai_library_share_init.stdout }}"
+        quiet: true
+
+    - name: Library 1 ran as the force user and group (runuser), so new files are theirs
+      ansible.builtin.command:
+        argv: [cat, "{{ test_tmp }}/runuser-argv"]
+      register: test_runuser1
+      changed_when: false
+      failed_when: >-
+        test_runuser1.stdout_lines != ['-u ' ~ ai_library_share_force_user ~ ' -g ' ~ ai_library_share_force_group ~ ' --']
+
+    - name: Library 2
+      ansible.builtin.include_tasks: ../tasks/library.yml
+
+    - name: Library 2 changed nothing
+      ansible.builtin.assert:
+        that: ai_library_share_init is not changed
+        fail_msg: "{{ ai_library_share_init.stdout }}"
+        quiet: true
+
+    - name: The real library check accepts the result apart from the sentinel (Lead item, see README)
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, -I, -B, -m, library, --root, "{{ ai_library_share_dir }}", check]
+        chdir: "{{ test_lib_package }}"
+      register: test_check
+      changed_when: false
+      failed_when: test_check.stdout_lines | reject('search', '^hidden-file\t.ai-library-sentinel:') | select('search', '\t') | list | length > 0
+
+    # ---- 3b. ownership -----------------------------------------------------------------------------
+    - name: Ownership 1 (everything already belongs to the force user and group)
+      ansible.builtin.include_tasks: ../tasks/ownership.yml
+
+    - name: Ownership 1 changed nothing and called no chown
+      ansible.builtin.stat:
+        path: "{{ test_tmp }}/chown-args"
+      register: test_chown_none
+      failed_when: ai_library_share_owned is changed or test_chown_none.stat.exists
+
+    # On the same filesystem as the library, so only "never follow links" (not -xdev) keeps find out.
+    - name: Plant a symlink in the library to a victim folder outside it (same filesystem)
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          mkdir -p "{{ test_rt }}-victim"
+          echo keep > "{{ test_rt }}-victim/secret"
+          ln -sfn "{{ test_rt }}-victim" "{{ ai_library_share_dir }}/00-inbox/link"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Ownership with a mismatch (force user or force group not the owner)
+      ansible.builtin.include_tasks: own_case.yml
+      loop:
+        - {name: wrong user, user: nobody, group: "{{ ai_library_share_force_group }}"}
+        - {name: wrong group, user: "{{ ai_library_share_force_user }}", group: nobody}
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+
+    - name: Ownership touches only the share's filesystem type (-fstype)
+      ansible.builtin.include_tasks: ../tasks/ownership.yml
+      vars:
+        ai_library_share_force_user: nobody
+        ai_library_share_share_fstypes: [ntfs3]
+
+    - name: Nothing on this tmpfs counts as the ntfs3 share, so nothing was chowned
+      ansible.builtin.assert:
+        that: ai_library_share_owned is not changed
+        quiet: true
+
+    - name: Remove the planted symlink
+      ansible.builtin.file:
+        path: "{{ ai_library_share_dir }}/00-inbox/link"
+        state: absent
+
+    - name: Ownership races a directory swapped for a symlink (real chown to one of this user's groups)
+      ansible.builtin.include_tasks: own_race.yml
+
+    - name: Ownership skips a library folder that doesn't exist yet (library.yml creates it)
+      ansible.builtin.include_tasks: ../tasks/ownership.yml
+      vars:
+        ai_library_share_dir: "{{ test_tmp }}/no-library-yet"
+
+    - name: The absent folder was skipped
+      ansible.builtin.assert:
+        that: ai_library_share_owned is skipped
+        quiet: true
+
+    - name: Clear the runuser record
+      ansible.builtin.file:
+        path: "{{ test_tmp }}/runuser-argv"
+        state: absent
+
+    - name: Verify (server) the force user writes, reads and deletes a probe in 00-inbox
+      ansible.builtin.include_tasks: ../tasks/verify_server_write.yml
+
+    - name: The probe ran once, through runuser as the force user and group
+      ansible.builtin.command:
+        argv: [cat, "{{ test_tmp }}/runuser-argv"]
+      register: test_runuser_probe
+      changed_when: false
+      failed_when: >-
+        test_runuser_probe.stdout_lines != ['-u ' ~ ai_library_share_force_user ~ ' -g ' ~ ai_library_share_force_group ~ ' --']
+
+    - name: Plant a non-empty folder that isn't a library
+      ansible.builtin.shell:
+        cmd: mkdir -p "{{ test_tmp }}/not-a-library" && echo x > "{{ test_tmp }}/not-a-library/notes.txt"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Library refuses a non-empty folder that isn't a library
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: non-library folder
+        refusal_file: ../tasks/library.yml
+        refusal_task: Library | open it (or create it when it isn't a library yet), then the sentinel
+        ai_library_share_dir: "{{ test_tmp }}/not-a-library"
+
+    - name: Plant an existing library that lacks a layout folder
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          cp -a "{{ ai_library_share_dir }}" "{{ test_tmp }}/old-library"
+          rmdir "{{ test_tmp }}/old-library/50-finance/log"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Library refuses to re-init an existing library (never Library.init on a non-empty folder)
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: existing library missing a folder
+        refusal_file: ../tasks/library.yml
+        refusal_task: Library | open it (or create it when it isn't a library yet), then the sentinel
+        ai_library_share_dir: "{{ test_tmp }}/old-library"
+
+    - name: The existing library was left as it was
+      ansible.builtin.stat:
+        path: "{{ test_tmp }}/old-library/50-finance/log"
+      register: test_old_lib
+      failed_when: test_old_lib.stat.exists
+
+    - name: Nothing was added to the non-library folder
+      ansible.builtin.find:
+        paths: "{{ test_tmp }}/not-a-library"
+        hidden: true
+        file_type: any
+      register: test_notlib
+      failed_when: test_notlib.files | map(attribute='path') | map('basename') | list != ['notes.txt']
+
+    # ---- 4. password ------------------------------------------------------------------------------
+    - name: Password 1 (absent, so generated; passdb has no ailib, so smbpasswd runs)
+      ansible.builtin.include_tasks: ../tasks/password.yml
+
+    - name: Stat the generated password
+      ansible.builtin.stat:
+        path: "{{ ai_library_share_password_file }}"
+        follow: false
+        checksum_algorithm: sha256
+      register: test_pw1
+
+    - name: The password file is a regular 0600 file of 49 bytes (48 hex + LF); the dir is 0700
+      ansible.builtin.stat:
+        path: "{{ ai_library_share_secret_dir }}"
+      register: test_secret_dir
+      failed_when: >-
+        not test_pw1.stat.isreg or test_pw1.stat.mode != '0600' or test_pw1.stat.size != 49
+        or test_secret_dir.stat.mode != '0700'
+
+    - name: Read the generated password and what smbpasswd got (no_log)
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - "{{ ai_library_share_password_file }}"
+        - "{{ test_tmp }}/smbpasswd-stdin-0"
+        - "{{ test_tmp }}/smbpasswd-argv"
+      register: test_pw_files
+      no_log: true
+
+    - name: Smbpasswd got the password twice on stdin, and only `-a -s ailib` as arguments (no_log)
+      vars:
+        pw: "{{ test_pw_files.results[0].content | b64decode | trim }}"
+      ansible.builtin.assert:
+        that:
+          - pw is match('^[0-9a-f]{48}$')
+          - (test_pw_files.results[1].content | b64decode) == pw ~ '\n' ~ pw ~ '\n'
+          - (test_pw_files.results[2].content | b64decode) == '-a -s ailib\n'
+        quiet: true
+      no_log: true
+
+    - name: Keep a copy of the generated password for run.sh's leak check (no_log)
+      ansible.builtin.copy:
+        src: "{{ ai_library_share_password_file }}"
+        dest: "{{ test_tmp }}/generated-password"
+        remote_src: true
+        mode: "0600"
+      no_log: true
+
+    - name: Passdb now holds ailib
+      ansible.builtin.copy:
+        dest: "{{ test_tmp }}/pdbedit.rc"
+        content: "0\n"
+        mode: "0644"
+
+    - name: Password 2 (present, account present)
+      ansible.builtin.include_tasks: ../tasks/password.yml
+
+    - name: Stat the password again
+      ansible.builtin.stat:
+        path: "{{ ai_library_share_password_file }}"
+        follow: false
+        checksum_algorithm: sha256
+      register: test_pw2
+
+    - name: Count the smbpasswd calls
+      ansible.builtin.command:
+        argv: [wc, -l, "{{ test_tmp }}/smbpasswd-argv"]
+      register: test_calls2
+      changed_when: false
+
+    - name: A converge never rotates the password and doesn't re-run smbpasswd
+      ansible.builtin.assert:
+        that:
+          - test_pw2.stat.checksum == test_pw1.stat.checksum
+          - test_pw2.stat.inode == test_pw1.stat.inode
+          - test_calls2.stdout.split()[0] == '1'
+        quiet: true
+
+    - name: Passdb lost ailib
+      ansible.builtin.copy:
+        dest: "{{ test_tmp }}/pdbedit.rc"
+        content: "1\n"
+        mode: "0644"
+
+    - name: Password 3 (present, account missing from passdb)
+      ansible.builtin.include_tasks: ../tasks/password.yml
+
+    - name: Read the file and the second smbpasswd stdin (no_log)
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - "{{ ai_library_share_password_file }}"
+        - "{{ test_tmp }}/smbpasswd-stdin-1"
+      register: test_pw3
+      no_log: true
+
+    - name: The account was re-added with the SAME password (no_log)
+      vars:
+        pw: "{{ test_pw3.results[0].content | b64decode | trim }}"
+      ansible.builtin.assert:
+        that:
+          - (test_pw3.results[1].content | b64decode) == pw ~ '\n' ~ pw ~ '\n'
+          - test_pw3.results[0].content == test_pw_files.results[0].content
+        quiet: true
+      no_log: true
+
+    - name: Plant the canary as the existing password (passdb holds ailib)
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          umask 077
+          cp "{{ test_tmp }}/canary-password" "{{ ai_library_share_password_file }}"
+          echo 0 > "{{ test_tmp }}/pdbedit.rc"
+        executable: /bin/bash
+      changed_when: true
+      no_log: true
+
+    - name: Password 4 (the planted password is kept)
+      ansible.builtin.include_tasks: ../tasks/password.yml
+
+    - name: Read the kept password (no_log)
+      ansible.builtin.slurp:
+        src: "{{ ai_library_share_password_file }}"
+      register: test_kept
+      no_log: true
+
+    - name: The existing password was kept byte for byte (no_log)
+      ansible.builtin.assert:
+        that:
+          - (test_kept.content | b64decode | trim) == test_canary
+        quiet: true
+      no_log: true
+
+    # ---- 5. export --------------------------------------------------------------------------------
+    - name: Export the credentials
+      ansible.builtin.include_tasks: ../tasks/export_credentials.yml
+
+    - name: The exported fact is the file's password, and the slurp is dropped (no_log)
+      ansible.builtin.assert:
+        that:
+          - ai_library_share_password == test_canary
+          - ai_library_share_export_slurp == {}
+        quiet: true
+      no_log: true
+
+    - name: A symlinked password file is refused
+      block:
+        - name: Replace the password file with a symlink to the canary
+          ansible.builtin.file:
+            src: "{{ test_tmp }}/canary-password"
+            dest: "{{ ai_library_share_password_file }}"
+            state: link
+            force: true
+
+        - name: Password 5 (symlink)
+          ansible.builtin.include_tasks: ../tasks/password.yml
+
+        - name: Not reached
+          ansible.builtin.set_fact:
+            test_pw_symlink_refused: false
+      rescue:
+        - name: Note the refusal
+          ansible.builtin.set_fact:
+            test_pw_symlink_refused: "{{ ansible_failed_task.name == 'Password | an existing password file is a regular file (never a symlink)' }}"
+
+    - name: The symlink was refused
+      ansible.builtin.assert:
+        that: test_pw_symlink_refused
+        quiet: true
+
+    - name: Export refuses the symlink too
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: export through a symlink
+        refusal_file: ../tasks/export_credentials.yml
+        refusal_task: Export credentials | the password file exists (tasks_from server creates it)
+
+    - name: Put the canary back as a regular file
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          umask 077
+          rm -f "{{ ai_library_share_password_file }}"
+          cp "{{ test_tmp }}/canary-password" "{{ ai_library_share_password_file }}"
+        executable: /bin/bash
+      changed_when: true
+      no_log: true
+
+    # ---- 6. smb.conf ------------------------------------------------------------------------------
+    - name: Smb.conf 1 (rendered, validated by the real testparm through testparm-strict)
+      ansible.builtin.include_tasks: ../tasks/smb_conf.yml
+
+    - name: Smb.conf 2
+      ansible.builtin.include_tasks: ../tasks/smb_conf.yml
+
+    - name: The effective config (testparm -s on the installed file)
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, -I, -B, "{{ ai_library_share_lib_dir }}/testparm-strict.py", "{{ ai_library_share_smb_conf }}"]
+      register: test_testparm
+      changed_when: false
+
+    - name: Testparm sees exactly the contract's settings and one share
+      vars:
+        conf: "{{ test_testparm.stdout }}"
+        me: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        my_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
+      ansible.builtin.assert:
+        that:
+          # SMB3 is Samba's own spelling of SMB3_11 (enum_protocol); encryption required.
+          - conf is search('(?m)^\tserver min protocol = SMB3$')
+          - conf is search('(?m)^\tserver smb encrypt = required$')
+          # bind interfaces only = no (Samba's default, so testparm -s omits it) and no interfaces line.
+          - conf is not search('interfaces')
+          - conf is search('(?m)^\thosts allow = 100.64.0.10 2001:db8::10$')
+          - conf is search('(?m)^\thosts deny = ALL$')
+          - conf is search('(?m)^\trestrict anonymous = 2$')
+          - conf is search('(?m)^\tdisable netbios = Yes$')
+          - conf is search('(?m)^\tserver smb transports = 445$')
+          - conf is search('(?m)^\tload printers = No$')
+          - conf is search('(?m)^\tdisable spoolss = Yes$')
+          - conf is search('(?m)^\tprintcap name = /dev/null$')
+          - conf is search('(?m)^\tsmb1 unix extensions = No$')
+          - conf is search('(?m)^\tsmb3 unix extensions = No$')
+          - conf is search('(?m)^\tfollow symlinks = No$')
+          # map to guest = never and wide links = no are Samba's defaults, so testparm -s omits them.
+          - conf is not search('(?m)^\tmap to guest')
+          - conf is not search('(?m)^\twide links')
+          - conf | regex_findall('(?m)^\[[^\]]+\]$') == ['[global]', '[ai-library]']
+          - conf is search('(?m)^\tpath = ' ~ (ai_library_share_dir | regex_escape) ~ '$')
+          - conf is search('(?m)^\tvalid users = ailib$')
+          - conf is search('(?m)^\tforce user = ' ~ me ~ '$')
+          - conf is search('(?m)^\tforce group = ' ~ my_group ~ '$')
+          - conf is search('(?m)^\tread only = No$')
+          - conf is search('(?m)^\tcreate mask = 0664$')
+          - conf is search('(?m)^\tdirectory mask = 0775$')
+          - conf is search('(?m)^\tveto files = /\*\.lnk/$')
+          - conf is not search('(?m)^\tvfs objects = \S')
+          - conf is not search('(?m)^\tguest ok = Yes')
+        fail_msg: "{{ conf }}"
+        quiet: true
+
+    - name: Smb.conf 2 changed nothing
+      ansible.builtin.find:
+        paths: "{{ ai_library_share_smb_conf | dirname }}"
+        patterns: "smb.conf*"
+      register: test_smb_files
+      failed_when: test_smb_files.files | length != 1
+
+    - name: A testparm warning blocks the install (stub testparm; the installed file is kept)
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: testparm warns
+        refusal_file: ../tasks/smb_conf.yml
+        refusal_task: Samba | smb.conf (validated with testparm before it is installed)
+        ai_library_share_testparm: "{{ test_tmp }}/stub-testparm-warns"
+        ai_library_share_force_user: someone-else
+
+    - name: The installed smb.conf still has the old force user
+      ansible.builtin.command:
+        argv: [grep, -c, "force user = someone-else", "{{ ai_library_share_smb_conf }}"]
+      register: test_after_refusal
+      changed_when: false
+      failed_when: test_after_refusal.stdout | trim != '0'
+
+    - name: Testparm-strict fails a line without '=' (testparm itself skips it silently)
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          printf '[global]\n\tworkgroup = WORKGROUP\n\tbind interfaces only\n' > "{{ test_tmp }}/bare.conf"
+          testparm -s --suppress-prompt "{{ test_tmp }}/bare.conf" >/dev/null 2>&1
+          if /usr/bin/python3 -I -B "{{ ai_library_share_lib_dir }}/testparm-strict.py" "{{ test_tmp }}/bare.conf"; then
+            echo "testparm-strict accepted a bare line"; exit 1
+          fi
+        executable: /bin/bash
+      changed_when: false
+
+    # ---- 7. units ---------------------------------------------------------------------------------
+    - name: Render the server and client units with the production paths
+      ansible.builtin.include_tasks: units_case.yml
+
+    # ---- 8. client --------------------------------------------------------------------------------
+    - name: Preflight (client) passes with a password from the server play
+      ansible.builtin.include_tasks: ../tasks/preflight_client.yml
+      vars:
+        ai_library_share_client_password: "{{ test_canary }}"
+
+    - name: Preflight refuses no password and no credentials file
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: no password, no file
+        refusal_file: ../tasks/preflight_client.yml
+        refusal_task: Preflight | a well-formed password was passed in, or ai-box keeps the credentials it has
+        ai_library_share_client_password: ""
+
+    - name: Preflight refuses options that weaken the contract
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: "extra option {{ item }}"
+        refusal_file: ../tasks/preflight_client.yml
+        refusal_task: Preflight | client inputs
+        ai_library_share_client_password: "{{ test_canary }}"
+        ai_library_share_mount_options_extra: ["{{ item }}"]
+      loop: [noserverino, mfsymlinks, unix, "uid=0", "password=x", "sec=none", "cache=none,noserverino",
+             "symlink=native", "symlink=mfsymlinks", "symlink=unix", "reparse=nfs", "reparse"]
+
+    - name: Preflight refuses base options without symlink=none
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: base without symlink=none
+        refusal_file: ../tasks/preflight_client.yml
+        refusal_task: Preflight | client inputs
+        ai_library_share_client_password: "{{ test_canary }}"
+        ai_library_share_mount_options: "{{ ai_library_share_mount_options_base | reject('equalto', 'symlink=none') | list }}"
+
+    - name: Preflight accepts symlink=none as an extra option
+      ansible.builtin.include_tasks: ../tasks/preflight_client.yml
+      vars:
+        ai_library_share_client_password: "{{ test_canary }}"
+        ai_library_share_mount_options_extra: [symlink=none]
+
+    - name: Plant a symlinked mount point
+      ansible.builtin.file:
+        src: "{{ test_tmp }}/victim"
+        dest: "{{ test_tmp }}/mnt/linked"
+        state: link
+        mode: "0755"
+
+    - name: Preflight refuses a symlinked mount point
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: symlinked mount point
+        refusal_file: ../tasks/preflight_client.yml
+        refusal_task: Preflight | the mount point is not a symlink or a file
+        ai_library_share_client_password: "{{ test_canary }}"
+        ai_library_share_mount_point: "{{ test_tmp }}/mnt/linked"
+        ai_library_share_mount_unit: "{{ lookup('ansible.builtin.pipe', 'systemd-escape --path --suffix=mount ' ~ test_tmp ~ '/mnt/linked') }}"
+        ai_library_share_automount_unit: "{{ ai_library_share_mount_unit | regex_replace('[.]mount$', '.automount') }}"
+
+    - name: Preflight refuses unit names that don't match the mount point
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: unit name mismatch
+        refusal_file: ../tasks/preflight_client.yml
+        refusal_task: Preflight | the role's unit names match the mount point
+        ai_library_share_client_password: "{{ test_canary }}"
+        ai_library_share_mount_unit: 'srv-ai\x2dlibrary.mount'
+
+    - name: Credentials 1 (password given)
+      ansible.builtin.include_tasks: ../tasks/credentials.yml
+      vars:
+        ai_library_share_client_password: "{{ test_canary }}"
+        ai_library_share_password_given: true
+
+    - name: Stat and read the credentials file (no_log)
+      ansible.builtin.slurp:
+        src: "{{ ai_library_share_credentials_file }}"
+      register: test_creds
+      no_log: true
+
+    - name: The credentials file holds the user and the password (no_log)
+      ansible.builtin.assert:
+        that:
+          - (test_creds.content | b64decode) == 'username=ailib\npassword=' ~ test_canary ~ '\n'
+        quiet: true
+      no_log: true
+
+    - name: Stat the credentials file
+      ansible.builtin.stat:
+        path: "{{ ai_library_share_credentials_file }}"
+        follow: false
+      register: test_creds_stat
+      failed_when: not test_creds_stat.stat.isreg or test_creds_stat.stat.mode != '0600'
+
+    - name: Stat the credentials dir
+      ansible.builtin.stat:
+        path: "{{ ai_library_share_client_dir }}"
+        follow: false
+      register: test_creds_dir
+      failed_when: test_creds_dir.stat.mode != '0700'
+
+    - name: Credentials 2 (same password)
+      ansible.builtin.include_tasks: ../tasks/credentials.yml
+      vars:
+        ai_library_share_client_password: "{{ test_canary }}"
+        ai_library_share_password_given: true
+
+    - name: Credentials 3 (no password this run, so the file is kept)
+      ansible.builtin.include_tasks: ../tasks/credentials.yml
+      vars:
+        ai_library_share_client_password: ""
+        ai_library_share_password_given: false
+        ai_library_share_credentials_stat: {stat: {exists: true}}
+
+    - name: Read the credentials file again (no_log)
+      ansible.builtin.slurp:
+        src: "{{ ai_library_share_credentials_file }}"
+      register: test_creds_after
+      no_log: true
+
+    - name: The kept file is unchanged (no_log)
+      ansible.builtin.assert:
+        that: test_creds_after.content == test_creds.content
+        quiet: true
+      no_log: true
+
+    - name: Preflight (client) passes with no password once the file exists
+      ansible.builtin.include_tasks: ../tasks/preflight_client.yml
+      vars:
+        ai_library_share_client_password: ""
+
+    # ---- 9. verify pieces -------------------------------------------------------------------------
+    - name: The probe as this user on the scratch library (local fs, so a symlink CAN be made here)
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - "{{ ai_library_share_lib_dir }}/probe.py"
+          - --lib
+          - "{{ ai_library_share_lib_dir }}"
+          - --root
+          - "{{ ai_library_share_dir }}"
+          - --write
+          - --symlink
+      register: test_probe
+      changed_when: false
+
+    - name: The probe opened the library, wrote/read/deleted its file, and reports the symlink
+      vars:
+        probe: "{{ test_probe.stdout | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - probe.sentinel and probe.open and probe.write
+          - probe.symlink_created == true
+          - probe.errors == []
+        fail_msg: "{{ test_probe.stdout }}"
+        quiet: true
+
+    - name: The probe left nothing in 00-inbox
+      ansible.builtin.find:
+        paths: "{{ ai_library_share_dir }}/00-inbox"
+        hidden: true
+        file_type: any
+      register: test_inbox
+      failed_when: test_inbox.files | length != 0
+
+    - name: The client verify refuses a share where symlinks can be made
+      ansible.builtin.include_tasks: expect_refusal.yml
+      vars:
+        refusal_name: symlinks allowed
+        refusal_file: ../tasks/verify_client.yml
+        refusal_task: Verify | the share is the library, writable, and refuses symlinks
+        ai_library_share_runas: []
+        ai_library_share_mount_point: "{{ ai_library_share_dir }}"
+
+    - name: Live mount options
+      ansible.builtin.include_tasks: mount_case.yml
+      loop:
+        - name: contract options
+          want: pass
+          out: "cifs rw,nosuid,nodev,noexec,relatime,vers=3.1.1,cache=strict,uid=998,forceuid,gid=998,file_mode=0660,soft,nounix,serverino,seal"
+        - name: noserverino
+          out: "cifs rw,nosuid,nodev,noexec,relatime,vers=3.1.1,soft,nounix,noserverino,seal"
+        - name: not sealed
+          out: "cifs rw,nosuid,nodev,noexec,relatime,vers=3.1.1,soft,nounix,serverino"
+        - name: smb 3.0
+          out: "cifs rw,nosuid,nodev,noexec,relatime,vers=3.0,soft,nounix,serverino,seal"
+        - name: exec allowed
+          out: "cifs rw,nosuid,nodev,relatime,vers=3.1.1,soft,nounix,serverino,seal"
+        - name: mfsymlinks
+          out: "cifs rw,nosuid,nodev,noexec,relatime,vers=3.1.1,soft,nounix,serverino,seal,mfsymlinks"
+        - name: not cifs
+          out: "tmpfs rw,nosuid,nodev,noexec,vers=3.1.1,soft,nounix,serverino,seal"
+        - name: not mounted
+          out: ""
+          rc: 1
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+
+    - name: Listeners on 445
+      ansible.builtin.include_tasks: listen_case.yml
+      loop:
+        - name: wildcard v4 and v6
+          want: pass
+          out: "LISTEN 0 50 0.0.0.0:445 0.0.0.0:*\nLISTEN 0 50 [::]:445 [::]:*"
+        - name: wildcard v6 only (dual-stack)
+          want: pass
+          out: "LISTEN 0 50 *:445 *:*"
+        - name: a specific address (bind interfaces only came back)
+          out: "LISTEN 0 50 0.0.0.0:445 0.0.0.0:*\nLISTEN 0 50 100.64.0.20:445 0.0.0.0:*"
+        - name: nothing listens
+          out: ""
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+
+    - name: The filters in front of 445 (stub systemctl and firewall-cmd)
+      ansible.builtin.include_tasks: filter_case.yml
+      loop:
+        - name: all layers present
+          want: pass
+        - name: drop-in not loaded
+          deny: ""
+          allow: ""
+        - name: allowlist has an extra host
+          allow: "127.0.0.0/8 ::1/128 100.64.0.10/32 2001:db8::10/128 100.64.0.30/32"
+        - name: G policy lacks the v6 rule
+          policy: 'rule family="ipv4" source NOT address="100.64.0.10" port port="445" protocol="tcp" reject'
+        - name: G policy empty
+          policy: ""
+        - name: public zone has the samba service
+          services: "dhcpv6-client mdns samba ssh"
+        - name: public zone opens 445/tcp
+          ports: "445/tcp"
+        - name: public zone opens a range over 445
+          ports: "400-500/tcp"
+        - name: public zone accepts 445 in a rich rule
+          rich: 'rule family="ipv4" source address="192.168.1.0/24" port port="445" protocol="tcp" accept'
+        - name: unrelated ports and a 445 reject are fine
+          want: pass
+          ports: "8080/tcp 446-500/tcp 1-444/tcp 445/udp"
+          rich: 'rule family="ipv4" port port="445" protocol="tcp" reject'
+        - name: no active zone besides trusted
+          zones: "trusted\n  interfaces: tailscale0"
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+
+    - name: The AVC check passes only on rc 1 with "<no matches>"
+      ansible.builtin.include_tasks: avc_case.yml
+      loop:
+        - {name: clean, rc: 1, stderr: "<no matches>", want: pass}
+        - {name: denials found, rc: 0, stdout: "type=AVC msg=audit(1): avc:  denied  { write } scontext=system_u:system_r:smbd_t:s0", want: fail}
+        - {name: other error, rc: 1, stderr: "Error opening /var/log/audit/audit.log (Permission denied)", want: fail}
+        - {name: crash, rc: 2, stderr: "", want: fail}
+        - {name: ausearch missing, missing: true, want: fail}
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+
+    - name: The AVC check searches smbd's SELinux domain
+      ansible.builtin.command:
+        argv: [cat, "{{ test_tmp }}/ausearch-argv"]
+      register: test_avc_argv
+      changed_when: false
+      failed_when: test_avc_argv.stdout | trim != '--message AVC,USER_AVC --start recent --context smbd_t'

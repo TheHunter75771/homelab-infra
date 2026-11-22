@@ -1,0 +1,36 @@
+---
+- name: Service | ai-control unit
+  ansible.builtin.template:
+    src: ai-control.service.j2
+    dest: "{{ ai_control_unit_dir }}/{{ ai_control_service }}"
+    owner: "{{ ai_control_root_owner }}"
+    group: "{{ ai_control_root_owner }}"
+    mode: "0644"
+  notify:
+    - Reload systemd for ai-control
+    - Restart ai-control
+
+# Reload units, then restart whatever changed (socket first, then the server).
+- name: Service | apply pending reloads and restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Service | the local-access guard is loaded on every boot (before tailscaled and the server)
+  ansible.builtin.systemd_service:
+    name: "{{ ai_control_guard_unit }}"
+    enabled: true
+    state: started
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Service | the helper socket listens on every boot
+  ansible.builtin.systemd_service:
+    name: "{{ ai_control_helper_socket_unit }}"
+    enabled: true
+    state: started
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Service | ai-control runs on every boot
+  ansible.builtin.systemd_service:
+    name: "{{ ai_control_service }}"
+    enabled: true
+    state: started
+  ignore_errors: "{{ ansible_check_mode }}"

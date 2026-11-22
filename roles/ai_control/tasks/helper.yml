@@ -1,0 +1,37 @@
+---
+# Helper X (CONTRACTS §12.15.2, apps/ai-control/helper/README.md): one root process per connection
+# (Accept=yes), so a new script or helper.json takes effect on the next request without a restart.
+# The helper refuses helper.json unless it is a regular root-owned file nobody else can write.
+- name: Helper | helper.json (root 0644; allowlists and sudo_exes)
+  ansible.builtin.template:
+    src: helper.json.j2
+    dest: "{{ ai_control_helper_config_file }}"
+    owner: "{{ ai_control_root_owner }}"
+    group: "{{ ai_control_root_owner }}"
+    mode: "0644"
+    # The installed helper's own parser (unknown keys and bad values are errors). The owner check is
+    # the helper's at run time; here only the content is validated.
+    validate: >-
+      {{ ai_control_python }} -I -B -c "import json, runpy, sys;
+      helper = runpy.run_path('{{ ai_control_helper_script }}', run_name='aictl_helper');
+      helper['Config'].from_mapping(json.load(open(sys.argv[1])))" %s
+
+- name: Helper | socket unit
+  ansible.builtin.template:
+    src: aictl-helper.socket.j2
+    dest: "{{ ai_control_unit_dir }}/aictl-helper.socket"
+    owner: "{{ ai_control_root_owner }}"
+    group: "{{ ai_control_root_owner }}"
+    mode: "0644"
+  notify:
+    - Reload systemd for ai-control
+    - Restart aictl-helper socket
+
+- name: Helper | per-connection service unit
+  ansible.builtin.template:
+    src: aictl-helper@.service.j2
+    dest: "{{ ai_control_unit_dir }}/aictl-helper@.service"
+    owner: "{{ ai_control_root_owner }}"
+    group: "{{ ai_control_root_owner }}"
+    mode: "0644"
+  notify: Reload systemd for ai-control

@@ -1,0 +1,24 @@
+---
+# Params: mission_control_probe_plan (verify_egress_plan.yml), mission_control_probe_stdout (the probe's JSON line),
+# mission_control_probe_rc (systemd-run's exit code).
+- name: Verify | every probe target got the IP filter's answer
+  vars:
+    mission_control_probe_results: >-
+      {{ (mission_control_probe_stdout | from_json)
+         if (mission_control_probe_stdout | trim) is match('^[{].*[}]$') else {} }}
+    mission_control_probe_issues: "{{ mission_control_probe_plan | mission_control_probe_problems(mission_control_probe_results) }}"
+  ansible.builtin.assert:
+    that:
+      - mission_control_probe_rc | int == 0
+      - mission_control_probe_results | length > 0
+      - mission_control_probe_issues | length == 0
+    fail_msg: >-
+      The sandboxed egress probe (exit {{ mission_control_probe_rc }}) disagrees with the IP filter:
+      {{ mission_control_probe_issues | join('; ') }}. A deny target that got "sent" means the filter lets a private
+      range through; an allow or public target with EPERM means it blocks too much; a push host that times out
+      means the public internet isn't reachable from the unit.
+    success_msg: >-
+      IP filter proven: {{ mission_control_probe_plan | selectattr('role', 'equalto', 'deny') | list | length }} private
+      addresses denied (EPERM), {{ mission_control_probe_plan | selectattr('role', 'equalto', 'allow') | list | length }}
+      allowed hosts and the public internet reachable, push hosts connect.
+    quiet: true

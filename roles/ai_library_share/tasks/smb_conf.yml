@@ -1,0 +1,15 @@
+---
+# validate: runs on the RENDERED temp file before it replaces smb.conf. testparm alone exits 0 on an
+# unknown or misspelt parameter, so testparm-strict.py also fails on any unknown/ignored/invalid line.
+- name: Samba | smb.conf (validated with testparm before it is installed)
+  ansible.builtin.template:
+    src: smb.conf.j2
+    dest: "{{ ai_library_share_smb_conf }}"
+    owner: "{{ ai_library_share_owner }}"
+    group: "{{ ai_library_share_owner }}"
+    mode: "0644"
+    backup: true
+    validate: >-
+      {{ ai_library_share_python }} -I -B {{ ai_library_share_lib_dir }}/testparm-strict.py
+      --testparm {{ ai_library_share_testparm }} %s
+  notify: Reload smb for ai-library-share

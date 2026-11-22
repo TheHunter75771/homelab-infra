@@ -1,0 +1,207 @@
+---
+# Validate the role's inputs before anything changes. Read-only; tests/test_render.yml runs it with
+# good and bad values. Input: ollama_rocm_installed_packages (package_facts' `packages`).
+- name: The Ollama backend is vulkan or rocm
+  ansible.builtin.assert:
+    that:
+      - ollama_backend is string
+      - ollama_backend in ollama_rocm_backends
+    fail_msg: "ollama_backend must be one of {{ ollama_rocm_backends | list | sort | join(', ') }}, not '{{ ollama_backend }}'."
+    quiet: true
+
+# Asserted, not installed: the Mesa Vulkan packages must match the installed Mesa exactly, so a
+# `dnf install` here could upgrade the desktop's whole graphics stack in the middle of a converge.
+# Fedora Workstation ships both; if one is missing, Noah installs it on purpose.
+- name: The backend's packages are installed
+  ansible.builtin.assert:
+    that:
+      - ollama_rocm_installed_packages[item] | default([]) | selectattr('arch', 'eq', 'x86_64') | list | length > 0
+    fail_msg: >-
+      ollama_backend={{ ollama_backend }} needs the x86_64 package {{ item }}.
+      Install it with: sudo dnf install {{ item }}
+    quiet: true
+  loop: "{{ ollama_rocm_backends[ollama_backend].packages }}"
+
+# ollama_rocm_extra_env is rendered as Environment=KEY=VALUE lines after the role's own. It may
+# override the backend's variables (on purpose), but never the role's fixed ones (OLLAMA_HOST is
+# the tailnet-only bind), and nothing in it may change the unit's syntax: no whitespace or newline
+# (a newline would start a new directive), no quotes or backslash (systemd unquoting), no %
+# (systemd specifiers).
+# A bool, not a string: the template tests it for truth, so "false" would quietly mean true.
+- name: The no-cloud switch is a bool
+  ansible.builtin.assert:
+    that:
+      - ollama_rocm_no_cloud is boolean
+    fail_msg: "ollama_rocm_no_cloud must be true or false, not {{ ollama_rocm_no_cloud | to_json }}."
+    quiet: true
+
+- name: The extra environment is a mapping
+  ansible.builtin.assert:
+    that:
+      - ollama_rocm_extra_env is mapping
+    fail_msg: ollama_rocm_extra_env must be a mapping of NAME to value.
+    quiet: true
+
+- name: The extra environment entries are safe
+  ansible.builtin.assert:
+    that:
+      - item.key is string
+      - item.key is match(ollama_rocm_env_key_re)
+      - item.key not in ollama_rocm_env_reserved
+      - (item.value is string or item.value is number) and item.value is not boolean
+      - item.value | string is not search(ollama_rocm_env_value_bad_re)
+    fail_msg: >-
+      ollama_rocm_extra_env entry {{ item.key | to_json }}={{ item.value | to_json }} refused: the name must match
+      [A-Za-z_][A-Za-z0-9_]* and not be one of {{ ollama_rocm_env_reserved | join(', ') }}; the value must be a
+      string or number with no whitespace, control characters, quotes, backslash or %.
+    quiet: true
+  loop: "{{ ollama_rocm_extra_env | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+# Both are rendered into Environment= lines as they are, so nothing in them may add whitespace, a
+# newline (a new directive) or anything systemd would parse.
+- name: The keep-alive is an Ollama duration
+  ansible.builtin.assert:
+    that:
+      - ollama_rocm_keep_alive is not boolean
+      - ollama_rocm_keep_alive is string or ollama_rocm_keep_alive is integer
+      - ollama_rocm_keep_alive | string is match(ollama_rocm_keep_alive_re)
+    fail_msg: >-
+      ollama_rocm_keep_alive must be -1, 0, or a whole number with an optional ms/s/m/h unit (e.g. 5m),
+      not {{ ollama_rocm_keep_alive | to_json }}.
+    quiet: true
+
+- name: The number of loaded models is an integer from 1 to 8
+  ansible.builtin.assert:
+    that:
+      - ollama_rocm_max_loaded_models is integer
+      - ollama_rocm_max_loaded_models is not boolean
+      - ollama_rocm_max_loaded_models >= 1 and ollama_rocm_max_loaded_models <= 8
+    fail_msg: "ollama_rocm_max_loaded_models must be an integer from 1 to 8, not {{ ollama_rocm_max_loaded_models | to_json }}."
+    quiet: true
+
+- name: The privileged policy ports are a list
+  ansible.builtin.assert:
+    that:
+      - ollama_rocm_policy_privileged_ports is sequence
+      - ollama_rocm_policy_privileged_ports is not string
+      - ollama_rocm_policy_privileged_ports is not mapping
+    fail_msg: "ollama_rocm_policy_privileged_ports must be a list of TCP ports, not {{ ollama_rocm_policy_privileged_ports | to_json }}."
+    quiet: true
+
+- name: The privileged policy ports are allowlisted, unique and not listed elsewhere
+  ansible.builtin.assert:
+    that:
+      - item is integer
+      - item is not boolean
+      - item in ollama_rocm_privileged_allowlist
+      - item != ollama_rocm_port | int
+      - item != ollama_rocm_gate_port | int
+      - item not in ollama_rocm_policy_extra_ports
+      - ollama_rocm_policy_privileged_ports | select('equalto', item) | list | length == 1
+    fail_msg: >-
+      ollama_rocm_policy_privileged_ports entry {{ item | to_json }} refused: each must be an integer from the
+      allowlist {{ ollama_rocm_privileged_allowlist | to_json }} (changing it is a contract change), listed once,
+      and not also in ollama_rocm_policy_extra_ports or the Ollama/gate port.
+    quiet: true
+  loop: "{{ ollama_rocm_policy_privileged_ports }}"
+  loop_control:
+    label: "{{ item | to_json }}"
+
+# Checked after the privileged list, so an overlap is reported against that list.
+- name: The extra policy ports are a list
+  ansible.builtin.assert:
+    that:
+      - ollama_rocm_policy_extra_ports is sequence
+      - ollama_rocm_policy_extra_ports is not string
+      - ollama_rocm_policy_extra_ports is not mapping
+    fail_msg: "ollama_rocm_policy_extra_ports must be a list of TCP ports, not {{ ollama_rocm_policy_extra_ports | to_json }}."
+    quiet: true
+
+- name: The extra policy ports are valid, unique and not the Ollama or gate port
+  ansible.builtin.assert:
+    that:
+      - item is integer
+      - item is not boolean
+      # not a privileged port: listing 22 would lock SSH (and Ansible) out for everyone but ai-box
+      - item >= 1024 and item <= 65535
+      - item != ollama_rocm_port | int
+      - item != ollama_rocm_gate_port | int
+      - ollama_rocm_policy_extra_ports | select('equalto', item) | list | length == 1
+    fail_msg: >-
+      ollama_rocm_policy_extra_ports entry {{ item | to_json }} refused: each must be an integer from 1024 to 65535 (never 22 or another privileged port),
+      listed once, and not the Ollama ({{ ollama_rocm_port }}) or gate ({{ ollama_rocm_gate_port }}) port.
+    quiet: true
+  loop: "{{ ollama_rocm_policy_extra_ports }}"
+  loop_control:
+    label: "{{ item | to_json }}"
+
+- name: The pull bounds are positive whole seconds
+  ansible.builtin.assert:
+    that:
+      - item.value is not boolean
+      - item.value | string is match(ollama_rocm_seconds_re)
+    fail_msg: "{{ item.key }} must be a positive whole number of seconds, not {{ item.value | to_json }}."
+    quiet: true
+  loop:
+    - {key: ollama_rocm_pull_timeout, value: "{{ ollama_rocm_pull_timeout }}"}
+    - {key: ollama_rocm_pull_kill_after, value: "{{ ollama_rocm_pull_kill_after }}"}
+  loop_control:
+    label: "{{ item.key }}"
+
+# A fully qualified name (registry.ollama.ai/library/...) is compared in the short form Ollama lists,
+# so it doesn't re-pull on every converge. Digests and registry ports aren't supported.
+- name: The GPU model name is a plain model name
+  ansible.builtin.assert:
+    that:
+      - ollama_rocm_model is match(ollama_rocm_model_re)
+    fail_msg: >-
+      ai_gpu_model {{ ollama_rocm_model | to_json }} isn't a model name of the form [host/][namespace/]model[:tag]
+      (letters, digits, . _ -; no digest, no port).
+    quiet: true
+  when: ollama_rocm_model | length > 0
+
+# Checked after ai_gpu_model, so ollama_rocm_pull_listed is built from valid names only.
+- name: The extra models are a short list
+  ansible.builtin.assert:
+    that:
+      - ollama_rocm_extra_models is sequence
+      - ollama_rocm_extra_models is not string
+      - ollama_rocm_extra_models is not mapping
+      - ollama_rocm_extra_models | length <= ollama_rocm_extra_models_max
+    fail_msg: >-
+      ollama_rocm_extra_models must be a list of at most {{ ollama_rocm_extra_models_max }} model names,
+      not {{ ollama_rocm_extra_models | to_json }}.
+    quiet: true
+
+- name: The extra models are plain model names
+  ansible.builtin.assert:
+    that:
+      - item is string
+      - item is match(ollama_rocm_model_re)
+    fail_msg: >-
+      ollama_rocm_extra_models entry {{ item | to_json }} isn't a model name of the form
+      [host/][namespace/]model[:tag] (letters, digits, . _ -; no digest, no port, no surrounding whitespace).
+    quiet: true
+  loop: "{{ ollama_rocm_extra_models }}"
+  loop_control:
+    label: "{{ item | to_json }}"
+
+# Both compared as /api/tags lists them, so "qwen3" and "library/qwen3:latest" are the same model.
+- name: The extra models don't repeat ai_gpu_model
+  ansible.builtin.assert:
+    that:
+      - ollama_rocm_model | length == 0 or ollama_rocm_model_listed not in ollama_rocm_pull_listed[1:]
+    fail_msg: >-
+      ollama_rocm_extra_models lists ai_gpu_model ({{ ollama_rocm_model | to_json }}) again; it's pulled anyway.
+    quiet: true
+
+- name: The extra models are listed once
+  ansible.builtin.assert:
+    that:
+      - ollama_rocm_pull_listed | unique | length == ollama_rocm_pull_listed | length
+    fail_msg: >-
+      ollama_rocm_extra_models lists a model twice (compared as /api/tags lists them:
+      {{ ollama_rocm_pull_listed | to_json }}).
+    quiet: true

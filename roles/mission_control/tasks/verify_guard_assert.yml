@@ -1,0 +1,41 @@
+---
+# Params: mission_control_guard_list_rc, mission_control_guard_before/_after (`nft list table` before and after
+# `ufw reload`), mission_control_guard_ufw_reloaded, and the probes' JSON lines: mission_control_guard_nobody_out,
+# _root_out (egress_probe.py over mission_control_guard_targets) and _localapi_out (localapi_probe.py).
+# tests/test_mission_control.yml runs this file with canned outputs.
+- name: Verify | the guard's answers
+  vars:
+    obj_re: '^[{].*[}]$'
+    nobody: "{{ (mission_control_guard_nobody_out | from_json) if (mission_control_guard_nobody_out | trim) is match(obj_re) else {} }}"
+    root: "{{ (mission_control_guard_root_out | from_json) if (mission_control_guard_root_out | trim) is match(obj_re) else {} }}"
+    localapi: "{{ (mission_control_guard_localapi_out | from_json) if (mission_control_guard_localapi_out | trim) is match(obj_re) else {} }}"
+    names: "{{ mission_control_guard_targets | map(attribute='name') | list }}"
+    api_names: "{{ mission_control_localapi_targets | map(attribute='name') | list }}"
+    refused: [ECONNREFUSED, ECONNRESET]
+    # Counters move with traffic; the rules themselves must not.
+    before: "{{ mission_control_guard_before | regex_replace('counter packets [0-9]+ bytes [0-9]+', 'counter') }}"
+    after: "{{ mission_control_guard_after | regex_replace('counter packets [0-9]+ bytes [0-9]+', 'counter') }}"
+  ansible.builtin.assert:
+    that:
+      - mission_control_guard_list_rc | int == 0
+      - before is search('iifname != "' ~ mission_control_tailscale_iface ~ '"')
+      - before == after
+      - names | length == 3 and api_names | length == 2
+      # nobody: refused everywhere.
+      - names | reject('in', nobody) | list == []
+      - names | map('extract', nobody) | reject('in', refused) | list == []
+      # root: the server (tailscaled's own path) yes; serve's port from the box itself, no.
+      - names | reject('in', root) | list == []
+      - root[names[0]] == 'ok'
+      - names[1:] | map('extract', root) | reject('in', refused) | list == []
+      # nobody through the local API: never an HTTP answer.
+      - api_names | reject('in', localapi) | list == []
+      - api_names | map('extract', localapi) | select('match', '^http ') | list == []
+    fail_msg: >-
+      The local-access guard: `nft list table inet {{ mission_control_guard_table }}` exited {{ mission_control_guard_list_rc }}
+      (interface rule present: {{ before is search('iifname') }}; unchanged by ufw reload
+      ({{ 'ran' if mission_control_guard_ufw_reloaded | bool else 'UFW inactive, skipped' }}): {{ before == after }});
+      as {{ mission_control_verify_guard_user }} {{ nobody | to_json }} (want every one refused); as root {{ root | to_json }}
+      (want the server ok and serve's :{{ mission_control_serve_port }} refused); local API dials as {{ mission_control_verify_guard_user }}
+      {{ localapi | to_json }} (an "http ..." answer means any local user can act as Noah).
+    quiet: true

@@ -1,0 +1,24 @@
+# {{ ansible_managed }}
+# Role ai_stack (docs/CONTRACTS.md §12.19, §12.21, §12.27): {{ share.what }} as its own {{ 'READ-WRITE' if share.mode == 'rw' else 'READ-ONLY' }} CIFS mount, on the
+# local directory that open-webui binds at {{ share.target }} (rslave). A new superblock gets
+# ro,nosuid,nodev,noexec when it is created, even through classic mount(2), so the copy propagated into the
+# container has them too (a bind + ro remount would not). Not enabled and not an automount: open-webui's
+# bind would fire an automount at container start and wait on the gaming PC. {{ ai_stack_skills_reconcile_unit }}
+# (from {{ ai_stack_skills_timer_unit }}) mounts it when the PC answers on 445 and unmounts it when it
+# doesn't. Credentials: role ai_library_share's file.
+[Unit]
+Description={{ share.description }}, read-only CIFS view for open-webui
+Requires={{ ai_stack_skills_wait_unit }}
+After={{ ai_stack_skills_wait_unit }} tailscaled.service network-online.target
+Wants=network-online.target
+
+[Mount]
+What={{ share.what }}
+Where={{ share.view }}
+Type=cifs
+Options={{ (ai_stack_share_rw_mount_options if share.mode == 'rw' else ai_stack_skills_mount_options) | join(',') }}
+TimeoutSec=60
+# A stop while the PC is away must never hang: detach at once (the unmount propagates into open-webui) and
+# don't wait on the server.
+LazyUnmount=yes
+ForceUnmount=yes

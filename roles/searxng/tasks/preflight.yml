@@ -1,0 +1,87 @@
+---
+# Role inputs, checked before anything is written.
+- name: Preflight | role docker's defaults (container range, pools, avoid list)
+  ansible.builtin.include_vars:
+    file: "{{ searxng_docker_defaults_file }}"
+    name: searxng_docker_role_defaults
+
+- name: Preflight | role inputs
+  ansible.builtin.assert:
+    that:
+      # versions.yml convention: tag AND digest.
+      - images.searxng is defined
+      - images.searxng is match('^[a-z0-9./_-]+/searxng:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$')
+      - searxng_dir is abs and searxng_config_dir is abs
+      - searxng_config_dir | dirname == searxng_dir
+      - searxng_publish_host == '127.0.0.1'
+      - searxng_publish_port | int > 0 and searxng_publish_port | int < 65536
+      - searxng_container_port | int > 1023 and searxng_container_port | int < 65536
+      - searxng_uid | int > 0 and searxng_gid | int > 0
+      - searxng_network is match('^[a-z][a-z0-9-]{0,30}$')
+      - searxng_bridge_name is match('^[a-z][a-z0-9-]{0,14}$')
+      - searxng_engines is sequence and searxng_engines is not string and searxng_engines | length > 0
+      - searxng_engines | reject('match', '^[a-z0-9_ -]+$') | list | length == 0
+      - searxng_settings_extra is mapping
+    fail_msg: >-
+      Check the searxng inputs: images.searxng must be pinned as name:tag@sha256:<digest> in versions.yml; the
+      publish is 127.0.0.1 only; ports 1-65535 (container port above 1023, the image runs unprivileged); plain
+      network, bridge and engine names.
+    quiet: true
+
+# The contract's settings hold whatever searxng_settings_extra says (it can add engines' options, not undo these).
+- name: Preflight | the merged settings keep the contract (§12.16.2)
+  ansible.builtin.assert:
+    that:
+      - searxng_settings.search.formats | sort == ['html', 'json']
+      - searxng_settings.server.limiter is sameas false
+      - searxng_settings.server.public_instance is sameas false
+      - searxng_settings.server.image_proxy is sameas false
+      - searxng_settings.search.autocomplete == ''
+      - searxng_settings.server.secret_key is not defined
+      - searxng_settings.use_default_settings.engines.keep_only == searxng_engines
+      - searxng_settings.use_default_settings.engines.remove is not defined
+      - searxng_settings_extra.engines is not defined
+      - searxng_settings.engines == searxng_engine_categories | dict2items(key_name='name', value_name='categories')
+      # Overrides only name kept engines (an unknown name would be appended as a new engine) and keep `general`.
+      - searxng_engine_categories is mapping
+      - searxng_engine_categories.keys() | difference(searxng_engines) | list == []
+      - searxng_engine_categories.values() | reject('contains', 'general') | list == []
+      - "'startpage' not in searxng_engines"
+    fail_msg: >-
+      searxng_settings_extra overrides a contract setting (formats html+json, limiter/public_instance/image_proxy
+      off, autocomplete off, no secret_key in the file, the engine list via keep_only only, engine overrides only from
+      searxng_engine_categories, for kept engines, each with general; no startpage).
+    quiet: true
+
+- name: Preflight | the pinned network fits role docker's address plan
+  vars:
+    searxng_net_issues: >-
+      {{ searxng_subnet | searxng_net_problems(searxng_gateway, searxng_ipv4, searxng_docker_container_range,
+         searxng_docker_pools, searxng_docker_avoid) }}
+  ansible.builtin.assert:
+    that: searxng_net_issues | length == 0
+    fail_msg: "{{ searxng_net_issues | join('; ') }}"
+    quiet: true
+
+# Read-only. The role's own network (`research`) is skipped, so a re-run passes.
+- name: Preflight | subnets of the Docker networks on the host
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      docker network ls --quiet | xargs --no-run-if-empty docker network inspect \
+        --format '{% raw %}{{.Name}} {{range .IPAM.Config}}{{.Subnet}} {{end}}{% endraw %}'
+    executable: /bin/bash
+  register: searxng_host_networks
+  changed_when: false
+  check_mode: false
+
+- name: Preflight | no existing Docker network overlaps the pinned subnet
+  vars:
+    searxng_host_overlaps: >-
+      {{ searxng_subnet | searxng_network_overlaps(searxng_host_networks.stdout_lines, searxng_network) }}
+  ansible.builtin.assert:
+    that: searxng_host_overlaps | length == 0
+    fail_msg: >-
+      {{ searxng_subnet }} overlaps existing Docker networks: {{ searxng_host_overlaps | join(', ') }}. Pick another /28
+      (searxng_subnet, searxng_gateway, searxng_ipv4) inside {{ searxng_docker_container_range }} and outside the pools.
+    quiet: true

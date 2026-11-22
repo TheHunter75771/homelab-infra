@@ -1,0 +1,27 @@
+# {{ ansible_managed }}
+# Role ai_stack (docs/CONTRACTS.md §12.19, §12.21): one reconcile pass of every read-only share mount
+# ({{ ai_stack_ro_shares | map(attribute='name') | join(', ') }}; files/skills_reconcile.py). The unit keeps its first (skills) name.
+# A bounded TCP connect to the gaming PC and `systemctl` only; it never touches the mount path. Root, because
+# it starts and stops a mount unit; it can reach nothing on the network but the PC's SMB port.
+[Unit]
+Description=Reconcile the AI Library read-only share mounts with the gaming PC's reachability
+After=tailscaled.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I -B {{ ai_stack_skills_reconcile_script }} --host {{ gaming_pc_tailnet_ip }} --port {{ ai_stack_skills_reconcile_port }} --timeout {{ ai_stack_skills_reconcile_timeout }} {{ ai_stack_ro_shares | map(attribute='view') | map('regex_replace', '^', '--where ') | join(' ') }}
+# start/stop are --no-block (the mounts run in parallel, each bounded by its own TimeoutSec=60), so a pass
+# takes seconds; the script's own per-call bound (10 s) keeps even a stuck systemd well under this.
+TimeoutStartSec=120
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+IPAddressDeny=any
+IPAddressAllow={{ gaming_pc_tailnet_ip }}

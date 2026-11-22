@@ -1,0 +1,319 @@
+---
+# Role ai_stack (docs/CONTRACTS.md §12.10, module H2): the ai-box compose stack (ollama-cpu, gpu-broker,
+# open-webui). Identifiers (tailnet_ip, gaming_pc_tailnet_ip) come from host_vars; image references only from
+# versions.yml (images.ollama, images.open_webui, images.python_base, local_images.gpu_broker).
+
+# --- Models: the operator's decision (§12.10). No defaults on purpose. ---
+# ai_cpu_model    pulled into ollama-cpu when set (only if it is missing).
+# ai_gpu_model    lives on the gaming PC (role ollama_rocm pulls it).
+# With BOTH set, the broker gets one alias, ai_stack_alias_name -> {gpu: ai_gpu_model, cpu: ai_cpu_model}.
+# With either unset, the broker's alias map is {} and nothing is pulled for the unset one.
+# ai_embed_model  (§12.22) the embedding model, pulled into ollama-cpu when set (the gaming PC gets the same
+#                 one through role ollama_rocm's extra models). When set, the broker gets a second alias,
+#                 ai_stack_embed_alias -> {gpu: ai_embed_model, cpu: ai_embed_model}: the same model on both
+#                 backends, so the vectors match whichever one answers. Open WebUI embeds through that alias.
+ai_stack_alias_name: assistant
+ai_stack_embed_alias: embed
+
+# Open WebUI sign-ups. true until the admin has created the first (admin) account in the browser; then set it
+# to false and turn "Enable New Sign Ups" off in Admin Panel > Settings > General (README, "First login").
+ai_webui_enable_signup: true
+
+# Compose project (the stack directory and project name).
+ai_stack_name: ai
+ai_stack_dir: "{{ homelab_stacks_dir }}/{{ ai_stack_name }}"
+
+# gpu-broker: its config on the host (bind-mounted read-only) and its build context.
+ai_stack_config_dir: /etc/homelab-ai
+ai_stack_broker_config_file: "{{ ai_stack_config_dir }}/gpu-broker.json"
+ai_stack_broker_src: "{{ role_path }}/../../apps/gpu-broker"
+ai_stack_broker_build_root: /opt/homelab-ai
+ai_stack_broker_build_dir: "{{ ai_stack_broker_build_root }}/gpu-broker-src"
+# The broker's fixed Ollama context for alias requests that go to the GPU (its `gpu_num_ctx`; apps/gpu-broker
+# README, "Fixed context"). It follows the shared ai_gpu_num_ctx (group_vars/all, Q7-1; the gaming PC's
+# OLLAMA_CONTEXT_LENGTH reads it too) and is null when that is unset, so each client's num_ctx passes through.
+# An integer 2048-262144 pins it: Ollama reloads a loaded model whenever num_ctx changes (about 25 s for
+# qwen3.5:35b), and callers mix 4096, 16384 and 32768. Rendered as a JSON number (or null); the preflight refuses
+# anything else (a quoted number, a boolean, out of range). The role sets no cpu_num_ctx.
+ai_stack_broker_gpu_num_ctx: "{{ ai_gpu_num_ctx | default(none) }}"
+
+# The gaming PC's gpu-gate and Ollama, reached over the tailnet (§12.4, §12.10).
+ai_stack_gate_port: 11500
+ai_stack_gpu_ollama_port: 11434
+
+# Published ports, on tailnet_ip only.
+ai_stack_webui_port: 8080
+ai_stack_broker_port: 11434
+
+# 8 GB box: Ollama gets most of it (§12.10 memory budget). open_webui 2g and tika 1g since §12.18b.
+ai_stack_mem_limits:
+  ollama_cpu: 5g
+  gpu_broker: 256m
+  # 4g since §12.30: room for an in-process cross-encoder reranker (bge-reranker-base: about 1.5 GiB more,
+  # README "Rerankers"). The ai-box inventory sets its own value.
+  open_webui: 4g
+  tika: 1g
+
+# Memory budget (tasks/preflight.yml): the sum of every container limit on this host, plus a reserve for
+# the host's own services, must fit in its RAM (ansible_facts.memtotal_mb). Limits are ceilings, not
+# reservations, so a deliberate overcommit is allowed only through ai_stack_mem_overcommit_mb (MiB),
+# which is 0 here: the play refuses until someone decides (README, "Memory budget").
+# Containers on this host from other roles (they are separate plays, so their defaults aren't visible here).
+ai_stack_mem_other_containers:
+  searxng: 384m
+# The host's own memory, by owner: the MemoryMax caps of the systemd services on ai-box (each role's
+# *_memory_max default) plus an estimate for the uncapped daemons (dockerd, containerd and its shims,
+# tailscaled, journald, the CIFS client for the AI Library share, sshd, systemd, a little page cache).
+ai_stack_mem_host_services:
+  ai_control: 256m
+  research_gate: 256m
+  finance_digest: 256m
+  skill_drafter: 256m
+  voice_profile: 256m
+  forge_api: 256m
+  ai_backup: 256m
+  # §12.29 Mission Control: the server, and the 05:30 briefing oneshot (it overlaps the server for a few
+  # seconds, so it's counted too).
+  mission_control: 128m
+  mission_control_briefing: 128m
+  host_daemons: 768m
+ai_stack_mem_overcommit_mb: 0
+
+# Pinned networks (docs/CONTRACTS.md §12.18b; tasks/networks.yml). `ai` keeps the subnet Docker gave it
+# (the first /24 of role docker's pool 172.20.0.0/14); role finance_digest derives its broker range from
+# ai_stack_network_subnet. The role owns `ai` and compose uses it as external, because compose recreates
+# (stops the stack for) any network whose definition changes. `extract` is a /28 at the far end of the
+# same pool, so Docker's own /24 allocations (from the start of the pool) don't reach it first.
+ai_stack_network_name: "{{ ai_stack_name }}_ai"
+ai_stack_network_subnet: 172.20.0.0/24
+# Pinned addresses on `ai` (§12.23), inside ai_stack_network_subnet (tasks/networks.yml asserts it). The
+# defaults are the addresses Docker gave the three containers on ai-box, so pinning them changes no address.
+# ai_stack_broker_ip is the one other roles use: the host's broker-only units reach the broker through
+# tailnet_ip's published port, which Docker DNATs to this address, so their egress filters need only its /32.
+ai_stack_ollama_cpu_ip: 172.20.0.2
+ai_stack_broker_ip: 172.20.0.3
+ai_stack_webui_ip: 172.20.0.4
+# A model name that can't exist, for the /api/push refusal check (tasks/verify_broker.yml).
+ai_stack_broker_probe_model: homelab-lockdown-probe-does-not-exist:none
+ai_stack_extract_network_name: "{{ ai_stack_name }}_extract"
+ai_stack_extract_subnet: 172.23.255.240/28
+ai_stack_docker_defaults_file: "{{ role_path }}/../docker/defaults/main.yml"
+
+# Skills (docs/CONTRACTS.md §12.19, H6): the AI Library's 30-skills, read-only at /skills in open-webui for
+# the "Skills (read-only)" tool. Its own read-only CIFS mount of the share's subfolder (not a bind of the
+# library mount: Ubuntu 26.04's libmount has no fd-based mount, and a classic bind + ro remount would not
+# propagate read-only into the container). A new superblock gets ro,nosuid,nodev,noexec atomically, so the
+# copy that rslave carries into open-webui has them too. open-webui binds the LOCAL directory underneath
+# (ai_stack_skills_view) and never waits on the gaming PC; while nothing is mounted, /skills holds only
+# ai_stack_skills_unavailable_marker. README, "Skills".
+ai_stack_skills_cifs_source: "//{{ gaming_pc_tailnet_ip }}/ai-library/30-skills"
+ai_stack_skills_view: /var/lib/homelab-ai/skills
+ai_stack_skills_target: /skills
+ai_stack_skills_unavailable_marker: SKILLS-NOT-MOUNTED
+# Writing (docs/CONTRACTS.md §12.21, H7): the AI Library's 40-writing, read-only at /writing for the
+# "My writing voice (read-only)" tool. Exactly the same design as /skills (vars/main.yml, ai_stack_ro_shares):
+# its own read-only CIFS mount, the same options, credentials, reconcile and in-container verify.
+ai_stack_writing_cifs_source: "//{{ gaming_pc_tailnet_ip }}/ai-library/40-writing"
+ai_stack_writing_view: /var/lib/homelab-ai/writing
+ai_stack_writing_target: /writing
+ai_stack_writing_unavailable_marker: WRITING-NOT-MOUNTED
+# Payday runs (docs/CONTRACTS.md §12.27, H2): the ONE read-write share. 50-finance/payday-runs only, at
+# /payday-runs, for the "Payday (calculator + log)" tool's save. Same design as the read-only shares, but rw
+# (still nosuid,nodev,noexec; files 0640, folders 0750, owned by root on ai-box). While it isn't mounted, the
+# local view directory and its marker are immutable (chattr +i), so nothing in open-webui, root included,
+# can write to ai-box's own disk there (README, "Payday runs").
+ai_stack_payday_cifs_source: "//{{ gaming_pc_tailnet_ip }}/ai-library/50-finance/payday-runs"
+ai_stack_payday_view: /var/lib/homelab-ai/payday-runs
+ai_stack_payday_target: /payday-runs
+ai_stack_payday_unavailable_marker: PAYDAY-RUNS-NOT-MOUNTED
+# The settings below (credentials, wait unit, CIFS options, reconcile) are shared by every read-only share
+# (they keep their original skills_ names).
+# Owned by role ai_library_share (client): read by mount.cifs only, never written here.
+ai_stack_skills_credentials_file: /etc/ai-library/credentials
+# ai_library_share's tailnet wait (installed with the credentials); the mount is ordered after it.
+ai_stack_skills_wait_unit: ai-library-tailnet-wait.service
+ai_stack_skills_wait_unit_file: /etc/systemd/system/{{ ai_stack_skills_wait_unit }}
+# The library client's CIFS options (roles/ai_library_share/vars/main.yml), read-only, owned by root and
+# readable by root only: open-webui reads as root; no other local account (rgate, localai, ...) gets the
+# skills through this mount, as the library itself is rgate-only (0660/0770).
+ai_stack_skills_mount_options:
+  - ro
+  - nosuid
+  - nodev
+  - noexec
+  - vers=3.1.1
+  - seal
+  - nounix
+  - serverino
+  - symlink=none
+  - soft
+  - echo_interval=15
+  - uid=0
+  - gid=0
+  - file_mode=0440
+  - dir_mode=0550
+  - credentials={{ ai_stack_skills_credentials_file }}
+  - _netdev
+# The play never mounts or unmounts on its own while the PC may be away. A timer runs the reconcile
+# service (files/skills_reconcile.py) 30 s after boot (or after the timer starts) and then every minute:
+# PC reachable on 445 and not mounted -> mount; PC unreachable and mounted -> lazy unmount, so a stale soft
+# mount never blocks open-webui's (re)start. README, "Skills".
+ai_stack_skills_reconcile_first: 30s
+ai_stack_skills_reconcile_every: 1min
+ai_stack_skills_reconcile_port: 445
+ai_stack_skills_reconcile_timeout: 4
+ai_stack_skills_reconcile_dir: /usr/local/lib/homelab-ai
+ai_stack_skills_reconcile_script: "{{ ai_stack_skills_reconcile_dir }}/skills_reconcile.py"
+# Left behind by the round-3 design (a bind wanted by the library mount); removed if present.
+ai_stack_skills_legacy_wants: "/etc/systemd/system/srv-ai\\x2dlibrary.mount.wants/{{ ai_stack_skills_mount_unit }}"
+
+# Document extraction (docs/CONTRACTS.md §12.18b): Apache Tika (with Tesseract) on an internal network
+# that only open-webui shares. Open WebUI sends every non-text upload to it.
+ai_stack_tika_config_file: "{{ ai_stack_config_dir }}/tika-config.xml"
+# The image's own unprivileged user (apache/tika-docker: UID_GID 35002:35002); owns the /tmp tmpfs.
+ai_stack_tika_uid: 35002
+# PDF pages: auto = OCR only pages with (almost) no text layer, so scanned PDFs are read and normal ones
+# aren't slowed down. ocr_and_text_extraction OCRs every page as well (much slower on 4 cores); no_ocr
+# turns it off.
+ai_stack_tika_pdf_ocr_strategy: auto
+# Tesseract languages installed in the -full image: eng ita fra spa deu jpn ("eng+spa" for several).
+ai_stack_tika_ocr_language: eng
+ai_stack_tika_ocr_timeout_seconds: 120
+# One request (a whole document) before tika-server restarts its worker; a long scanned PDF on 4 CPU cores
+# takes minutes. Open WebUI waits without a timeout of its own.
+ai_stack_tika_task_timeout_ms: 600000
+# Heap of tika-server's forked worker JVM. The rest of the 1g limit is the watchdog JVM, Tesseract
+# processes and the /tmp tmpfs (tmpfs pages count against the container's memory limit).
+ai_stack_tika_worker_heap: 512m
+ai_stack_tika_tmpfs_size: 128m
+ai_stack_tika_pids_limit: 256
+
+# Open WebUI's document settings (§12.18b). Open WebUI 0.12.4 copies these into its database on first
+# start and from then on the database wins (README, "Document extraction settings"); the role checks the
+# effective values read-only and tells the admin what to set if they differ.
+ai_webui_rag_file_max_size_mb: 25
+# Media uploads Open WebUI may hand to the extraction engine. Without this, every image upload fails with
+# "File type image/png is not supported for processing", whatever the engine. Types Tesseract reads.
+ai_webui_extraction_media_types:
+  - image/png
+  - image/jpeg
+  - image/tiff
+  - image/bmp
+  - image/gif
+
+# Ollama on CPU: unload an idle model after 10 min; one request at a time (4 cores gain nothing from
+# parallel requests, and one KV cache per model). Two models may stay loaded (§12.22): the chat model and
+# the embedding model, so an embedding call (a reindex, a Knowledge query) never evicts the chat model.
+# Memory: README, "Search settings" (about 4.6 GiB for both, under the 5g limit).
+ai_stack_ollama_env:
+  OLLAMA_KEEP_ALIVE: 10m
+  OLLAMA_MAX_LOADED_MODELS: "2"
+  OLLAMA_NUM_PARALLEL: "1"
+
+# Document search (docs/CONTRACTS.md §12.22). Open WebUI keeps these in its database (PersistentConfig):
+# the env below applies to a fresh database only and documents the intent; the admin sets them in the Admin UI
+# (README, "Search settings") and tasks/verify_search.yml reads the effective values. The two embedding
+# prefixes are plain os.getenv in 0.12.4 and apply on every start.
+# Embedding (only when ai_embed_model is set): Open WebUI -> broker alias ai_stack_embed_alias.
+ai_stack_rag_embedding_batch_size: 16
+# Embedding requests in flight at once (Admin > Documents > Embedding Concurrent Requests; 0 = unlimited).
+ai_stack_rag_embedding_concurrent_requests: 2
+# nomic-embed-text's task prefixes (its model card): queries and documents are embedded differently.
+ai_stack_embed_query_prefix: "search_query: "
+ai_stack_embed_content_prefix: "search_document: "
+# Retrieval: how many passages reach the model.
+ai_stack_rag_top_k: 8
+# Hybrid search stays OFF (Reviewer I R10-1): on 0.12.4 with Chroma and no reranker model, its BM25 + vector
+# union is re-ranked by cosine with the same embedding, so it returns the vector top-k again while loading
+# the whole collection on every query. Exact tokens (e.g. document numbers) need a reranker or per-passage labels,
+# a later decision. top_k_reranker only matters if hybrid is turned on (Open WebUI then keeps
+# min(top_k, top_k_reranker)); it's kept equal to top_k for that case.
+ai_stack_rag_top_k_reranker: 8
+ai_stack_rag_hybrid_search: "{{ ai_stack_expect_hybrid_search }}"
+# §12.30: the hybrid search and reranker state the search check expects (the admin sets them in the Admin UI;
+# PersistentConfig). Today's values by default: hybrid off, no reranker. The inventory changes them for the
+# experiments (E2: hybrid + cross-encoder/ms-marco-MiniLM-L6-v2; E3: hybrid + BAAI/bge-reranker-base). A
+# reranker named here must be one of ai_stack_hf_models (the preflight checks it): open-webui's Hugging Face
+# libraries run offline and can't fetch one. They also seed a fresh database (ENABLE_RAG_HYBRID_SEARCH, RAG_RERANKING_MODEL).
+ai_stack_expect_hybrid_search: false
+ai_stack_expect_reranker_model: ""
+
+# §12.30: Hugging Face models seeded on the HOST, in a host-owned folder outside open-webui's data volume
+# (Reviewer I R16-1: the container's root could plant symlinks in the volume), then bind-mounted READ-ONLY into
+# open-webui's HF cache, one model folder each. open-webui runs with HF_HUB_OFFLINE=1, so its Hugging Face
+# libraries never fetch a model themselves. Each entry: the canonical repo name (what the model page shows),
+# the exact revision (commit), and every file with its SHA-256 and size (from the Hugging Face API at that
+# revision; the LFS SHA-256 for weights, the content hash for the small files, checked against their git blob
+# ids). Only the files a CrossEncoder needs: config, safetensors weights, tokenizer. In the HF cache layout:
+#   <seed dir>/models--<org>--<name>/snapshots/<revision>/<file>, and refs/main = <revision>, written only
+#   once every file verifies (and removed first when one doesn't).
+ai_stack_hf_models:
+  # Renamed by Hugging Face from ms-marco-MiniLM-L-6-v2 (the old name redirects); same commit and files.
+  - repo: cross-encoder/ms-marco-MiniLM-L6-v2
+    revision: 233902d25c440f23af6f7d6e94d2946bac0bee0a
+    files:
+      - {name: config.json, size: 794, sha256: 380e02c93f431831be65d99a4e7e5f67c133985bf2e77d9d4eba46847190bacc}
+      - {name: model.safetensors, size: 90870598,
+         sha256: 821d1aa69520101d6e0737f78a042ae25b19e5cb9160701909d10434f4aeb0ae}
+      - {name: special_tokens_map.json, size: 132,
+         sha256: 3c3507f36dff57bce437223db3b3081d1e2b52ec3e56ee55438193ecb2c94dd6}
+      - {name: tokenizer.json, size: 711396, sha256: d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66}
+      - {name: tokenizer_config.json, size: 1330,
+         sha256: a5c2e5a7b1a29a0702cd28c08a399b5ecc110c263009d17f7e3b415f25905fd8}
+      - {name: vocab.txt, size: 231508, sha256: 07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3}
+  - repo: BAAI/bge-reranker-base
+    revision: 2cfc18c9415c912f9d8155881c133215df768a70
+    files:
+      - {name: config.json, size: 799, sha256: 289adf7ada1eb6b4afa7589a48a032d45a076cf2e46dcdb3b4cabc33be14f708}
+      - {name: model.safetensors, size: 1112206140,
+         sha256: ced967c45fd1902eb92716c9ceeca7c95a936770ea9db611f5a841b926e33fbd}
+      - {name: sentencepiece.bpe.model, size: 5069051,
+         sha256: cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865}
+      - {name: special_tokens_map.json, size: 279,
+         sha256: d5469a60db23249c7f8945013d78df30b44b6bf686c6bb4740f4223f77b1b535}
+      - {name: tokenizer.json, size: 17098107, sha256: 9eb652ac4e40cc093272bbbe0f55d521cf67570060227109b5cdc20945a4489e}
+      - {name: tokenizer_config.json, size: 443,
+         sha256: a1d6bc8734a6f635dc158508bef000f8e2e5a759c7d92f984b2c86e5ff53425b}
+# Where: the host-owned seed folder (root, never written by a container), and open-webui's HF_HOME (=
+# SENTENCE_TRANSFORMERS_HOME, set by the image) where each model folder is bind-mounted read-only.
+ai_stack_hf_seed_dir: /var/lib/homelab-ai/hf-models
+ai_stack_hf_container_cache: /app/backend/data/cache/embedding/models
+ai_stack_hf_base_url: https://huggingface.co
+# Owner and group of the seed folders and files (root; the tests point them at their own user).
+ai_stack_hf_owner: root
+ai_stack_hf_group: root
+# The effective-settings check always reports; it fails the play only once this is true (the admin has saved
+# the search settings in the Admin UI).
+ai_stack_verify_search_settings: false
+# Chat titles (task.title.prompt_template). Open WebUI parses the reply as JSON {"title": ...}. No example
+# value and no placeholder text: a small model copies those ("your concise title here").
+# !unsafe: {{MESSAGES:END:2}} is Open WebUI's own placeholder, not Jinja.
+ai_stack_title_prompt: !unsafe |-
+  Name the subject of the chat below in 2 to 5 words.
+  Use the chat's own topic, names and numbers. No quotation marks and no emojis.
+  Reply with one JSON object and nothing else: the key is "title" and the value is the title.
+  <chat_history>
+  {{MESSAGES:END:2}}
+  </chat_history>
+
+# docker compose up --wait. Open WebUI's first start (database migrations and a first-run download of its
+# default embedding model) is slow on the HDD.
+ai_stack_compose_wait_timeout: 600
+
+# Boot helper (homelab-ai-stack-start.service): how long it waits for tailscaled to put tailnet_ip on the
+# host before giving up, and the PATH its script runs with (the tests point it at fake binaries).
+ai_stack_tailnet_wait_seconds: 300
+ai_stack_start_script: /usr/local/sbin/homelab-ai-stack-start
+ai_stack_start_path: /usr/sbin:/usr/bin:/sbin:/bin
+
+# Stack lock: the boot helper's check-and-recreate and the playbook's compose up + heal never run at once.
+# Both use flock on this file and give up after ai_stack_lock_wait seconds. The playbook holds it through a
+# transient unit (homelab-ai-stack-lock-*) that systemd stops after ai_stack_lock_hold_max seconds at the
+# latest, so a play that dies mid-run can't keep the lock forever.
+# Directly in /run (root-only, 0755), not /run/lock: that one is world-writable (1777) on Ubuntu, so any
+# local user could hold the lock or plant the file.
+ai_stack_lock_file: /run/homelab-ai-stack.lock
+ai_stack_lock_wait: 300
+# Long enough for the lock wait plus `compose up --wait`, with 2 min to spare (1020 s with the defaults).
+# If it ever runs out mid-run (a very slow first image pull), the lock is only released early.
+ai_stack_lock_hold_max: "{{ ai_stack_lock_wait | int + ai_stack_compose_wait_timeout | int + 120 }}"

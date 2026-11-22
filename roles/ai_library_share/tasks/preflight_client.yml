@@ -1,0 +1,119 @@
+---
+# Client inputs, checked before anything is written (read-only).
+- name: Preflight | client inputs
+  ansible.builtin.assert:
+    that:
+      - tailnet_ip | default('') is match('^[0-9]{1,3}([.][0-9]{1,3}){3}$')
+      - gaming_pc_tailnet_ip | default('') is match('^[0-9]{1,3}([.][0-9]{1,3}){3}$')
+      - ai_library_share_mount_user is match('^[a-z_][a-z0-9_-]*$')
+      - ai_library_share_mount_user not in ['root', 'docker']
+      - ai_library_share_mount_point is abs
+      - ai_library_share_mount_options_extra is sequence and ai_library_share_mount_options_extra is not string
+      - ai_library_share_mount_options_extra | reject('match', '^[a-z0-9_.]+(=[A-Za-z0-9_.:/-]+)?$') | list | length == 0
+      # Nothing that undoes a contract option or the symlink ban, and no second set of credentials.
+      - >-
+        ai_library_share_mount_options_extra | map('regex_replace', '=.*$', '') | list
+        | intersect(ai_library_share_mount_options_refused + ['username', 'user', 'password', 'pass', 'credentials',
+          'uid', 'gid', 'file_mode', 'dir_mode', 'vers', 'sec', 'domain']) | length == 0
+      # Symlinks (Lead after Reviewer G): symlink=none only, never reparse=.
+      - ai_library_share_mount_options | select('match', '^symlink=') | reject('equalto', 'symlink=none') | list | length == 0
+      - "'symlink=none' in ai_library_share_mount_options"
+      - ai_library_share_mount_options | select('match', '^reparse(=|$)') | list | length == 0
+    fail_msg: >-
+      Check the ai_library_share client inputs: tailnet_ip (ai-box) and gaming_pc_tailnet_ip must be IPv4
+      literals in host_vars; the mount user is a plain account (not root or docker); the mount point is
+      absolute; ai_library_share_mount_options_extra is a list of plain options that neither repeats a
+      contract option nor undoes one ({{ ai_library_share_mount_options_refused | join(', ') }}); symlink=none
+      stays and no other symlink= or any reparse= is accepted.
+    quiet: true
+
+# The unit names are fixed in vars; they must be what systemd derives from the mount point.
+- name: Preflight | the mount unit name systemd expects
+  ansible.builtin.command:
+    argv: [systemd-escape, --path, --suffix=mount, "{{ ai_library_share_mount_point }}"]
+  register: ai_library_share_escaped
+  changed_when: false
+  check_mode: false
+
+- name: Preflight | the role's unit names match the mount point
+  ansible.builtin.assert:
+    that:
+      - ai_library_share_escaped.stdout | trim == ai_library_share_mount_unit
+      - ai_library_share_automount_unit == ai_library_share_mount_unit | regex_replace('[.]mount$', '.automount')
+    fail_msg: >-
+      systemd names {{ ai_library_share_mount_point }} {{ ai_library_share_escaped.stdout | trim }}, the role
+      writes {{ ai_library_share_mount_unit }}.
+    quiet: true
+
+# The ailib password from the server play (hostvars[<pc>].ai_library_share_password | default('')).
+# no_log on every task that sees it. No password (PC off or play skipped): the credentials file
+# already on ai-box is kept, and it must exist. In check mode before any real run there may be neither.
+- name: Preflight | was a password passed in (a boolean the later tasks use, never the value)
+  ansible.builtin.set_fact:
+    ai_library_share_password_given: "{{ ai_library_share_client_password | default('') | length > 0 }}"
+  no_log: true
+
+- name: Preflight | the credentials file already on ai-box
+  ansible.builtin.stat:
+    path: "{{ ai_library_share_credentials_file }}"
+    follow: false
+    get_checksum: false
+  register: ai_library_share_credentials_stat
+
+- name: Preflight | a well-formed password was passed in, or ai-box keeps the credentials it has
+  ansible.builtin.assert:
+    that:
+      - ai_library_share_client_password | default('') is string
+      - >-
+        ai_library_share_client_password | default('') is match('^[A-Za-z0-9]{32,}$')
+        or (ai_library_share_client_password | default('') == ''
+            and (ai_library_share_credentials_stat.stat.isreg | default(false) or ansible_check_mode))
+    fail_msg: >-
+      No usable ailib password: the server play exports it from the gaming PC (tasks_from: export_credentials),
+      and {{ ai_library_share_credentials_file }} doesn't exist yet to fall back on. Run both plays once with the
+      gaming PC on. The password is never set in inventory.
+    quiet: true
+  no_log: true
+
+- name: Preflight | note that the existing credentials are kept
+  ansible.builtin.debug:
+    msg: >-
+      No ailib password was exported this run (server play skipped, failed or unreachable):
+      {{ ai_library_share_credentials_file }} is kept as it is.
+  when: not ai_library_share_password_given | bool
+
+- name: Preflight | the role's directories are absent or real directories
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    ai_library_share_guard_dirs:
+      - "{{ ai_library_share_client_dir }}"
+
+# The mount point must be absent, an empty real directory, or already the automount (lstat on the
+# path itself never triggers it).
+- name: Preflight | stat the mount point without following links
+  ansible.builtin.stat:
+    path: "{{ ai_library_share_mount_point }}"
+    follow: false
+    get_checksum: false
+  register: ai_library_share_mount_point_stat
+
+- name: Preflight | the mount point is not a symlink or a file
+  ansible.builtin.assert:
+    that:
+      - not ai_library_share_mount_point_stat.stat.exists or (ai_library_share_mount_point_stat.stat.isdir
+        and not ai_library_share_mount_point_stat.stat.islnk)
+    fail_msg: "{{ ai_library_share_mount_point }} exists but isn't a directory; remove it by hand."
+    quiet: true
+
+- name: Preflight | the library sources exist on the controller (module L)
+  ansible.builtin.stat:
+    path: "{{ ai_library_share_lib_src_dir }}/core.py"
+  register: ai_library_share_src_stat
+  delegate_to: localhost
+  become: false
+
+- name: Preflight | require the library sources
+  ansible.builtin.assert:
+    that: ai_library_share_src_stat.stat.exists
+    fail_msg: "Missing on the controller: {{ ai_library_share_lib_src_dir }}/core.py"
+    quiet: true

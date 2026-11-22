@@ -1,0 +1,21 @@
+---
+# Live bug 2026-10-28: push failed on Noah's iPhone because py_vapid refused the subject. Sign one VAPID token with the
+# real vapid.json (its key and its subject), the way pywebpush does, under the deployed venv. no_log: the script
+# prints only "OK" or "FAIL <exception type>", but it reads the key.
+- name: Verify | sign a VAPID token with the real key and subject (py_vapid, as pywebpush does)
+  ansible.builtin.command:
+    argv:
+      - "{{ mission_control_venv_python }}"
+      - -I
+      - -B
+      - "{{ mission_control_lib_dir }}/vapid_sign_check.py"
+      - "{{ mission_control_vapid_file }}"
+  register: mission_control_vapid_sign
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Verify | the VAPID token signs
+  ansible.builtin.include_tasks: verify_vapid_sign_assert.yml
+  vars:
+    mission_control_vapid_sign_out: "{{ mission_control_vapid_sign.stdout | default('') }}"

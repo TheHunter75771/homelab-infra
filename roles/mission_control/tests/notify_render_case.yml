@@ -1,0 +1,38 @@
+---
+# One B2/B1 render case for test_mission_control.yml: render_case = {name, vars, want}. config.json.j2 is rendered
+# with the case's vars (every other B2/B1 variable at its default) next to the good config.json that config_file.yml
+# wrote with the defaults. The render must keep every one of those keys and values, and add exactly `want`. The
+# render task is no_log, like the role's own (the senders' hashes); `want` holds hashes, and loop items are printed
+# by their label only (run.sh greps the output for each token's hash).
+- name: Notify | render config.json for {{ render_case.name }}
+  ansible.builtin.template:
+    src: "{{ playbook_dir | dirname }}/templates/config.json.j2"
+    dest: "{{ test_tmp }}/notify-render.json"
+    mode: "0600"
+  vars:
+    mission_control_notify_tokens: "{{ render_case.vars.get('mission_control_notify_tokens', {}) }}"
+    mission_control_notify_allow_from: "{{ render_case.vars.get('mission_control_notify_allow_from', {}) }}"
+    mission_control_quiet_hours: "{{ render_case.vars.get('mission_control_quiet_hours', none) }}"
+    mission_control_notify_dedupe_seconds: "{{ render_case.vars.get('mission_control_notify_dedupe_seconds', none) }}"
+    mission_control_notify_rate_per_hour: "{{ render_case.vars.get('mission_control_notify_rate_per_hour', none) }}"
+    mission_control_app_links: "{{ render_case.vars.get('mission_control_app_links', []) }}"
+  diff: false
+  no_log: true
+
+- name: Notify | the render holds exactly the keys set for {{ render_case.name }}
+  vars:
+    text: "{{ lookup('ansible.builtin.file', test_tmp ~ '/notify-render.json') }}"
+    good_text: "{{ lookup('ansible.builtin.file', test_tmp ~ '/etc/mission-control/config.json') }}"
+    cfg: "{{ text | from_json }}"
+    good: "{{ good_text | from_json }}"
+    extra: "{{ cfg | dict2items | rejectattr('key', 'in', good.keys() | list) | items2dict }}"
+    kept: "{{ cfg | dict2items | selectattr('key', 'in', good.keys() | list) | items2dict }}"
+  ansible.builtin.assert:
+    that:
+      - kept == good
+      - extra == render_case.want
+      # Nothing set: byte for byte the file MC1 loads today.
+      - render_case.want != {} or text == good_text
+    # Key names only (the values hold the senders' hashes).
+    fail_msg: "{{ render_case.name }}: added keys {{ extra.keys() | list | sort }}, want {{ render_case.want.keys() | list | sort }}"
+    quiet: true

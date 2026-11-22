@@ -1,0 +1,31 @@
+---
+# One refusal case: case = {name, vars, task, tasks_from (default main)}. The case's vars replace the good inputs;
+# the run must fail at exactly case.task.
+- name: Refuses {{ case.name }}
+  block:
+    - name: Run the role with {{ case.name }}
+      ansible.builtin.include_role:
+        name: unit_hardening
+        tasks_from: "{{ case.tasks_from | default('main') }}"
+      vars:
+        unit_hardening_units: "{{ case.vars.get('unit_hardening_units', uh_test_good) }}"
+        unit_hardening_remove: "{{ case.vars.get('unit_hardening_remove', []) }}"
+        unit_hardening_verify_settle: "{{ case.vars.get('unit_hardening_verify_settle', 0) }}"
+        unit_hardening_scan_max_files: "{{ case.vars.get('unit_hardening_scan_max_files', 4000) }}"
+        unit_hardening_systemctl_via_bus: "{{ case.vars.get('unit_hardening_systemctl_via_bus', uh_test_via_bus) }}"
+        unit_hardening_busy_urls: "{{ case.vars.get('unit_hardening_busy_urls', uh_test_busy_urls) }}"
+        unit_hardening_allow_busy_restart: "{{ case.vars.get('unit_hardening_allow_busy_restart', false) }}"
+
+    - name: Not reached
+      ansible.builtin.set_fact:
+        uh_test_refused_by: ""
+  rescue:
+    - name: Note which task refused
+      ansible.builtin.set_fact:
+        uh_test_refused_by: "{{ ansible_failed_task.name }}"
+
+- name: Refused by the expected check for {{ case.name }}
+  ansible.builtin.assert:
+    that: uh_test_refused_by == case.task
+    fail_msg: "{{ case.name }}: refused by '{{ uh_test_refused_by }}', expected '{{ case.task }}'"
+    quiet: true

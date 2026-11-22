@@ -1,0 +1,30 @@
+---
+# One refusal case for test_mc_notify_client.yml: case = {name, vars, task}. The case's vars are passed as include
+# params (they outrank the play's vars_files and set_fact values); every other input keeps its good value. Bad
+# tokens are throwaway literals; the good fallback is run.sh's canary.
+- name: Preflight refuses {{ case.name }}
+  block:
+    - name: Main with {{ case.name }}
+      ansible.builtin.include_tasks: ../tasks/main.yml
+      vars:
+        mc_notify_client_scope: "{{ case.vars.get('mc_notify_client_scope', 'system') }}"
+        mc_notify_client_home: "{{ case.vars.get('mc_notify_client_home', test_tmp ~ '/refused/home') }}"
+        mc_notify_client_url: "{{ case.vars.get('mc_notify_client_url', 'https://ai-box.example.ts.net:8443/api/notify') }}"
+        mc_notify_client_token: "{{ case.vars.get('mc_notify_client_token', test_token) }}"
+        mc_notify_client_cli: "{{ case.vars.get('mc_notify_client_cli', test_tmp ~ '/refused/mc-notify') }}"
+        mc_notify_client_config_dir: "{{ case.vars.get('mc_notify_client_config_dir', test_tmp ~ '/refused/etc') }}"
+        mc_notify_client_unit_dir: "{{ case.vars.get('mc_notify_client_unit_dir', test_tmp ~ '/refused/units') }}"
+
+    - name: Not reached
+      ansible.builtin.set_fact:
+        test_refused_by: ""
+  rescue:
+    - name: Note which task refused
+      ansible.builtin.set_fact:
+        test_refused_by: "{{ ansible_failed_task.name }}"
+
+- name: Refused by the expected check for {{ case.name }}
+  ansible.builtin.assert:
+    that: test_refused_by == case.task
+    fail_msg: "{{ case.name }}: refused by '{{ test_refused_by }}', expected '{{ case.task }}'"
+    quiet: true

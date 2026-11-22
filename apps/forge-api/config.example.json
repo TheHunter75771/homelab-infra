@@ -1,0 +1,8 @@
+{
+  "library_root": "/mnt/ai-library",
+  "bind": "172.20.0.1",
+  "port": 879,
+  "allowed_peers": ["172.20.0.4"],
+  "token_file": "/etc/forge-api/token",
+  "approver_user_id": "00000000-0000-0000-0000-000000000000"
+}

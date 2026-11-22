@@ -1,0 +1,5 @@
+# {{ ansible_managed }}
+# sudo I/O logs of {{ operator_acct.name }}: root-only, deleted after {{ operator_iolog_retention_days }} days.
+# The sequence file is never aged out (a reset counter would reuse session IDs).
+d {{ operator_acct.iolog_dir }} 0700 root root {{ operator_iolog_retention_days }}d
+x {{ operator_acct.iolog_dir }}/seq

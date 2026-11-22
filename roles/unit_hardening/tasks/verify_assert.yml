@@ -1,0 +1,204 @@
+---
+# The verify's assertions over uh_v (verify.yml collects it live; the tests feed canned readings):
+#   uh_v.units[]: {unit, restart, root, via_bus, user, run_allow, advisory, pre: <preflight show>,
+#                  s1/s2: <the two verify reads>, probe: <ns_probe.py unit>}
+#   uh_v.sweep: {<user>: {uid, procs: [{pid, comm, socket, cgroup}], error}} (ns_probe.py's same-uid sweep)
+#   uh_v.tailscaled: <tailscaled's second read>; uh_v.host: <ns_probe.py host>
+#   uh_v.found: this role's drop-ins on disk, relative to the unit dir (<unit>.d/<name>); uh_v.tmpfiles: the entry
+- name: Verify | each unit's drop-in is loaded (systemctl show DropInPaths)
+  ansible.builtin.assert:
+    that:
+      - item.s2.LoadState | default('') == 'loaded'
+      - (unit_hardening_unit_dir ~ '/' ~ item.unit ~ '.d/' ~ unit_hardening_dropin_name) in (item.s2.DropInPaths | default('')).split()
+    fail_msg: "{{ item.unit }}: LoadState={{ item.s2.LoadState | default('?') }}, DropInPaths={{ item.s2.DropInPaths | default('?') }}"
+    quiet: true
+  loop: "{{ uh_v.units }}"
+  loop_control:
+    label: "{{ item.unit }}"
+
+- name: Verify | each unit hides /run/tailscale (systemctl show InaccessiblePaths)
+  ansible.builtin.assert:
+    that: unit_hardening_hidden_paths | difference((item.s2.InaccessiblePaths | default('')).split()) | length == 0
+    fail_msg: "{{ item.unit }}: InaccessiblePaths={{ item.s2.InaccessiblePaths | default('?') }}"
+    quiet: true
+  loop: "{{ uh_v.units }}"
+  loop_control:
+    label: "{{ item.unit }}"
+
+- name: Verify | each root unit runs in its own PID namespace (PrivatePIDs=yes; Q6-1)
+  ansible.builtin.assert:
+    that: not item.root or item.s2.PrivatePIDs | default('') == 'yes'
+    fail_msg: "{{ item.unit }} runs as root and PrivatePIDs={{ item.s2.PrivatePIDs | default('?') }}"
+    quiet: true
+  loop: "{{ uh_v.units }}"
+  loop_control:
+    label: "{{ item.unit }}"
+
+- name: Verify | each root unit's /run is a read-only tmpfs holding only its run_allow (Q8-1)
+  vars:
+    uh_binds: >-
+      {{ (item.s2.BindPaths | default('') | unit_hardening_bind_sources
+          + item.s2.BindReadOnlyPaths | default('') | unit_hardening_bind_sources)
+         | select('match', '^/run(/|$)') | sort }}
+  ansible.builtin.assert:
+    that: >-
+      not item.root
+      or ('/run:ro' in (item.s2.TemporaryFileSystem | default('')).split() and uh_binds == item.run_allow | sort)
+    fail_msg: >-
+      {{ item.unit }}: TemporaryFileSystem={{ item.s2.TemporaryFileSystem | default('?') }}, /run binds
+      {{ uh_binds | to_json }}, run_allow {{ item.run_allow | to_json }}
+    quiet: true
+  loop: "{{ uh_v.units }}"
+  loop_control:
+    label: "{{ item.unit }}"
+
+- name: Verify | systemctl uses the D-Bus system bus where declared (SYSTEMCTL_FORCE_BUS=1)
+  ansible.builtin.assert:
+    that: not item.via_bus or 'SYSTEMCTL_FORCE_BUS=1' in (item.s2.Environment | default('')).split()
+    fail_msg: "{{ item.unit }}: Environment={{ item.s2.Environment | default('?') }}"
+    quiet: true
+  loop: "{{ uh_v.units }}"
+  loop_control:
+    label: "{{ item.unit }}"
+
+- name: Verify | every unit that was active before the change is still active (both reads)
+  ansible.builtin.assert:
+    that: >-
+      item.pre.ActiveState | default('') != 'active'
+      or (item.s1.ActiveState | default('') == 'active' and item.s2.ActiveState | default('') == 'active')
+    fail_msg: >-
+      {{ item.unit }} was active before the change and now reads {{ item.s1.ActiveState | default('?') }} /
+      {{ item.s2.ActiveState | default('?') }} ({{ item.s2.SubState | default('?') }}): see journalctl -u {{ item.unit }}.
+      To back out: remove {{ unit_hardening_unit_dir }}/{{ item.unit }}.d/{{ unit_hardening_dropin_name }}
+      (unit_hardening_remove), daemon-reload, start it.
+    quiet: true
+  loop: "{{ uh_v.units }}"
+  loop_control:
+    label: "{{ item.unit }}"
+
+- name: Verify | no running unit restarted between the two reads (same MainPID, same NRestarts)
+  ansible.builtin.assert:
+    that: >-
+      item.s1.ActiveState | default('') != 'active' or item.s1.MainPID | default('0') | int == 0
+      or (item.s1.MainPID == item.s2.MainPID and item.s1.NRestarts | default('') == item.s2.NRestarts | default(''))
+    fail_msg: >-
+      {{ item.unit }} looks like it is crash-looping: MainPID {{ item.s1.MainPID | default('?') }} ->
+      {{ item.s2.MainPID | default('?') }}, NRestarts {{ item.s1.NRestarts | default('?') }} -> {{ item.s2.NRestarts | default('?') }}
+    quiet: true
+  loop: "{{ uh_v.units }}"
+  loop_control:
+    label: "{{ item.unit }}"
+
+- name: Verify | each running service's process can't see tailscaled.sock (/proc/<MainPID>/root)
+  vars:
+    uh_running: "{{ item.s1.MainPID | default('0') | int > 0 and item.s1.Type | default('') != 'oneshot' }}"
+  ansible.builtin.assert:
+    that: >-
+      not (uh_running | bool)
+      or (item.probe.pid == item.s1.MainPID | int and item.probe.error == '' and item.probe.root_ok
+          and item.probe.socket == 'absent'
+          and ((item.root and item.probe.own_pidns and item.probe.run_extra is defined
+                and item.probe.run_extra | length == 0 and not item.probe.run_truncated)
+               or (not item.root and item.probe.dir_present and item.probe.mounted)))
+    fail_msg: >-
+      {{ item.unit }} (MainPID {{ item.s1.MainPID | default('?') }}): {{ item.probe | to_json }}.
+      {% if item.probe.socket != 'absent' and not item.restart %}It runs with restart: false and started before
+      the drop-in: restart it by hand (systemctl restart {{ item.unit }}) or set restart: true.
+      {% elif item.root %}A root unit needs its own PID namespace and a /run holding only its run_allow
+      (run_extra lists the rest).{% elif not item.probe.mounted %}No mount at {{ unit_hardening_tailscale_dir }} in
+      its namespace: the drop-in isn't in effect for this process.{% endif %}
+    quiet: true
+  loop: "{{ uh_v.units }}"
+  loop_control:
+    label: "{{ item.unit }}"
+
+# A oneshot caught mid-run keeps its old view (noted below); its processes are tolerated here only when every
+# process of that uid belongs to such a oneshot (then no other process of the uid exists to walk through them).
+- name: Verify | every process of each hardened non-root unit's user hides the socket (same-uid sweep; Q6-3)
+  vars:
+    uh_users: "{{ uh_v.units | rejectattr('root') | map(attribute='user') | unique | sort }}"
+    uh_inflight: >-
+      {{ uh_v.units | selectattr('s1.Type', 'defined') | selectattr('s1.Type', 'equalto', 'oneshot')
+         | selectattr('probe.pid', 'gt', 0) | rejectattr('probe.socket', 'equalto', 'absent')
+         | map(attribute='unit') | list }}
+    uh_bad: >-
+      {% set ns = namespace(out=[]) %}{% for user in uh_users %}{% set r = uh_v.sweep[user] | default({'error':
+      'not swept', 'procs': []}) %}{% if r.error %}{% set ns.out = ns.out + [user ~ ': ' ~ r.error] %}{% endif %}{%
+      set outside = r.procs | rejectattr('cgroup', 'in', uh_inflight | map('regex_replace', '^', '/system.slice/')
+      | list) | list %}{% for p in r.procs if p.socket != 'absent' and (p in outside or outside | length > 0) %}{%
+      set ns.out = ns.out + [user ~ ': pid ' ~ p.pid ~ ' (' ~ p.comm ~ ', ' ~ p.cgroup ~ ') sees the socket: '
+      ~ p.socket] %}{% endfor %}{% endfor %}{{ ns.out }}
+  ansible.builtin.assert:
+    that: uh_bad | length == 0
+    fail_msg: >-
+      {{ uh_bad | join('; ') }}. Any process of the same uid can reach tailscaled.sock through that process's
+      /proc/<pid>/root. Harden its unit too (or stop it), then converge again.
+    quiet: true
+
+- name: Verify | a oneshot that was mid-run keeps its old view until its next run
+  ansible.builtin.debug:
+    msg: >-
+      {% set busy = uh_v.units | selectattr('s1.Type', 'defined') | selectattr('s1.Type', 'equalto', 'oneshot')
+         | selectattr('probe.pid', 'gt', 0) | rejectattr('probe.socket', 'equalto', 'absent') | map(attribute='unit') | list %}
+      {{ ('in flight, takes effect at the next run: ' ~ busy | join(', ')) if busy else 'no oneshot was mid-run' }}
+
+- name: Verify | the host side is real (tailscaled.sock is a socket, /run/tailscale a directory)
+  ansible.builtin.assert:
+    that:
+      - uh_v.host.socket_is_socket
+      - uh_v.host.dir_is_dir
+    fail_msg: >-
+      the positive control failed ({{ uh_v.host | to_json }}): with no socket on the host, "the unit can't see it"
+      proves nothing. Is tailscaled running?
+    quiet: true
+
+- name: Verify | tailscaled keeps /run/tailscale (RuntimeDirectoryPreserve=yes from this role's drop-in)
+  ansible.builtin.assert:
+    that:
+      - uh_v.tailscaled.LoadState | default('') == 'loaded'
+      - uh_v.tailscaled.RuntimeDirectoryPreserve | default('') == 'yes'
+      - >-
+        (unit_hardening_unit_dir ~ '/' ~ unit_hardening_tailscaled_unit ~ '.d/' ~ unit_hardening_tailscaled_dropin_name)
+        in (uh_v.tailscaled.DropInPaths | default('')).split()
+    fail_msg: "{{ unit_hardening_tailscaled_unit }}: {{ uh_v.tailscaled | to_json }}"
+    quiet: true
+
+- name: Verify | tmpfiles.d creates /run/tailscale at boot
+  ansible.builtin.assert:
+    that: >-
+      ('d ' ~ unit_hardening_tailscale_dir ~ ' 0755 root root -') in uh_v.tmpfiles.splitlines()
+    fail_msg: "{{ unit_hardening_tmpfiles }} lacks the entry: {{ uh_v.tmpfiles | to_json }}"
+    quiet: true
+
+- name: Verify | this role's drop-in is on declared units only
+  vars:
+    uh_expected: >-
+      {{ unit_hardening_units | map(attribute='unit') | map('regex_replace', '$', '.d/' ~ unit_hardening_dropin_name) | sort }}
+  ansible.builtin.assert:
+    that: uh_v.found == uh_expected
+    fail_msg: >-
+      on disk: {{ uh_v.found | to_json }}; declared: {{ uh_expected | to_json }}. A unit dropped from
+      unit_hardening_units keeps its drop-in until it is listed in unit_hardening_remove.
+    quiet: true
+
+# Q8-1: a root unit's hiding is ADVISORY, never "protected", when it keeps the system bus (systemd can start an
+# unsandboxed unit for it: StartTransientUnit, polkit lets uid 0) or CAP_SYS_ADMIN (it can unmount its own /run
+# tmpfs and InaccessiblePaths mounts). The preflight names the reasons (uh_pre[unit].advisory).
+- name: Verify | how much each unit's hiding is worth
+  ansible.builtin.set_fact:
+    uh_protection: >-
+      {% set ns = namespace(out={}) %}{% for u in uh_v.units %}{% set ns.out = ns.out | combine({u.unit:
+      ('advisory (' ~ u.advisory ~ ')') if u.advisory else 'protected'}) %}{% endfor %}{{ ns.out }}
+
+- name: Verify | summary
+  ansible.builtin.debug:
+    msg: >-
+      {% for u in uh_v.units %}{{ u.unit }} [{{ uh_protection[u.unit] }}]: {{ u.s2.ActiveState }}/{{ u.s2.SubState
+      }}{% if u.probe.pid > 0 %}, pid {{ u.probe.pid }} sees the socket: {{ u.probe.socket }}{% else %}, not running
+      (takes effect at its next start){% endif %}{{ '' if loop.last else ' || ' }}{% endfor %}
+
+- name: Verify | ADVISORY units (root + system bus, or root + CAP_SYS_ADMIN)
+  ansible.builtin.debug:
+    msg: >-
+      {{ uh_protection | dict2items | selectattr('value', 'search', '^advisory') | map(attribute='key') | join(', ')
+         or 'none' }}

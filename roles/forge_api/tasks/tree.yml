@@ -1,0 +1,81 @@
+---
+# Install one Python package into a dedicated directory and prune everything else there.
+# Params: forge_api_tree_src (controller dir), forge_api_tree_dest (absolute, basename must be
+# forge_api_tree_name, since it is pruned). Only *.py files are installed. Never deployed: symlinks,
+# __pycache__, test/tests and node_modules anywhere in the tree.
+- name: Tree | the destination is a dedicated directory for {{ forge_api_tree_name }}
+  ansible.builtin.assert:
+    that:
+      - forge_api_tree_dest is abs
+      - forge_api_tree_dest | basename == forge_api_tree_name
+    fail_msg: "{{ forge_api_tree_dest }} must be an absolute path ending in /{{ forge_api_tree_name }} (it is pruned)."
+    quiet: true
+
+- name: Tree | source files of {{ forge_api_tree_name }}
+  vars:
+    forge_api_tree_entries: "{{ query('community.general.filetree', forge_api_tree_src) }}"
+    forge_api_tree_skip: '(^|/)(__pycache__|tests?|node_modules)(/|$)'
+  ansible.builtin.set_fact:
+    forge_api_tree_files: >-
+      {{ forge_api_tree_entries | selectattr('state', 'equalto', 'file') | map(attribute='path')
+         | select('search', '[.]py$') | reject('search', forge_api_tree_skip) | sort }}
+    forge_api_tree_dirs: >-
+      {{ forge_api_tree_entries | selectattr('state', 'equalto', 'directory') | map(attribute='path')
+         | reject('search', forge_api_tree_skip) | sort }}
+
+- name: Tree | there are files to install for {{ forge_api_tree_name }}
+  ansible.builtin.assert:
+    that: forge_api_tree_files | length > 0
+    fail_msg: No *.py files under {{ forge_api_tree_src }}.
+    quiet: true
+
+- name: Tree | the destination and its subdirectories are real directories (before any write)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    forge_api_guard_dirs: >-
+      {{ [forge_api_tree_dest] + (forge_api_tree_dirs | map('regex_replace', '^', forge_api_tree_dest ~ '/') | list) }}
+
+- name: Tree | directories of {{ forge_api_tree_name }}
+  ansible.builtin.file:
+    path: "{{ (forge_api_tree_dest ~ '/' ~ item) | regex_replace('/$', '') }}"
+    state: directory
+    owner: "{{ forge_api_owner }}"
+    group: "{{ forge_api_owner }}"
+    mode: "0755"
+  loop: "{{ [''] + forge_api_tree_dirs }}"
+
+- name: Tree | files of {{ forge_api_tree_name }}
+  ansible.builtin.copy:
+    src: "{{ forge_api_tree_src }}/{{ item }}"
+    dest: "{{ forge_api_tree_dest }}/{{ item }}"
+    owner: "{{ forge_api_owner }}"
+    group: "{{ forge_api_owner }}"
+    mode: "0644"
+    follow: false
+  loop: "{{ forge_api_tree_files }}"
+  notify: Restart forge-api
+
+- name: Tree | the destination is still a real directory (before the find and prune)
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    forge_api_guard_dirs: >-
+      {{ [forge_api_tree_dest] + (forge_api_tree_dirs | map('regex_replace', '^', forge_api_tree_dest ~ '/') | list) }}
+
+- name: Tree | installed files of {{ forge_api_tree_name }}
+  ansible.builtin.find:
+    paths: "{{ forge_api_tree_dest }}"
+    recurse: true
+    follow: false
+    file_type: any
+    hidden: true
+  register: forge_api_tree_found
+
+- name: Tree | anything else is removed from {{ forge_api_tree_name }}
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ forge_api_tree_found.files | map(attribute='path') | reject('in', forge_api_tree_wanted) | sort }}"
+  vars:
+    forge_api_tree_wanted: >-
+      {{ (forge_api_tree_dirs + forge_api_tree_files) | map('regex_replace', '^', forge_api_tree_dest ~ '/') | list }}
+  notify: Restart forge-api

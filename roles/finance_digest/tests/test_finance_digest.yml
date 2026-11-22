@@ -1,0 +1,716 @@
+---
+# Offline test for role finance_digest (no root, no systemd changes, nothing applied to this machine). Run it
+# through tests/run.sh (it loads the role's filter plugins, puts the fake systemd-run first on PATH, passes a
+# canary Notion token, and greps the -vvv --diff output for it). It runs the role's own task files against a
+# scratch dir:
+#   0. the defaults, and the fdigest account task's exact attributes (groups: rgate only, never docker);
+#   1. preflight.yml: passes with Notion off and on against a scratch library on the scratch dir's real mount;
+#      the IP allow/deny lists for both; refuses bad inputs (Money Hub URL, tailnet address, Notion half-set,
+#      IP filter, broker ranges reaching SearXNG, library paths and mount, sources, the library group);
+#   2. install.yml: D's launcher and package and the library, from scratch copies with junk planted, run twice
+#      with strays in between (pruned), a third time changing nothing; symlinked directories refused;
+#   3. config.yml: exactly D's keys, 0640 in a 0750 dir, validated with D's loader (which refuses bad configs);
+#      notion.json present (0640, D's reader accepts it) with Notion on, absent with Notion off; a symlinked
+#      config dir refused;
+#   4. the units: rendered with the real paths, systemd-analyze verify clean, the sandbox list exactly, the IP
+#      filter for Notion off / on / a narrowed broker range, the timer's schedule;
+#   5. verify.yml with the fake systemd-run: the transient unit gets every sandbox property; a good dry run
+#      passes; a failing one and one without the freshness line are refused; the entry never reaches the log.
+- name: Role finance_digest deploys a sandboxed, IP-filtered daily digest
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../defaults/main.yml
+    - ../vars/main.yml
+  vars:
+    ansible_managed: Ansible managed
+    test_tmp: ""
+    test_canary: ""
+    test_repo: "{{ playbook_dir }}/../../.."
+    # Synthetic tailnet addresses (inside 100.64.0.0/10; not real hosts).
+    moneyhub_url: http://100.64.0.1:8710
+    tailnet_ip: 100.64.0.2
+    test_page_id: 0123456789abcdef0123456789abcdef
+  tasks:
+    - name: The test runs through tests/run.sh
+      ansible.builtin.assert:
+        that:
+          - test_tmp is abs
+          - test_canary | length == 64
+        fail_msg: Run this through roles/finance_digest/tests/run.sh.
+        quiet: true
+
+    - name: The role's defaults (before any test override)
+      ansible.builtin.assert:
+        that:
+          - finance_digest_user == 'fdigest' and finance_digest_library_group == 'rgate'
+          - finance_digest_app_dir == '/opt/finance-digest'
+          - finance_digest_config_file == '/etc/finance-digest/config.json'
+          - finance_digest_notion_file == '/etc/finance-digest/notion.json'
+          - finance_digest_library_root == '/srv/ai-library'
+          - finance_digest_finance_dir == '/srv/ai-library/50-finance'
+          - finance_digest_sentinel == '/srv/ai-library/.ai-library-sentinel'
+          - finance_digest_timezone == 'America/New_York' and finance_digest_ai_summary is sameas true
+          - finance_digest_on_calendar == '*-*-* 09:30:00 America/New_York'
+          - finance_digest_randomized_delay == 120
+          - finance_digest_broker_port | int == 11434
+          - finance_digest_broker_url == 'http://100.64.0.2:11434'
+          - finance_digest_notion_token == '' and finance_digest_notion_page_id == ''
+          - not finance_digest_notion_on | bool
+          - finance_digest_launcher == '/opt/finance-digest/finance-digest'
+        quiet: true
+
+    # ---- 0. the account -----------------------------------------------------------------------------------
+    - name: Read the role's account tasks
+      ansible.builtin.set_fact:
+        fd_test_base: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../tasks/base.yml') | from_yaml }}"
+
+    - name: The fdigest user and group tasks set exactly the agreed attributes (§12.18.1)
+      vars:
+        my_user: "{{ (fd_test_base | select('contains', 'ansible.builtin.user') | first)['ansible.builtin.user'] }}"
+        my_group: "{{ (fd_test_base | select('contains', 'ansible.builtin.group') | first)['ansible.builtin.group'] }}"
+        groups_check: "{{ (fd_test_base | selectattr('name', 'search', 'exactly its own group') | first)['ansible.builtin.assert'] }}"
+      ansible.builtin.assert:
+        that:
+          - fd_test_base | select('contains', 'ansible.builtin.user') | list | length == 1
+          - my_user.keys() | sort == ['append', 'create_home', 'group', 'groups', 'home', 'name', 'shell', 'system']
+          # The raw task text names the role's variables (built here so the test itself holds no template).
+          - my_user.name == ('{' ~ '{ finance_digest_user }' ~ '}') and my_user.group == my_user.name
+          - my_user.groups == [('{' ~ '{ finance_digest_library_group }' ~ '}')]
+          - my_user.append is sameas false
+          - my_user.system is sameas true and my_user.create_home is sameas false
+          - my_user.shell == '/usr/sbin/nologin' and my_user.home == '/nonexistent'
+          - my_group.keys() | sort == ['name', 'system'] and my_group.system is sameas true
+          - my_group.name == my_user.name
+          # The read-only check: `id -Gn fdigest` split must equal exactly [fdigest, rgate].
+          - groups_check.that == 'finance_digest_user_groups.stdout.split() == [finance_digest_user, finance_digest_library_group]'
+        fail_msg: "{{ my_user }} / {{ my_group }}"
+        quiet: true
+
+    # ---- scratch sources and library ------------------------------------------------------------------------
+    - name: Scratch sources with never-deployed junk, a fake launcher for verify, and a scratch library
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          s="{{ test_tmp }}/src"
+          mkdir -p "$s/finance-digest" "$s/skill-library"
+          cp -r "{{ test_repo }}/apps/finance-digest/." "$s/finance-digest/"
+          # A nested package, so the install covers a subdirectory (guards, pruning). D has none today.
+          mkdir -p "$s/finance-digest/finance_digest/sub"
+          echo '"""nested"""' > "$s/finance-digest/finance_digest/sub/__init__.py"
+          cp -r "{{ test_repo }}/apps/skill-library/library" "$s/skill-library/"
+          for p in "$s/finance-digest/finance_digest" "$s/skill-library/library"; do
+            mkdir -p "$p/__pycache__" "$p/tests" "$p/test" "$p/node_modules/x"
+            echo junk > "$p/__pycache__/m.cpython-314.pyc"
+            echo junk > "$p/tests/test_m.py"
+            echo junk > "$p/test/test_n.py"
+            echo junk > "$p/node_modules/x/y.py"
+            echo junk > "$p/README.md"
+            echo junk > "$p/notes.txt"
+          done
+          lib="{{ test_tmp }}/lib/ai-library"
+          mkdir -p "$lib/50-finance"
+          echo sentinel > "$lib/.ai-library-sentinel"
+          l="{{ test_tmp }}/lib"
+          ln -s "$lib" "$l/link"
+          mkdir -p "$l/nosentinel/50-finance"
+          mkdir -p "$l/linksentinel/50-finance" && ln -s "$lib/.ai-library-sentinel" "$l/linksentinel/.ai-library-sentinel"
+          mkdir -p "$l/nofinance" && echo sentinel > "$l/nofinance/.ai-library-sentinel"
+          mkdir -p "$l/linkfinance" && echo sentinel > "$l/linkfinance/.ai-library-sentinel" && ln -s "$lib/50-finance" "$l/linkfinance/50-finance"
+          # The fake digest for verify.yml: its behaviour comes from a mode file beside it.
+          f="{{ test_tmp }}/fake"
+          mkdir -p "$f"
+          cat > "$f/finance-digest" <<'PY'
+          import os, sys
+          here = os.path.dirname(os.path.realpath(__file__))
+          mode = open(os.path.join(here, "mode")).read().strip()
+          assert sys.argv[1:] == ["--config", sys.argv[2], "run", "--dry-run"], sys.argv
+          if mode == "fail":
+              print("ERROR finance_digest: Money Hub unreachable", file=sys.stderr)
+              sys.exit(2)
+          print("## 2026-10-27\n")
+          if mode == "good":
+              print("Data freshness: last good sync 2026-10-27 09:00; last attempt 2026-10-27 09:00; sync ok.\n")
+          print("| Account | Balance |\n|---|---|\n| Checking | BALANCE-CANARY-" + open(os.path.join(here, "canary")).read().strip() + " |\n")
+          print("generated by finance-digest")
+          PY
+          sed -i 's/^          //' "$f/finance-digest"
+          python3 -c 'import secrets; print(secrets.token_hex(16))' > "$f/canary"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Where the scratch library lives (its real mount; tests/run.sh checks it isn't /)
+      ansible.builtin.command:
+        argv: [findmnt, --noheadings, --first-only, --output, TARGET, --target, "{{ test_tmp }}"]
+      register: fd_test_mount
+      changed_when: false
+
+    - name: Point the role at the scratch dir, and the good values every refusal case starts from
+      ansible.builtin.set_fact:
+        finance_digest_pkg_src: "{{ test_tmp }}/src/finance-digest/finance_digest"
+        finance_digest_launcher_src: "{{ test_tmp }}/src/finance-digest/finance-digest"
+        finance_digest_library_src_dir: "{{ test_tmp }}/src/skill-library"
+        finance_digest_docker_defaults_file: "{{ test_repo }}/roles/docker/defaults/main.yml"
+        finance_digest_searxng_defaults_file: "{{ test_repo }}/roles/searxng/defaults/main.yml"
+        finance_digest_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        finance_digest_root_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        finance_digest_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
+        finance_digest_library_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
+        finance_digest_app_dir: "{{ test_tmp }}/opt/finance-digest"
+        finance_digest_config_dir: "{{ test_tmp }}/etc/finance-digest"
+        finance_digest_config_file: "{{ test_tmp }}/etc/finance-digest/config.json"
+        finance_digest_notion_file: "{{ test_tmp }}/etc/finance-digest/notion.json"
+        finance_digest_library_root: "{{ test_tmp }}/lib/ai-library"
+        finance_digest_library_mount: "{{ fd_test_mount.stdout | trim }}"
+        # The scratch dir is under /tmp: allow /tmp here (the default forbids it).
+        finance_digest_library_forbidden_re: '^/(home|root|run|proc|sys|dev|etc|usr|boot|bin|sbin|lib|lib64|opt|var)(/|$)'
+        test_mount: "{{ fd_test_mount.stdout | trim }}"
+        test_tmp_ok_re: '^/(home|root|run|proc|sys|dev|etc|usr|boot|bin|sbin|lib|lib64|opt|var)(/|$)'
+
+    # ---- 1. preflight -----------------------------------------------------------------------------------
+    - name: Preflight passes with Notion off, against the scratch library on its real mount
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+
+    - name: The IP filter with Notion off (role docker's range minus SearXNG's subnet, from their defaults)
+      vars:
+        containers: >-
+          {{ ['172.16.0.0/13', '172.24.0.0/14', '172.28.0.0/16', '172.29.0.0/20', '172.29.16.16/28', '172.29.16.32/27',
+              '172.29.16.64/26', '172.29.16.128/25', '172.29.17.0/24', '172.29.18.0/23', '172.29.20.0/22',
+              '172.29.24.0/21', '172.29.32.0/19', '172.29.64.0/18', '172.29.128.0/17', '172.30.0.0/15'] }}
+      ansible.builtin.assert:
+        that:
+          - finance_digest_docker_container_range == '172.16.0.0/12'
+          - finance_digest_searxng_subnet == '172.29.16.0/28'
+          - finance_digest_broker_ranges | sort == containers | sort
+          - finance_digest_moneyhub_ip == '100.64.0.1'
+          - finance_digest_ip_allow == ['100.64.0.1/32', '100.64.0.2/32'] + finance_digest_broker_ranges + ['127.0.0.53/32']
+          - finance_digest_ip_deny == ['any']
+        fail_msg: "{{ finance_digest_broker_ranges }} / {{ finance_digest_ip_allow }} / {{ finance_digest_ip_deny }}"
+        quiet: true
+
+    - name: The broker ranges cover the container range except SearXNG's subnet, and nothing else
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -I
+          - -c
+          - |
+            import ipaddress, json, sys
+            ranges = [ipaddress.ip_network(r) for r in json.loads(sys.argv[1])]
+            whole, cut = ipaddress.ip_network("172.16.0.0/12"), ipaddress.ip_network("172.29.16.0/28")
+            assert all(r.subnet_of(whole) and not r.overlaps(cut) for r in ranges)
+            assert sum(r.num_addresses for r in ranges) == whole.num_addresses - cut.num_addresses
+            for i in range(len(ranges)):
+                for j in range(i + 1, len(ranges)):
+                    assert not ranges[i].overlaps(ranges[j])
+            assert not any(ipaddress.ip_address("172.29.16.2") in r for r in ranges)
+            assert any(ipaddress.ip_address("172.20.0.5") in r for r in ranges)
+          - "{{ finance_digest_broker_ranges | to_json }}"
+      changed_when: false
+
+    - name: Preflight passes with Notion on
+      ansible.builtin.include_tasks: ../tasks/preflight.yml
+      vars:
+        finance_digest_notion_token: "{{ test_canary }}"
+        finance_digest_notion_page_id: "{{ test_page_id }}"
+
+    - name: The IP filter with Notion on (private and special ranges denied, the public internet open)
+      vars:
+        finance_digest_notion_token: "{{ test_canary }}"
+        finance_digest_notion_page_id: "{{ test_page_id }}"
+      ansible.builtin.assert:
+        that:
+          - finance_digest_notion_on | bool
+          - finance_digest_ip_deny == finance_digest_ip_deny_public
+          - finance_digest_ip_deny is superset(finance_digest_ip_deny_required)
+          - "'any' not in finance_digest_ip_deny and '0.0.0.0/0' not in finance_digest_ip_deny"
+          - finance_digest_ip_allow == ['100.64.0.1/32', '100.64.0.2/32'] + finance_digest_broker_ranges + ['127.0.0.53/32']
+        fail_msg: "{{ finance_digest_ip_deny }} / {{ finance_digest_ip_allow }}"
+        quiet: true
+
+    - name: The good values the refusal cases start from
+      ansible.builtin.set_fact:
+        test_good:
+          moneyhub_url: "{{ moneyhub_url }}"
+          tailnet_ip: "{{ tailnet_ip }}"
+          broker_ranges: "{{ finance_digest_broker_ranges }}"
+          ip_deny_public: "{{ finance_digest_ip_deny_public }}"
+          library_root: "{{ finance_digest_library_root }}"
+          library_mount: "{{ finance_digest_library_mount }}"
+          forbidden_re: "{{ finance_digest_library_forbidden_re }}"
+          library_group: "{{ finance_digest_library_group }}"
+          pkg_src: "{{ finance_digest_pkg_src }}"
+          launcher_src: "{{ finance_digest_launcher_src }}"
+
+    - name: Preflight refuses bad inputs
+      ansible.builtin.include_tasks: expect_preflight_refusal.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        # Money Hub's URL.
+        - name: no Money Hub URL
+          vars: {moneyhub_url: ""}
+          task: Preflight | Money Hub's URL is an http(s) origin on a tailnet IP literal
+        - name: a Money Hub hostname (the IP filter can't pin a name)
+          vars: {moneyhub_url: "http://moneyhub.example:8710"}
+          task: Preflight | Money Hub's URL is an http(s) origin on a tailnet IP literal
+        - name: a Money Hub address outside the tailnet
+          vars: {moneyhub_url: "http://192.0.2.10:8710"}
+          task: Preflight | Money Hub's URL is an http(s) origin on a tailnet IP literal
+        - name: a Money Hub URL with a path
+          vars: {moneyhub_url: "http://100.64.0.1:8710/api"}
+          task: Preflight | Money Hub's URL is an http(s) origin on a tailnet IP literal
+        - name: a Money Hub URL with user info
+          vars: {moneyhub_url: "http://u:p@100.64.0.1:8710"}
+          task: Preflight | Money Hub's URL is an http(s) origin on a tailnet IP literal
+        - name: a Money Hub URL with a query
+          vars: {moneyhub_url: "http://100.64.0.1:8710?x=1"}
+          task: Preflight | Money Hub's URL is an http(s) origin on a tailnet IP literal
+        - name: a file URL for Money Hub
+          vars: {moneyhub_url: "file:///etc/passwd"}
+          task: Preflight | Money Hub's URL is an http(s) origin on a tailnet IP literal
+        - name: a Money Hub address in a short form
+          vars: {moneyhub_url: "http://100.64.1:8710"}
+          task: Preflight | Money Hub's URL is an http(s) origin on a tailnet IP literal
+        - name: a Money Hub URL with a space
+          vars: {moneyhub_url: "http://100.64.0.1:8710 "}
+          task: Preflight | Money Hub's URL is an http(s) origin on a tailnet IP literal
+        # The broker and the settings.
+        - name: no tailnet address
+          vars: {tailnet_ip: ""}
+          task: Preflight | the broker's address, the settings and the schedule
+        - name: a tailnet address that isn't on the tailnet
+          vars: {tailnet_ip: 192.0.2.20}
+          task: Preflight | the broker's address, the settings and the schedule
+        - name: broker port 0
+          vars: {finance_digest_broker_port: 0}
+          task: Preflight | the broker's address, the settings and the schedule
+        - name: ai_summary as a string
+          vars: {finance_digest_ai_summary: "yes"}
+          task: Preflight | the broker's address, the settings and the schedule
+        - name: a time zone with a space (it goes into OnCalendar)
+          vars: {finance_digest_timezone: "America/New York"}
+          task: Preflight | the broker's address, the settings and the schedule
+        - name: a resolver stub off loopback
+          vars: {finance_digest_dns_stub: 192.0.2.53}
+          task: Preflight | the broker's address, the settings and the schedule
+        - name: extra config overriding Money Hub's URL
+          vars: {finance_digest_config_extra: {moneyhub_url: "http://192.0.2.10:1"}}
+          task: Preflight | the broker's address, the settings and the schedule
+        - name: extra config moving the Notion file
+          vars: {finance_digest_config_extra: {notion_file: /tmp/n.json}}
+          task: Preflight | the broker's address, the settings and the schedule
+        # Notion.
+        - name: a Notion token without a page
+          vars: {finance_digest_notion_token: "{{ test_canary }}"}
+          task: Preflight | Notion is configured completely or not at all
+        - name: a Notion page without a token
+          vars: {finance_digest_notion_page_id: "{{ test_page_id }}"}
+          task: Preflight | Notion is configured completely or not at all
+        - name: a malformed Notion page id
+          vars: {finance_digest_notion_token: "{{ test_canary }}", finance_digest_notion_page_id: "not-a-page"}
+          task: Preflight | Notion is configured completely or not at all
+        - name: a Notion token with a space
+          vars: {finance_digest_notion_token: "{{ test_canary }} x", finance_digest_notion_page_id: "{{ test_page_id }}"}
+          task: Preflight | Notion is configured completely or not at all
+        # The IP filter.
+        - name: a broker range that allows everything
+          vars: {finance_digest_broker_ranges: ["0.0.0.0/0"]}
+          task: Preflight | the IP filter
+        - name: a broker range that isn't a network
+          vars: {finance_digest_broker_ranges: ["172.20.0.1/16"]}
+          task: Preflight | the IP filter
+        - name: no broker range
+          vars: {finance_digest_broker_ranges: []}
+          task: Preflight | the IP filter
+        - name: a broker range override that covers SearXNG's subnet (H5-1)
+          vars: {finance_digest_broker_ranges: ["172.16.0.0/12"]}
+          task: Preflight | no broker range reaches SearXNG's subnet
+        - name: a broker range override that is a host inside SearXNG's subnet (H5-1)
+          vars: {finance_digest_broker_ranges: ["172.20.3.0/24", "172.29.16.2/32"]}
+          task: Preflight | no broker range reaches SearXNG's subnet
+        - name: a broker range override that overlaps a moved SearXNG subnet (H5-1)
+          vars: {finance_digest_broker_ranges: ["172.20.3.0/24"], searxng_subnet: 172.20.3.16/28}
+          task: Preflight | no broker range reaches SearXNG's subnet
+        - name: SearXNG's subnet resolving to empty (the overlap check can't pass on nothing; H5-1)
+          vars: {searxng_subnet: ""}
+          task: Preflight | no broker range reaches SearXNG's subnet
+        - name: with Notion, a deny list that blocks the public internet
+          vars:
+            finance_digest_notion_token: "{{ test_canary }}"
+            finance_digest_notion_page_id: "{{ test_page_id }}"
+            finance_digest_ip_deny_public: "{{ test_good.ip_deny_public + ['0.0.0.0/0'] }}"
+          task: Preflight | the IP filter
+        - name: with Notion, a deny list without the tailnet range
+          vars:
+            finance_digest_notion_token: "{{ test_canary }}"
+            finance_digest_notion_page_id: "{{ test_page_id }}"
+            finance_digest_ip_deny_public: "{{ test_good.ip_deny_public | reject('equalto', '100.64.0.0/10') | list }}"
+          task: Preflight | the IP filter
+        - name: with Notion, a deny list without the Docker/RFC 1918 range
+          vars:
+            finance_digest_notion_token: "{{ test_canary }}"
+            finance_digest_notion_page_id: "{{ test_page_id }}"
+            finance_digest_ip_deny_public: "{{ test_good.ip_deny_public | reject('equalto', '172.16.0.0/12') | list }}"
+          task: Preflight | the IP filter
+        # The library paths and mount.
+        - name: a library under /home (ProtectHome hides it)
+          vars: {finance_digest_library_root: /home/someone/library, finance_digest_library_mount: /home/someone/library}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a library path with a space
+          vars: {finance_digest_library_root: /mnt/ai library, finance_digest_library_mount: /mnt/ai library}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a library path with a dot-dot
+          vars: {finance_digest_library_root: /mnt/x/../etc, finance_digest_library_mount: /mnt/x/../etc}
+          task: Preflight | the library paths are plain absolute paths outside the hidden and system trees
+        - name: a library root that is only a name prefix of its mount
+          vars: {finance_digest_library_root: /srv/ai-library2, finance_digest_library_mount: /srv/ai-library, finance_digest_library_forbidden_re: '^$'}
+          task: Preflight | the library root is the mount or below it
+        - name: the library root missing
+          vars: {finance_digest_library_root: "{{ test_tmp }}/lib/missing"}
+          task: Preflight | the library root is a real directory
+        - name: the library root a symlink
+          vars: {finance_digest_library_root: "{{ test_tmp }}/lib/link"}
+          task: Preflight | the library root is a real directory
+        - name: the library root an empty mount point (not on the declared mount)
+          vars: {finance_digest_library_mount: "{{ test_tmp }}/lib/ai-library"}
+          task: Preflight | the library root is on the declared mount (not the disk under an empty mount point)
+        - name: no sentinel
+          vars: {finance_digest_library_root: "{{ test_tmp }}/lib/nosentinel"}
+          task: Preflight | the sentinel is a regular file and 50-finance a real folder (an initialized library)
+        - name: the sentinel a symlink
+          vars: {finance_digest_library_root: "{{ test_tmp }}/lib/linksentinel"}
+          task: Preflight | the sentinel is a regular file and 50-finance a real folder (an initialized library)
+        - name: no 50-finance
+          vars: {finance_digest_library_root: "{{ test_tmp }}/lib/nofinance"}
+          task: Preflight | the sentinel is a regular file and 50-finance a real folder (an initialized library)
+        - name: 50-finance a symlink
+          vars: {finance_digest_library_root: "{{ test_tmp }}/lib/linkfinance"}
+          task: Preflight | the sentinel is a regular file and 50-finance a real folder (an initialized library)
+        # Sources and the library's group.
+        - name: D's package missing on the controller
+          vars: {finance_digest_pkg_src: "{{ test_tmp }}/src/nothing-here"}
+          task: Preflight | require the app sources
+        - name: the launcher missing on the controller
+          vars: {finance_digest_launcher_src: "{{ test_tmp }}/src/nope"}
+          task: Preflight | require the app sources
+        - name: the library's group missing
+          vars: {finance_digest_library_group: fd-test-no-such-group}
+          task: Preflight | require the library's group
+
+    # ---- 2. install -------------------------------------------------------------------------------------
+    - name: Install, first run
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: Plant strays in the install (top level, inside packages, a cache dir)
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          a="{{ finance_digest_app_dir }}"
+          echo stray > "$a/stray.py"
+          echo stray > "$a/config.example.json"
+          mkdir -p "$a/tests" && echo stray > "$a/tests/test_digest.py"
+          mkdir -p "$a/old_pkg" "$a/library/__pycache__" "$a/finance_digest/sub/tests"
+          echo stray > "$a/old_pkg/__init__.py"
+          echo stray > "$a/library/__pycache__/core.cpython-314.pyc"
+          echo stray > "$a/library/removed.py"
+          echo stray > "$a/finance_digest/sub/tests/t.py"
+          echo stray > "$a/.hidden"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Install, second run (prunes the strays)
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: List the installed tree with inodes and mtimes
+      ansible.builtin.command:
+        argv: [find, "{{ finance_digest_app_dir }}", -mindepth, "1", -printf, "%P|%i|%T@\n"]
+      register: fd_test_tree_before
+      changed_when: false
+
+    - name: Install, third run (no change)
+      ansible.builtin.include_tasks: ../tasks/install.yml
+
+    - name: List the installed tree
+      ansible.builtin.command:
+        argv: [find, "{{ finance_digest_app_dir }}", -mindepth, "1", -printf, "%P|%m|%y\n"]
+      register: fd_test_tree
+      changed_when: false
+
+    - name: List the installed tree with inodes and mtimes again
+      ansible.builtin.command:
+        argv: [find, "{{ finance_digest_app_dir }}", -mindepth, "1", -printf, "%P|%i|%T@\n"]
+      register: fd_test_tree_after
+      changed_when: false
+
+    - name: List what should be there (every *.py of the two sources, minus the never-deployed dirs)
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          s="{{ test_tmp }}/src"
+          echo "finance-digest|755|f"
+          { cd "$s/finance-digest" && find finance_digest; cd "$s/skill-library" && find library; } \
+            | grep -Ev '(^|/)(__pycache__|tests?|node_modules)(/|$)' \
+            | while read -r p; do
+                if [ -d "$s/finance-digest/$p" ] || [ -d "$s/skill-library/$p" ]; then echo "$p|755|d"
+                else case "$p" in *.py) echo "$p|644|f" ;; esac; fi
+              done
+        executable: /bin/bash
+      register: fd_test_want
+      changed_when: false
+
+    - name: The install holds exactly the two packages' code plus the launcher, and run 3 touched nothing
+      ansible.builtin.assert:
+        that:
+          - fd_test_tree.stdout_lines | sort == fd_test_want.stdout_lines | sort
+          - fd_test_tree.stdout_lines | select('search', '(^|/)(__pycache__|tests?|node_modules|old_pkg)(/|$)|stray|removed|hidden') | list == []
+          - "'finance_digest/sub/__init__.py|644|f' in fd_test_tree.stdout_lines"
+          - "'finance_digest/config.py|644|f' in fd_test_tree.stdout_lines and 'library/core.py|644|f' in fd_test_tree.stdout_lines"
+          - "'finance-digest|755|f' in fd_test_tree.stdout_lines"
+          - fd_test_tree.stdout_lines | select('search', '^(config[.]example[.]json|README[.]md|tests|forge)') | list == []
+          - fd_test_tree_before.stdout_lines | sort == fd_test_tree_after.stdout_lines | sort
+        fail_msg: >-
+          extra {{ fd_test_tree.stdout_lines | difference(fd_test_want.stdout_lines) }},
+          missing {{ fd_test_want.stdout_lines | difference(fd_test_tree.stdout_lines) }},
+          run 3 changed {{ fd_test_tree_after.stdout_lines | difference(fd_test_tree_before.stdout_lines) }}
+        quiet: true
+
+    - name: Install refuses symlinked directories
+      ansible.builtin.include_tasks: expect_guard_refusal.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - {name: app-dir, root: "{{ test_tmp }}/g1/finance-digest", link: "{{ test_tmp }}/g1/finance-digest"}
+        - {name: digest-package, root: "{{ test_tmp }}/g2/finance-digest", link: "{{ test_tmp }}/g2/finance-digest/finance_digest"}
+        - {name: library-package, root: "{{ test_tmp }}/g3/finance-digest", link: "{{ test_tmp }}/g3/finance-digest/library"}
+        - {name: digest-subpackage, root: "{{ test_tmp }}/g4/finance-digest", link: "{{ test_tmp }}/g4/finance-digest/finance_digest/sub"}
+
+    # ---- 3. config ---------------------------------------------------------------------------------------
+    - name: Config, Notion off
+      ansible.builtin.include_tasks: ../tasks/config.yml
+
+    - name: Stat config.json, the config dir and notion.json (Notion off)
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: ["{{ finance_digest_config_file }}", "{{ finance_digest_config_dir }}", "{{ finance_digest_notion_file }}"]
+      register: fd_test_off
+
+    - name: Config.json holds exactly D's keys with the role's values; no notion.json
+      vars:
+        c: "{{ lookup('ansible.builtin.file', finance_digest_config_file) | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - c.keys() | sort == ['ai_summary', 'broker_url', 'library_root', 'moneyhub_url', 'notion_file', 'timezone']
+          - c.moneyhub_url == 'http://100.64.0.1:8710'
+          - c.broker_url == 'http://100.64.0.2:11434'
+          - c.library_root == finance_digest_library_root
+          - c.timezone == 'America/New_York'
+          - c.ai_summary is sameas true
+          - c.notion_file == finance_digest_notion_file
+          - fd_test_off.results[0].stat.mode == '0640'
+          - fd_test_off.results[1].stat.mode == '0750'
+          - not fd_test_off.results[2].stat.exists
+        fail_msg: "{{ c | to_json }}"
+        quiet: true
+
+    - name: Config, Notion on (the canary token)
+      ansible.builtin.include_tasks: ../tasks/config.yml
+      vars:
+        finance_digest_notion_token: "{{ test_canary }}"
+        finance_digest_notion_page_id: "{{ test_page_id }}"
+
+    - name: Stat notion.json (Notion on)
+      ansible.builtin.stat:
+        path: "{{ finance_digest_notion_file }}"
+      register: fd_test_on1
+
+    - name: Config, Notion on again (no change)
+      ansible.builtin.include_tasks: ../tasks/config.yml
+      vars:
+        finance_digest_notion_token: "{{ test_canary }}"
+        finance_digest_notion_page_id: "{{ test_page_id }}"
+
+    - name: Stat notion.json again
+      ansible.builtin.stat:
+        path: "{{ finance_digest_notion_file }}"
+      register: fd_test_on2
+
+    # The canary is compared inside python (argv/stdin would print it at -vvv): the file must hold exactly
+    # {"token": <canary>, "page_id": <page>} and D's reader must accept it.
+    - name: Notion.json holds the token and page, and D's reader accepts it
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -I
+          - -c
+          - |
+            import json, sys
+            sys.path.insert(0, sys.argv[1])
+            from finance_digest.notion import load_config
+            data = json.load(open(sys.argv[2]))
+            canary = open(sys.argv[3]).read().strip()
+            assert set(data) == {"token", "page_id"}, sorted(data)
+            assert data["token"] == canary, "token differs"
+            assert data["page_id"] == sys.argv[4]
+            assert load_config(sys.argv[2]) == (canary, sys.argv[4])
+          - "{{ finance_digest_app_dir }}"
+          - "{{ finance_digest_notion_file }}"
+          - "{{ test_tmp }}/../canary"
+          - "{{ test_page_id }}"
+      changed_when: false
+
+    - name: Notion.json is 0640 and the second run changed nothing
+      ansible.builtin.assert:
+        that:
+          - fd_test_on1.stat.exists and fd_test_on1.stat.isreg
+          - fd_test_on1.stat.mode == '0640'
+          - fd_test_on1.stat.checksum == fd_test_on2.stat.checksum
+          - fd_test_on1.stat.inode == fd_test_on2.stat.inode
+          - fd_test_on1.stat.mtime == fd_test_on2.stat.mtime
+        quiet: true
+
+    - name: Config, Notion off again (the file is removed)
+      ansible.builtin.include_tasks: ../tasks/config.yml
+
+    - name: Stat notion.json (off again)
+      ansible.builtin.stat:
+        path: "{{ finance_digest_notion_file }}"
+      register: fd_test_off2
+
+    - name: Notion.json is gone
+      ansible.builtin.assert:
+        that: not fd_test_off2.stat.exists
+        quiet: true
+
+    - name: Bad configs for the deploy-time validator (D's loader)
+      ansible.builtin.copy:
+        content: >-
+          {{ (lookup('ansible.builtin.file', finance_digest_config_file) | from_json | dict2items
+              | rejectattr('key', 'equalto', item.drop | default('')) | items2dict)
+             | combine(item.patch | default({})) | to_json }}
+        dest: "{{ test_tmp }}/bad-{{ item.name }}.json"
+        mode: "0644"
+      loop:
+        - {name: extra-key, patch: {proxy: "http://192.0.2.1:3128"}}
+        - {name: no-moneyhub, drop: moneyhub_url}
+        - {name: file-moneyhub, patch: {moneyhub_url: "file:///etc/passwd"}}
+        - {name: moneyhub-path, patch: {moneyhub_url: "http://100.64.0.1:8710/api"}}
+        - {name: broker-is-moneyhub, patch: {broker_url: "http://100.64.0.1:8710"}}
+        - {name: summary-string, patch: {ai_summary: "true"}}
+        - {name: relative-root, patch: {library_root: "srv/ai-library"}}
+        - {name: bad-zone, patch: {timezone: "Mars/Olympus"}}
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: The validator refuses each bad config
+      ansible.builtin.command:
+        cmd: "{{ finance_digest_config_validate | replace('%s', test_tmp ~ '/bad-' ~ item ~ '.json') }}"
+      loop: [extra-key, no-moneyhub, file-moneyhub, moneyhub-path, broker-is-moneyhub, summary-string, relative-root, bad-zone]
+      register: fd_test_bad
+      changed_when: false
+      failed_when: fd_test_bad.rc == 0
+
+    - name: The validator accepts the rendered config
+      ansible.builtin.command:
+        cmd: "{{ finance_digest_config_validate | replace('%s', finance_digest_config_file) }}"
+      changed_when: false
+
+    - name: Config refuses a symlinked config directory
+      block:
+        - name: Config guard | a victim dir and the link
+          ansible.builtin.shell:
+            cmd: |
+              set -eu
+              v="{{ test_tmp }}/victim-config"
+              mkdir -p "$v" "{{ test_tmp }}/c1"
+              echo keep > "$v/sentinel"
+              chmod 0644 "$v/sentinel"
+              chmod 0700 "$v"
+              ln -sfn "$v" "{{ test_tmp }}/c1/finance-digest"
+            executable: /bin/bash
+          changed_when: true
+
+        - name: Config guard | config.yml through the link
+          ansible.builtin.include_tasks: ../tasks/config.yml
+          vars:
+            finance_digest_config_dir: "{{ test_tmp }}/c1/finance-digest"
+            finance_digest_config_file: "{{ test_tmp }}/c1/finance-digest/config.json"
+            finance_digest_notion_file: "{{ test_tmp }}/c1/finance-digest/notion.json"
+
+        - name: Config guard | not reached
+          ansible.builtin.set_fact:
+            fd_test_config_guard_by: ""
+      rescue:
+        - name: Config guard | note which task refused
+          ansible.builtin.set_fact:
+            fd_test_config_guard_by: "{{ ansible_failed_task.name }}"
+
+    - name: Config guard | read the victim
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          v="{{ test_tmp }}/victim-config"
+          find "$v" -printf '%P|%m|%y\n' | LC_ALL=C sort
+          cat "$v/sentinel"
+        executable: /bin/bash
+      register: fd_test_config_victim
+      changed_when: false
+
+    - name: Config guard | refused by the guard, victim untouched
+      ansible.builtin.assert:
+        that:
+          - fd_test_config_guard_by == 'Guard | each pruned directory is absent or a real directory (never a symlink)'
+          - fd_test_config_victim.stdout_lines == ['sentinel|644|f', '|700|d', 'keep']
+        fail_msg: "refused by '{{ fd_test_config_guard_by }}'; victim: {{ fd_test_config_victim.stdout_lines }}"
+        quiet: true
+
+    # ---- 4. the units ----------------------------------------------------------------------------------
+    - name: Units, Notion off
+      ansible.builtin.include_tasks: units_case.yml
+      vars:
+        finance_digest_app_dir: /opt/finance-digest
+        finance_digest_config_dir: /etc/finance-digest
+        finance_digest_config_file: /etc/finance-digest/config.json
+        finance_digest_notion_file: /etc/finance-digest/notion.json
+        finance_digest_library_root: /srv/ai-library
+        fd_case: notion-off
+        fd_expect_public: false
+        fd_expect_allow: "{{ (['100.64.0.1/32', '100.64.0.2/32'] + test_good.broker_ranges + ['127.0.0.53/32']) | join(' ') }}"
+
+    - name: Units, Notion on
+      ansible.builtin.include_tasks: units_case.yml
+      vars:
+        finance_digest_app_dir: /opt/finance-digest
+        finance_digest_config_dir: /etc/finance-digest
+        finance_digest_config_file: /etc/finance-digest/config.json
+        finance_digest_notion_file: /etc/finance-digest/notion.json
+        finance_digest_library_root: /srv/ai-library
+        finance_digest_notion_token: "{{ test_canary }}"
+        finance_digest_notion_page_id: "{{ test_page_id }}"
+        fd_case: notion-on
+        fd_expect_public: true
+        fd_expect_allow: "{{ (['100.64.0.1/32', '100.64.0.2/32'] + test_good.broker_ranges + ['127.0.0.53/32']) | join(' ') }}"
+
+    - name: Units, a narrowed broker range and another Money Hub address (the allow line follows the inventory)
+      ansible.builtin.include_tasks: units_case.yml
+      vars:
+        finance_digest_app_dir: /opt/finance-digest
+        finance_digest_config_dir: /etc/finance-digest
+        finance_digest_config_file: /etc/finance-digest/config.json
+        finance_digest_notion_file: /etc/finance-digest/notion.json
+        finance_digest_library_root: /srv/ai-library
+        moneyhub_url: http://100.64.0.9:8710/
+        finance_digest_broker_ranges: [172.20.3.0/24]
+        fd_case: narrowed
+        fd_expect_public: false
+        fd_expect_allow: 100.64.0.9/32 100.64.0.2/32 172.20.3.0/24 127.0.0.53/32
+
+    # ---- 5. verify ---------------------------------------------------------------------------------------
+    - name: Verify | the fake digest's modes
+      ansible.builtin.include_tasks: verify_case.yml
+      loop_control:
+        loop_var: fd_mode
+      loop: [good, fail, nofresh]

@@ -1,0 +1,31 @@
+---
+# Not in check mode (tasks/main.yml). A --dry-run as fdigest in a transient service with exactly the unit's
+# sandbox and IP filter (finance_digest_sandbox): it reads Money Hub, asks the broker (when ai_summary is on),
+# prints the entry and writes nothing. It must exit 0 and print the freshness line. This proves the IP filter
+# lets Money Hub and the broker through, which only a live run can (the §12.15 DNAT lesson).
+# The entry holds Noah's balances: the output is kept out of the play's log (no_log); the assert reports only
+# the exit code, whether the line was found, and the last stderr lines (D never logs secrets, §12.18.2).
+- name: Verify | a dry run as fdigest in the unit's sandbox
+  ansible.builtin.command:
+    argv: >-
+      {{ ['systemd-run', '--wait', '--pipe', '--collect', '--quiet', '--service-type=oneshot',
+          '--description=finance-digest dry run (Ansible verify)',
+          '--property=TimeoutStartSec=' ~ finance_digest_timeout_start]
+         + (finance_digest_sandbox | map('regex_replace', '^', '--property=') | list)
+         + ['--'] + finance_digest_argv + ['--dry-run'] }}
+  register: finance_digest_dry_run
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Verify | the dry run exited 0 and printed the freshness line
+  ansible.builtin.assert:
+    that:
+      - finance_digest_dry_run.rc == 0
+      - finance_digest_dry_run.stdout is search(finance_digest_verify_freshness_re)
+    fail_msg: >-
+      finance-digest --dry-run (as {{ finance_digest_user }}, in the unit's sandbox) exited {{ finance_digest_dry_run.rc }};
+      freshness line {{ 'found' if finance_digest_dry_run.stdout is search(finance_digest_verify_freshness_re) else 'NOT found' }};
+      stderr tail: {{ finance_digest_dry_run.stderr_lines[-5:] | default([]) }}
+    success_msg: finance-digest --dry-run exited 0 and printed the freshness line.
+    quiet: true

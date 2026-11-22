@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Fake ufw: only `show added` (read-only). The declared rule is $FA_TEST_DIR/ufw_rule ("ufw allow from ...").
+# knob `ufw`: exact (default) | missing | fromany | extra (plus a tailnet rule for the port) | wrongsrc | widedst |
+# range (plus a LAN rule for a range holding the port) | wideopen (plus an address rule with no port: every port) |
+# denied (plus a deny rule for the port, which admits nothing: passes)
+set -euo pipefail
+: "${FA_TEST_DIR:?}"
+. "$(dirname "$0")/_knob"
+[ "$*" = "show added" ] || { echo "fake ufw: unexpected arguments: $*" >&2; exit 2; }
+rule="$(cat "$FA_TEST_DIR/ufw_rule")"
+echo "Added user rules (see 'ufw status' for running firewall):"
+echo "ufw allow in on tailscale0 to any port 22 proto tcp comment 'homelab: ssh over tailnet'"
+echo "ufw allow from 172.16.0.0/12 to 172.17.0.1 port 53 proto udp comment 'homelab: container dns to resolved'"
+echo "ufw allow in on tailscale0 to any port 8080 proto tcp comment 'homelab: open-webui over tailnet'"
+echo "ufw allow in on tailscale0 to any port 8790 proto tcp comment 'homelab: another port'"
+case "$(knob ufw exact)" in
+  exact) echo "$rule" ;;
+  missing) ;;
+  fromany) echo "ufw allow 879/tcp" ;;
+  extra) echo "$rule"; echo "ufw allow in on tailscale0 to any port 879 proto tcp comment 'homelab: oops'" ;;
+  wrongsrc) echo "${rule/from 172.20.0.4/from 172.20.0.0\/24}" ;;
+  widedst) echo "${rule/to 172.20.0.1/to any}" ;;
+  range) echo "$rule"; echo "ufw allow in on eno1 from 192.168.77.0/24 to any port 870:899 proto tcp comment 'homelab: oops'" ;;
+  wideopen) echo "$rule"; echo "ufw allow from 172.20.0.0/24 comment 'homelab: oops'" ;;
+  denied) echo "$rule"; echo "ufw deny in on eno1 to any port 879 proto tcp" ;;
+  *) echo "fake ufw: bad knob" >&2; exit 2 ;;
+esac

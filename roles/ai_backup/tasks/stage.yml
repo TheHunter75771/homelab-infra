@@ -1,0 +1,56 @@
+---
+# Stage half (docs/CONTRACTS.md §12.28), ai-box (Ubuntu):
+#   include_role: {name: ai_backup, tasks_from: stage}
+# then, in the same play, tasks_from: export_key for the PC play.
+# Order: read-only preflight, script, account, staging dir, key pair, the account's only key, units + timer,
+# read-only checks.
+
+- name: Stage | preflight (read-only)
+  ansible.builtin.import_tasks: preflight_stage.yml
+
+- name: Stage | script
+  ansible.builtin.import_tasks: install.yml
+
+- name: Stage | pull account
+  ansible.builtin.import_tasks: account.yml
+
+- name: Stage | guard the staging dir
+  ansible.builtin.include_tasks: guard_dirs.yml
+  vars:
+    ai_backup_guard_dirs:
+      - "{{ ai_backup_stage_dir }}"
+      - "{{ ai_backup_key_dir }}"
+
+- name: Stage | staging dir (root, readable by the pull account's group)
+  ansible.builtin.file:
+    path: "{{ ai_backup_stage_dir }}"
+    state: directory
+    owner: "{{ ai_backup_owner }}"
+    group: "{{ ai_backup_group }}"
+    mode: "0750"
+  # On a first check run the group doesn't exist yet.
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Stage | pull key pair (generated once, never printed)
+  ansible.builtin.import_tasks: key.yml
+
+- name: Stage | the pull key is the account's only key
+  ansible.builtin.import_tasks: authorized_key.yml
+
+- name: Stage | units
+  ansible.builtin.import_tasks: units_stage.yml
+
+- name: Stage | load changed units before enabling the timer
+  ansible.builtin.meta: flush_handlers
+
+- name: Stage | the timer is enabled and running (the service only runs from it, or by hand)
+  ansible.builtin.systemd_service:
+    name: "{{ ai_backup_stage_timer }}"
+    enabled: true
+    state: started
+  # On a first check run the unit file doesn't exist yet.
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Stage | read-only checks
+  ansible.builtin.include_tasks: verify_stage.yml
+  when: not ansible_check_mode

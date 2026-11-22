@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+# Role ai_library_share (docs/CONTRACTS.md §12.11, §12.17.2): smbd serves the library only once the share
+# drive is really mounted (never an empty mount point). smbd listens on every address (it can't bind
+# the tailscale0 tun), so systemd's IP filter drops every peer but loopback and ai-box, in the
+# kernel, before Samba sees a packet (one of four layers; README).
+[Unit]
+RequiresMountsFor={{ ai_library_share_dir }}
+
+[Service]
+IPAddressDeny=any
+IPAddressAllow={{ ai_library_share_smb_ip_allow | join(' ') }}

@@ -1,0 +1,26 @@
+# {{ ansible_managed }}
+# Role ai_backup (docs/CONTRACTS.md §12.28): pull ai-box's Open WebUI backups (rsync over SSH, rrsync -ro on ai-box),
+# verify every new archive's manifest, keep {{ ai_backup_pull_keep }} in {{ ai_backup_pull_dest }}, fail when ai-box's LAST_OK
+# is older than {{ ai_backup_pull_max_age_hours }} h. Refuses unless {{ ai_backup_pull_dest_mount }} is the real backup drive.
+# Started by {{ ai_backup_pull_timer }} only (no [Install]); by hand: systemctl start {{ ai_backup_pull_service }}
+[Unit]
+Description=Pull ai-box's Open WebUI backups (verified, keep {{ ai_backup_pull_keep }})
+Documentation=file://{{ ai_backup_script }}
+After=network-online.target tailscaled.service
+Wants=network-online.target
+RequiresMountsFor={{ ai_backup_pull_dest }}
+# A boot catch-up can start before ai-box or the tailnet answers: retry failures (exit 1), never refusals (exit 2).
+StartLimitIntervalSec={{ ai_backup_pull_start_interval }}
+StartLimitBurst={{ ai_backup_pull_start_burst }}
+
+[Service]
+Type=oneshot
+ExecStart={{ ai_backup_pull_argv | join(' ') }}
+TimeoutStartSec=2h
+SyslogIdentifier=ai-openwebui-pull
+Restart=on-failure
+RestartSec={{ ai_backup_pull_restart_sec }}
+RestartPreventExitStatus=2
+{% for p in ai_backup_pull_sandbox %}
+{{ p }}
+{% endfor %}

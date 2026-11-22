@@ -1,0 +1,17 @@
+# {{ ansible_managed }}
+# Role ai_backup (docs/CONTRACTS.md §12.28): extracts the newest archive in {{ ai_backup_pull_dest }} to a private temp
+# dir there (removed afterwards) and runs PRAGMA integrity_check on both databases. Read-only for the archives.
+# By hand only (the Integrator runs it once): systemctl start {{ ai_backup_restore_service }}; journalctl -u {{ ai_backup_restore_service }}
+[Unit]
+Description=Open WebUI backup restore check (newest archive)
+Documentation=file://{{ ai_backup_script }}
+RequiresMountsFor={{ ai_backup_pull_dest }}
+
+[Service]
+Type=oneshot
+ExecStart={{ ai_backup_restore_argv | join(' ') }}
+TimeoutStartSec=1h
+SyslogIdentifier=ai-openwebui-restore-check
+{% for p in ai_backup_restore_sandbox %}
+{{ p }}
+{% endfor %}
