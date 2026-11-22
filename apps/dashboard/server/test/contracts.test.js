@@ -18,8 +18,8 @@ const repoFile = (p) => {
 const pkg = JSON.parse(read('package.json'));
 const lock = JSON.parse(read('package-lock.json'));
 
-test('only runtime dependency: web-push 3.6.7 pinned exactly; lockfile agrees; MIT', () => {
-  assert.deepEqual(pkg.dependencies, { 'web-push': '3.6.7' });
+test('only runtime dependency: web-push 4.0.0 pinned exactly; lockfile agrees; MIT', () => {
+  assert.deepEqual(pkg.dependencies, { 'web-push': '4.0.0' });
   assert.equal(pkg.devDependencies, undefined, 'tests use node:test only');
   assert.equal(pkg.license, 'MIT');
   assert.equal(pkg.type, 'module');
@@ -27,7 +27,7 @@ test('only runtime dependency: web-push 3.6.7 pinned exactly; lockfile agrees; M
   assert.equal(lock.lockfileVersion, 3);
   assert.deepEqual(lock.packages[''].dependencies, pkg.dependencies);
   assert.equal(lock.packages[''].license, 'MIT');
-  assert.equal(lock.packages['node_modules/web-push'].version, '3.6.7');
+  assert.equal(lock.packages['node_modules/web-push'].version, '4.0.0');
 });
 
 test("push-core's API is still served at the same paths", () => {

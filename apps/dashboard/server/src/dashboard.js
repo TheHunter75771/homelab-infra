@@ -1,7 +1,7 @@
 // Builds the whole service from a config. Every host interaction can be replaced through `deps` (tests).
 import http from 'node:http';
 import path from 'node:path';
-import webpush from 'web-push';
+import * as webpush from 'web-push';
 import { createAccess } from './access.js';
 import { createActions } from './actions.js';
 import { createDriveState } from './collectors/drive.js';

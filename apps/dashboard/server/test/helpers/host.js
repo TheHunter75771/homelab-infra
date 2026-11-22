@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createECDH, randomBytes } from 'node:crypto';
-import webpush from 'web-push';
+import * as webpush from 'web-push';
 import { buildConfig } from '../../src/config.js';
 import { container, ALL_APPS } from './fake-helper.js';
 
