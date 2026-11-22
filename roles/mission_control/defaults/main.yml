@@ -42,15 +42,17 @@ mission_control_vapid_subject: "https://{{ tailnet_fqdn | default('') }}"
 # vars/main.yml mission_control_config, and MC1's loader refuses unknown keys) ---
 # AI Control's local server (role ai_control: 127.0.0.1:<ai_control_listen_port>).
 mission_control_aicontrol_url: "http://127.0.0.1:{{ mission_control_aictl_listen_port }}"
-# Money Hub on homebk-edge, over the tailnet (an IPv4 literal: the IP filter allows exactly that address). Its
+# Money Hub on edge-vps, over the tailnet (an IPv4 literal: the IP filter allows exactly that address). Its
 # timestamps are naive UTC (Lead, §12.28 P round 2).
 mission_control_moneyhub_url: "{{ moneyhub_url | default('') }}"
 mission_control_moneyhub_timezone: UTC
 # Tailnet names MC1 reaches through `tailscale serve` (TLS verifies the name). ai-box has no MagicDNS, so each name
 # is pinned to its tailnet address in MC1's host_map, and that address goes in the IP filter.
 mission_control_tailnet_suffix: "{{ (tailnet_fqdn | default('')).split('.', 1)[-1] }}"
-# The ERAU dashboard on homebk-edge (ai-box is a user-owned node, so serve stamps Noah's login; no credential).
-mission_control_erau_url: "https://homebk-edge.{{ mission_control_tailnet_suffix }}"
+# The edge VPS's tailnet machine name. The real name goes in host_vars/ai-box.yml (git-ignored).
+mission_control_edge_host: edge-vps
+# The ERAU dashboard on the edge VPS (ai-box is a user-owned node, so serve stamps Noah's login; no credential).
+mission_control_erau_url: "https://{{ mission_control_edge_host }}.{{ mission_control_tailnet_suffix }}"
 mission_control_erau_ip: "{{ mission_control_moneyhub_url | mission_control_url_host }}"
 # The mediaserver dashboard (/api/summary -> backups) behind its own serve 443. Empty URL: not configured.
 mission_control_mediaserver_url: "{{ ('https://mediaserver.' ~ mission_control_tailnet_suffix) if mediaserver_tailnet_ip is defined else '' }}"
@@ -118,7 +120,7 @@ mission_control_app_links: []
 # Denied: loopback, RFC 1918, CGNAT/tailnet, link-local, ULA (the tailnet's IPv6 too) and the special ranges.
 # Everything outside them, the public internet where FCM/APNs/Mozilla push live, passes. Allowed back in, one host
 # each: 127.0.0.1 (tailscale serve in, AI Control) and 127.0.0.53 (the resolver stub) but no other loopback address,
-# homebk-edge (Money Hub, ERAU), Open WebUI's container address, the mediaserver when configured, and Home
+# edge-vps (Money Hub, ERAU), Open WebUI's container address, the mediaserver when configured, and Home
 # Assistant when configured. Not ai-box's own tailnet address (Q-6).
 mission_control_ip_deny:
   - 127.0.0.0/8

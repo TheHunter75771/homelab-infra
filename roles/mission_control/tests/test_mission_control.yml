@@ -56,7 +56,7 @@
     test_app_links:
       - {label: Server Hub, url: "https://gaming-pc.example.ts.net/"}
       - {label: PC Control, url: "https://gaming-pc.example.ts.net:8443/"}
-      - {label: Money Hub, url: "https://homebk-edge.example.ts.net:8443/"}
+      - {label: Money Hub, url: "https://edge-vps.example.ts.net:8443/"}
       - {label: Media dashboard, url: "https://mediaserver.example.ts.net/"}
       - {label: Jellyseerr, url: "https://mediaserver.example.ts.net:8443/"}
       - {label: Public site, url: "https://www.example.com/"}
@@ -147,14 +147,14 @@
       ansible.builtin.assert:
         that:
           - mission_control_moneyhub_ip == '100.64.0.30'
-          - mission_control_erau_url == 'https://homebk-edge.example.ts.net'
+          - mission_control_erau_url == 'https://edge-vps.example.ts.net'
           - mission_control_erau_ip == '100.64.0.30'
           - mission_control_ip_allow == ['127.0.0.1/32', '127.0.0.53/32', '100.64.0.30/32', '172.20.0.4/32', '100.64.0.40/32']
           - mission_control_webui_url == 'http://172.20.0.4:8080'
           - mission_control_guard_ip6 == 'fd7a:115c:a1e0::a'
           - mission_control_mediaserver_url == 'https://mediaserver.example.ts.net'
           - >-
-            mission_control_host_map == {'homebk-edge.example.ts.net': '100.64.0.30', 'mediaserver.example.ts.net': '100.64.0.40'}
+            mission_control_host_map == {'edge-vps.example.ts.net': '100.64.0.30', 'mediaserver.example.ts.net': '100.64.0.40'}
           - mission_control_on_calendar == '*-*-* 05:30:00 America/New_York'
           - mission_control_pins.pywebpush == python_packages.pywebpush
           - mission_control_pins.aiohttp == python_packages.aiohttp
@@ -191,7 +191,7 @@
         - {name: links a list, vars: {mission_control_links: []}, task: "Preflight | role inputs"}
         - {name: moneyhub zone empty, vars: {mission_control_moneyhub_timezone: ""}, task: "Preflight | role inputs"}
         - name: moneyhub a name
-          vars: {mission_control_moneyhub_url: "http://homebk-edge:8710"}
+          vars: {mission_control_moneyhub_url: "http://edge-vps:8710"}
           task: "Preflight | Money Hub, ERAU and the mediaserver are tailnet addresses"
         - name: moneyhub on the LAN
           vars: {mission_control_moneyhub_url: "http://192.168.77.5:8710"}
@@ -200,7 +200,7 @@
           vars: {mission_control_moneyhub_url: "http://100.64.0.30:8710/api"}
           task: "Preflight | Money Hub, ERAU and the mediaserver are tailnet addresses"
         - name: erau over http
-          vars: {mission_control_erau_url: "http://homebk-edge.example.ts.net"}
+          vars: {mission_control_erau_url: "http://edge-vps.example.ts.net"}
           task: "Preflight | Money Hub, ERAU and the mediaserver are tailnet addresses"
         - name: erau ip on the LAN
           vars: {mission_control_erau_ip: "192.168.77.5"}
@@ -215,7 +215,7 @@
           vars: {mission_control_mediaserver_ip: "192.168.77.9"}
           task: "Preflight | Money Hub, ERAU and the mediaserver are tailnet addresses"
         - name: mediaserver on ERAU's name
-          vars: {mission_control_mediaserver_url: "https://homebk-edge.example.ts.net"}
+          vars: {mission_control_mediaserver_url: "https://edge-vps.example.ts.net"}
           task: "Preflight | Money Hub, ERAU and the mediaserver are tailnet addresses"
         - name: ha url a name
           vars: {mission_control_ha_url: "http://ha.local:8123"}
@@ -258,7 +258,7 @@
           vars: {mission_control_moneyhub_url: "http://u:p@100.64.0.30:8710"}
           task: "Preflight | Money Hub, ERAU and the mediaserver are tailnet addresses"
         - name: erau with user info
-          vars: {mission_control_erau_url: "https://noah@homebk-edge.example.ts.net"}
+          vars: {mission_control_erau_url: "https://noah@edge-vps.example.ts.net"}
           task: "Preflight | Money Hub, ERAU and the mediaserver are tailnet addresses"
         - name: guard IPv6 off the tailnet
           vars: {mission_control_tailnet_ip6: "fd00::1"}
@@ -473,10 +473,10 @@
           vars: {mission_control_app_links: {Server Hub: "https://gaming-pc.example.ts.net/"}}
           task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
         - name: app link with a password
-          vars: {mission_control_app_links: [{label: Money Hub, url: "https://noah:hunter2@homebk-edge.example.ts.net/"}]}
+          vars: {mission_control_app_links: [{label: Money Hub, url: "https://noah:hunter2@edge-vps.example.ts.net/"}]}
           task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
         - name: app link with a user name
-          vars: {mission_control_app_links: [{label: Money Hub, url: "https://noah@homebk-edge.example.ts.net/"}]}
+          vars: {mission_control_app_links: [{label: Money Hub, url: "https://noah@edge-vps.example.ts.net/"}]}
           task: "Preflight | app links are at most 12, each a 1-32 character label and an http(s) URL without credentials"
         - name: app link ftp
           vars: {mission_control_app_links: [{label: Files, url: "ftp://mediaserver.example.ts.net/"}]}
@@ -1026,17 +1026,17 @@
           - cfg.static_dir == test_tmp ~ '/opt/mission-control/web'
           - cfg.aicontrol_url == 'http://127.0.0.1:8095'
           - cfg.moneyhub_url == 'http://100.64.0.30:8710' and cfg.moneyhub_timezone == 'UTC'
-          - cfg.erau_url == 'https://homebk-edge.example.ts.net'
+          - cfg.erau_url == 'https://edge-vps.example.ts.net'
           - cfg.mediaserver_url == 'https://mediaserver.example.ts.net'
           - >-
-            cfg.host_map == {'homebk-edge.example.ts.net': '100.64.0.30', 'mediaserver.example.ts.net': '100.64.0.40'}
+            cfg.host_map == {'edge-vps.example.ts.net': '100.64.0.30', 'mediaserver.example.ts.net': '100.64.0.40'}
           - cfg.webui_url == 'http://172.20.0.4:8080'
           - cfg.ha_url is none and cfg.ha_entities == []
           - "'forge-api.socket' in cfg.units and 'forge-api.service' in cfg.units"
           - cfg.backups | map(attribute='id') | list == ['owui-stage', 'mediaserver']
           - >-
             cfg.links == {'ai': 'http://ai-box.example.ts.net:8080/', 'ai_control': 'https://ai-box.example.ts.net/',
-                          'money': 'http://100.64.0.30:8710/', 'school': 'https://homebk-edge.example.ts.net/'}
+                          'money': 'http://100.64.0.30:8710/', 'school': 'https://edge-vps.example.ts.net/'}
         fail_msg: "{{ cfg | to_json }}"
         quiet: true
 

@@ -11,8 +11,8 @@
   "webui_url": "http://AI_BOX_TAILNET_IP:8080",
   "moneyhub_url": "http://HOMEBK_EDGE_TAILNET_IP:8710",
   "moneyhub_timezone": "UTC",
-  "erau_url": "https://homebk-edge.TAILNET.ts.net",
-  "host_map": {"homebk-edge.TAILNET.ts.net": "192.0.2.10"},
+  "erau_url": "https://edge-vps.TAILNET.ts.net",
+  "host_map": {"edge-vps.TAILNET.ts.net": "192.0.2.10"},
   "mediaserver_url": null,
   "ha_url": null,
   "ha_token_file": "/etc/mission-control/ha-token",
@@ -33,7 +33,7 @@
     "ai": "http://ai-box.TAILNET.ts.net:8080/",
     "ai_control": "https://ai-box.TAILNET.ts.net/",
     "money": "http://HOMEBK_EDGE_TAILNET_IP:8710/",
-    "school": "https://homebk-edge.TAILNET.ts.net/"
+    "school": "https://edge-vps.TAILNET.ts.net/"
   },
   "notify_senders": [
     {"name": "mediaserver", "token_sha256": "0000000000000000000000000000000000000000000000000000000000000000", "allow_from": ["192.0.2.20"]}
@@ -45,6 +45,6 @@
     {"label": "Open WebUI", "url": "http://ai-box.TAILNET.ts.net:8080/"},
     {"label": "AI Control", "url": "https://ai-box.TAILNET.ts.net/"},
     {"label": "Money Hub", "url": "http://HOMEBK_EDGE_TAILNET_IP:8710/"},
-    {"label": "ERAU dashboard", "url": "https://homebk-edge.TAILNET.ts.net/"}
+    {"label": "ERAU dashboard", "url": "https://edge-vps.TAILNET.ts.net/"}
   ]
 }

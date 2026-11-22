@@ -8,7 +8,7 @@
 #   address in neither list passes). Denied: loopback, RFC 1918, CGNAT/tailnet, link-local, ULA and the special
 #   ranges. So the public internet (the push services: FCM, APNs, Mozilla) is reachable, and of the private ranges
 #   only the allowed hosts are: 127.0.0.1 (tailscale serve in, AI Control), 127.0.0.53 (the DNS stub), Money Hub
-#   and ERAU on homebk-edge, Open WebUI's container address{{ ', the mediaserver' if mission_control_mediaserver_on | bool else '' }}{{ ', Home Assistant' if mission_control_ha_ip | length > 0 else '' }}.
+#   and ERAU on edge-vps, Open WebUI's container address{{ ', the mediaserver' if mission_control_mediaserver_on | bool else '' }}{{ ', Home Assistant' if mission_control_ha_ip | length > 0 else '' }}.
 # - /run is an empty read-only tmpfs with only the system bus socket, /run/systemd/system and the resolver's dir
 #   bound in, so no other daemon's socket (tailscaled, snapd, Docker, the AI Control helper) is reachable.
 # - Local access: the guard unit's nftables table lets only root reach 127.0.0.1:{{ mission_control_listen_port }} and :{{ mission_control_serve_port }}.

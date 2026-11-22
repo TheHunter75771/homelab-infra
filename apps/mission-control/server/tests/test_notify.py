@@ -841,7 +841,7 @@ class AppsCardTests(Harness):
     LINKS: ClassVar[list[dict[str, str]]] = [
         {"label": "Open WebUI", "url": "http://ai-box.example.ts.net:8080/"},
         {"label": "Jellyfin", "url": "http://100.64.0.5:8096/web/"},
-        {"label": "Money Hub", "url": "https://homebk-edge.example.ts.net/money/"},
+        {"label": "Money Hub", "url": "https://edge-vps.example.ts.net/money/"},
     ]
 
     async def test_absent_when_empty(self) -> None:

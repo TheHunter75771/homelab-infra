@@ -54,10 +54,10 @@ placeholders and `192.0.2.10` are rendered by the role.
 | `alert_interval_s`, `alert_repeat_hours` | `300`, `24` | the alert loop period; when a still-active alert is pushed again |
 | `aicontrol_url` | `http://127.0.0.1:8095` | AI Control `/api/summary` |
 | `webui_url` | `null` | Open WebUI `/health` (ai-box's tailnet IP: it listens on 100.x:8080, not on localhost) |
-| `moneyhub_url`, `moneyhub_timezone` | `null`, `UTC` | Money Hub (homebk-edge, tailnet IP); its naive timestamps are read in `moneyhub_timezone` |
-| `erau_url` | `null` | `https://homebk-edge.<tailnet>.ts.net` (see ERAU below) |
+| `moneyhub_url`, `moneyhub_timezone` | `null`, `UTC` | Money Hub (edge-vps, tailnet IP); its naive timestamps are read in `moneyhub_timezone` |
+| `erau_url` | `null` | `https://edge-vps.<tailnet>.ts.net` (see ERAU below) |
 | `erau_timeout_s`, `erau_max_age_s` | `20` (5-60), `1800` (60-86400) | the background ERAU fetch's own timeout; how old a last good ERAU result may be when it is served while a fetch runs |
-| `host_map` | `{}` | `{host name: IP}` used instead of DNS. ai-box has no MagicDNS, so the ERAU name must be mapped to homebk-edge's tailnet IP. TLS still verifies the name |
+| `host_map` | `{}` | `{host name: IP}` used instead of DNS. ai-box has no MagicDNS, so the ERAU name must be mapped to edge-vps's tailnet IP. TLS still verifies the name |
 | `mediaserver_url` | `null` | the mediaserver dashboard (`/api/summary` → `backups`), only used by a `mediaserver` backup entry |
 | `ha_url`, `ha_token_file`, `ha_entities` | `null`, `/etc/mission-control/ha-token`, `[]` | Home Assistant: `GET /api/states/<entity>` for each entity (at most 12), only once the token file exists |
 | `systemctl`, `units` | `/usr/bin/systemctl`, `[]` | units to watch (at most 32), read with an unprivileged `systemctl show`. An alert fires when one is failed, in `auto-restart`, or restarting repeatedly (next row) |
@@ -304,21 +304,21 @@ Replies are capped while they stream, after decompression (2 MiB; Home Assistant
 ### ERAU dashboard auth (research, 2026-10-28)
 
 - **How ERAU checks identity:**
-  - It binds a Unix socket in a 0700 runtime dir. The only way in is homebk-edge's `tailscale serve --https=443`.
+  - It binds a Unix socket in a 0700 runtime dir. The only way in is edge-vps's `tailscale serve --https=443`.
   - Its guard refuses any request without a `Tailscale-User-Login` header (403 "Open this through Tailscale").
   - `ALLOWED_LOGINS` is unset in the deployed unit, so any login is accepted.
   - There is no token and no API key.
 - **ai-box gets in as Noah:**
-  - ai-box is a **user-owned** tailnet node (no tags), so `tailscale serve` on homebk-edge stamps its requests
+  - ai-box is a **user-owned** tailnet node (no tags), so `tailscale serve` on edge-vps stamps its requests
     with ai-box's owner login.
   - Verified read-only from ai-box: a GET to the ERAU read endpoint through serve answered 200.
   - **MC1 needs no credential for ERAU.**
-- **ai-box has no MagicDNS:** `homebk-edge.<tailnet>.ts.net` doesn't resolve there, so the config maps that name
-  to homebk-edge's tailnet IP (`host_map`).
+- **ai-box has no MagicDNS:** `edge-vps.<tailnet>.ts.net` doesn't resolve there, so the config maps that name
+  to edge-vps's tailnet IP (`host_map`).
 - **Caveats for the Lead:**
   1. If ai-box is ever tagged, serve stops adding identity and ERAU answers 403. The School card then shows
      "HTTP 403".
-  2. The ACL must keep allowing ai-box → homebk-edge:443 (it does today).
+  2. The ACL must keep allowing ai-box → edge-vps:443 (it does today).
   3. Any process on ai-box can read ERAU as Noah. That's true today, independent of MC.
 
 ## Alerts
@@ -384,7 +384,7 @@ Each alert id has a state in `alerts.json`: `pending`, `active` or `clearing`.
   cryptography, http_ece and py_vapid. Tested with Python 3.14 and aiohttp 3.14.5. ai-box's system
   `python3-aiohttp` is 3.13.3, which AI Control uses; the code uses no 3.14-only API, but only 3.14.5 was run.
 - **Network:**
-  - `IPAddressAllow`: localhost, homebk-edge's tailnet IP (Money Hub :8710 and ERAU :443), **ai-box's own
+  - `IPAddressAllow`: localhost, edge-vps's tailnet IP (Money Hub :8710 and ERAU :443), **ai-box's own
     tailnet IP** (Open WebUI listens on 100.x:8080, not on lo), the mediaserver and Home Assistant IPs when
     configured, and egress 443 to the push services.
   - systemctl talks to systemd over D-Bus (`/run/dbus/system_bus_socket`), so the unit needs `AF_UNIX` and must

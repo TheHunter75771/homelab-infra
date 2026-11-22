@@ -14,7 +14,7 @@
         mission_control_config_extra: "{{ case.vars.get('mission_control_config_extra', {}) }}"
         mission_control_disk_mounts: "{{ case.vars.get('mission_control_disk_mounts', ['/']) }}"
         mission_control_moneyhub_url: "{{ case.vars.get('mission_control_moneyhub_url', 'http://100.64.0.30:8710') }}"
-        mission_control_erau_url: "{{ case.vars.get('mission_control_erau_url', 'https://homebk-edge.example.ts.net') }}"
+        mission_control_erau_url: "{{ case.vars.get('mission_control_erau_url', 'https://edge-vps.example.ts.net') }}"
         mission_control_erau_ip: "{{ case.vars.get('mission_control_erau_ip', '100.64.0.30') }}"
         mission_control_ha_url: "{{ case.vars.get('mission_control_ha_url', '') }}"
         mission_control_mediaserver_url: "{{ case.vars.get('mission_control_mediaserver_url', 'https://mediaserver.example.ts.net') }}"

@@ -96,7 +96,8 @@ python_packages:
 | `mission_control_ha_entities` | `[]` | at most 12 entity ids |
 | `mission_control_mediaserver_url` | `https://mediaserver.<tailnet>` when `mediaserver_tailnet_ip` is set | its dashboard's `/api/summary` (backups) through its serve 443. `""` turns it off |
 | `mission_control_mediaserver_ip` | `mediaserver_tailnet_ip` | pinned in MC1's `host_map` and allowed by the IP filter |
-| `mission_control_erau_url` / `_erau_ip` | `https://homebk-edge.<tailnet>` / Money Hub's address | ERAU through homebk-edge's serve 443. ai-box is a user-owned node, so serve stamps Noah's login and no credential is needed (MC1 README, "ERAU dashboard auth") |
+| `mission_control_edge_host` | `edge-vps` | The edge VPS's tailnet machine name. Set the real name in `host_vars/ai-box.yml` (git-ignored); never commit it |
+| `mission_control_erau_url` / `_erau_ip` | `https://<mission_control_edge_host>.<tailnet>` / Money Hub's address | ERAU through edge-vps's serve 443. ai-box is a user-owned node, so serve stamps Noah's login and no credential is needed (MC1 README, "ERAU dashboard auth") |
 | `mission_control_units` | MC1's example list + `mission-control-briefing.service` | the units watched for failed / restarting, incl. `forge-api.socket` and `forge-api.service` |
 | `mission_control_backups` | `owui-stage` (kind `unit`, `ai-openwebui-backup.service`, 30 h) and `mediaserver` | MC1 reads ai_backup's freshness from systemd, so mc needs no backuppull group |
 | `mission_control_links` | `ai` → `http://<ai-box>:8080/` (Open WebUI, the ask box's target), `ai_control` → `https://<ai-box>/`, `money`, `school` | the cards' tap-through links |
@@ -113,7 +114,7 @@ python_packages:
 
 `config.json` is exactly: `listen_host` `127.0.0.1`, `listen_port` 8097, `allowed_login`, `timezone`, `static_dir`,
 `state_dir`, `vapid_file`, `lockscreen_detail`, `aicontrol_url` (`http://127.0.0.1:8095`), `webui_url`
-(`http://<Open WebUI's container address>:8080`), `moneyhub_url`, `moneyhub_timezone`, `erau_url`, `host_map` (`{homebk-edge
+(`http://<Open WebUI's container address>:8080`), `moneyhub_url`, `moneyhub_timezone`, `erau_url`, `host_map` (`{edge-vps
 name: its IP, mediaserver name: its IP}`: ai-box has no MagicDNS), `mediaserver_url`, `ha_url` (null when off),
 `ha_token_file`, `ha_entities`, `units`, `backups`, `links`. It is pinned literally in `tests/expected/config.json`.
 Each B2/B1 key (`notify_senders`, `quiet_hours`, `notify_dedupe_seconds`, `notify_rate_per_hour`, `app_links`) is
@@ -158,7 +159,7 @@ domain, which this public repo never holds (docs/CONTRACTS.md §0), so it lives 
 mission_control_app_links:
   - {label: Server Hub, url: "https://<gaming PC>.{{ mission_control_tailnet_suffix }}/"}
   - {label: PC Control, url: "https://<gaming PC>.{{ mission_control_tailnet_suffix }}:8443/"}
-  - {label: Money Hub, url: "https://homebk-edge.{{ mission_control_tailnet_suffix }}:8443/"}
+  - {label: Money Hub, url: "https://edge-vps.{{ mission_control_tailnet_suffix }}:8443/"}
   - {label: Media dashboard, url: "https://mediaserver.{{ mission_control_tailnet_suffix }}/"}
   - {label: Jellyseerr, url: "https://mediaserver.{{ mission_control_tailnet_suffix }}:8443/"}
   - {label: <public site>, url: "https://<public site domain>/"}
@@ -211,7 +212,7 @@ So "public internet yes, private ranges no, except a few hosts" is:
 - `IPAddressAllow=` **single hosts only**:
   - `127.0.0.1/32` (tailscale serve in, AI Control) and `127.0.0.53/32` (the resolver stub), and no other loopback
     address: not `localhost`, which would allow all of 127/8 and `::1` (Q-3);
-  - homebk-edge's tailnet IP: Money Hub :8710 and ERAU :443;
+  - edge-vps's tailnet IP: Money Hub :8710 and ERAU :443;
   - Open WebUI's container `/32` (`webui_url` is `http://<container address>:8080`, straight to the container, no
     DNAT). **Not ai-box's own tailnet IP** (Q-6): that would open everything published there (the broker, SSH, AI
     Control's and Mission Control's own serve ports);
@@ -560,7 +561,7 @@ roles/mission_control/tests/run.sh       # from anywhere; the repo's .venv; no r
 
 1. Egress is limited by address, not port ("IP filter"). If 443-only egress is wanted, that is a role firewall
    nftables rule on mc's cgroup.
-2. The tailnet ACL must allow Noah's devices → ai-box:8443, and ai-box → homebk-edge:443 and mediaserver:443
+2. The tailnet ACL must allow Noah's devices → ai-box:8443, and ai-box → edge-vps:443 and mediaserver:443
    (ERAU and the mediaserver dashboard through their serve).
 3. `links.ai` points at Open WebUI on `http://<ai-box>:8080/`. MC1's example had `https://<ai-box>/`, which is AI
    Control. Confirm.

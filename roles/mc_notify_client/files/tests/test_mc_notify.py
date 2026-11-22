@@ -643,7 +643,7 @@ class Request(Base):
 
     def test_url_rule(self):
         good = ["/", "/servers", "/a/b?c=d", "/#cards", "https://ai-box.example.ts.net:8443/",
-                "https://homebk-edge.x.ts.net/a", "/" + "a" * 511]
+                "https://edge-vps.x.ts.net/a", "/" + "a" * 511]
         bad = ["", "servers", "//evil.example/", "/a//b", "/\\evil.example", "/a\\b", "http://ai-box.example.ts.net/",
                "HTTPS://ai-box.example.ts.net/", "https://evil.example/", "https://u@ai-box.example.ts.net/",
                "https://u:p@ai-box.example.ts.net/", "https://.ts.net/", "https://ts.net/", "https://-x.ts.net/",

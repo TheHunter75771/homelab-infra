@@ -193,8 +193,8 @@ class ErauTests(Harness):
     async def test_static_host_map(self) -> None:
         """The ERAU URL keeps its tailnet name (TLS checks it); the connection goes to the mapped address."""
         port = int(self.erau.url.rsplit(":", 1)[1])
-        cfg = self.config(erau_url=f"http://homebk-edge.example.ts.net:{port}",
-                          host_map={"homebk-edge.example.ts.net": "127.0.0.1"})
+        cfg = self.config(erau_url=f"http://edge-vps.example.ts.net:{port}",
+                          host_map={"edge-vps.example.ts.net": "127.0.0.1"})
         async with make_session(dict(cfg.host_map)) as s:
             d = await sources.erau(s, cfg, fakes.NOW)
         self.assertEqual(d["count"], 3)

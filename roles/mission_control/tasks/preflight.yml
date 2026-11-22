@@ -137,7 +137,7 @@
     file: "{{ mission_control_docker_defaults_file }}"
     name: mission_control_docker_defaults
 
-# Money Hub and ERAU live on homebk-edge and are reached over the tailnet: IPv4 literals inside the tailnet range,
+# Money Hub and ERAU live on edge-vps and are reached over the tailnet: IPv4 literals inside the tailnet range,
 # because the IP filter allows exactly those addresses. ERAU's URL is its tailnet name (tailscale serve's TLS
 # certificate is for the name); its address is mission_control_erau_ip.
 - name: Preflight | Money Hub, ERAU and the mediaserver are tailnet addresses

@@ -182,7 +182,7 @@ def _iso_epoch(v: Any) -> float | None:
 
 
 async def erau(session: aiohttp.ClientSession, cfg: Config, now: float) -> dict[str, Any]:
-    """GET /api/snapshot through homebk-edge's `tailscale serve` (identity: ai-box's own node login). Only the
+    """GET /api/snapshot through edge-vps's `tailscale serve` (identity: ai-box's own node login). Only the
     open deadlines are kept, computed like the dashboard's openDeadlines(); nothing else of the payload is
     stored or passed on."""
     assert cfg.erau_url is not None

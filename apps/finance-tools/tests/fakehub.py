@@ -112,7 +112,7 @@ PAYDAY = {
         "detected_date": "2030-03-15",
         "detected_description": "PAYROLL DEMO",
         "detected_days_ago": 5,
-        "typical_cents": 96050,
+        "typical_cents": 123400,
         "recent": [{"date": "2030-03-15", "amount_cents": 94321, "account": "Demo Checking", "description": "PAYROLL DEMO"}],
     },
 }

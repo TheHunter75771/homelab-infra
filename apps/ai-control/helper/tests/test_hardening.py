@@ -101,7 +101,7 @@ class RedactionReference(unittest.TestCase):
 
     def test_the_fixtures_are_synthetic(self) -> None:
         blob = json.dumps(CASES)
-        for marker in (".ts.net", "100.", "192.168.", "@gmail", "homebk"):
+        for marker in (".ts.net", "100.", "192.168.", "@gmail"):
             self.assertNotIn(marker, blob)
 
 
