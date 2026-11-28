@@ -1,0 +1,25 @@
+---
+# Offline test play for role stacks' host image pins (tasks/host_pins.yml + host_pins_cleanup.yml), driven by
+# test_host_pins_play.py against fixture files in a temp dir (never the real pin record). The media stack itself is
+# not deployed: the test stands in for "the stack is up" between the merge and the cleanup.
+- name: Host pins merge and cleanup (offline test)
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Test | merge (role stacks, tasks/host_pins.yml)
+      ansible.builtin.include_role:
+        name: stacks
+        tasks_from: host_pins.yml
+
+    - name: Test | the merge result, for the test to read (written even in check mode; not a role file)
+      ansible.builtin.copy:
+        dest: "{{ test_result_file }}"
+        content: "{{ stacks_host_pins | to_json }}"
+        mode: "0600"
+      check_mode: false
+      changed_when: false
+
+    - name: Test | cleanup (role stacks, tasks/host_pins_cleanup.yml)
+      ansible.builtin.include_role:
+        name: stacks
+        tasks_from: host_pins_cleanup.yml

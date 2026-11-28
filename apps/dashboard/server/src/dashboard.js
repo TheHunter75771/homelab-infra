@@ -10,10 +10,12 @@ import { createDocker, createHelperClient } from './helper/client.js';
 import { createApp } from './http/app.js';
 import { createStatic } from './http/static.js';
 import { createLogger } from './log.js';
+import { createMediaUpdates } from './media-updates.js';
 import { createPushService } from './push/service.js';
 import { createStore, parseAllowedHosts, StoreCorruptError } from './push/store.js';
 import { createVapidSource } from './push/vapid.js';
 import { createSecrets } from './redact.js';
+import { createRegistry } from './registry.js';
 import { createReminders } from './reminders.js';
 import { createSampler } from './sampler.js';
 import { createSettings } from './settings.js';
@@ -62,6 +64,9 @@ export function createDashboard(cfg, deps = {}) {
   });
 
   let summary = null;
+  // Registry lookups run here, unprivileged (the helper has no network). deps.registryFetch: a fake in tests.
+  const registry = createRegistry({ fetch: deps.registryFetch ?? globalThis.fetch, clock, log, ...(deps.registryOptions ?? {}) });
+  const mediaUpdates = createMediaUpdates({ cfg, registry, declared: () => summary.declared(), clock, log });
   const actions = createActions({
     cfg,
     docker,
@@ -72,7 +77,9 @@ export function createDashboard(cfg, deps = {}) {
       refreshCore: () => summary.refreshCore(),
       refreshSoon: () => summary.refreshSoon(),
       touch: () => summary.touch(),
+      declared: () => summary.declared(),
     },
+    mediaUpdates,
     ...(deps.actionOptions ?? {}),
   });
   summary = createSummaryService({
@@ -102,6 +109,7 @@ export function createDashboard(cfg, deps = {}) {
     summary,
     actions,
     docker,
+    mediaUpdates,
     settings,
     reminders,
     access: deps.access ?? createAccess({ cfg, fetchImpl: deps.fetch ?? globalThis.fetch, clock }),
@@ -144,6 +152,8 @@ export function createDashboard(cfg, deps = {}) {
     secrets,
     staticFiles,
     docker,
+    mediaUpdates,
+    registry,
     httpStats: () => handler.stats(),
 
     // Startup checks + collectors + timers. `background: false` (tests) skips the timers.

@@ -87,6 +87,9 @@ code 78 and a JSON `config error` line on stderr.
 | POST | `/api/apps/:name/{restart\|stop\|start\|update}` | 202 `{ok, action}`; 409 with the lock reason; 403 for `update` when remote |
 | GET | `/api/actions/:id` | SSE: `step` `{step, at}`…, then `end` `{state: done\|failed, error, detail}`. `Accept: application/json` gives a snapshot. |
 | POST | `/api/gate/rerun` | 202 `{ok, action}`; 409 when the gate is `ok` or a re-run is running; 403 when remote |
+| GET | `/api/media/updates?refresh=1` | §11.7.2: `{checkedAt, apps: [{name, label, current: {version, pin}, latest: {version, pin}\|null, status: update\|current\|ahead\|deprecated\|error, major, message}]}` (`ahead`: the pin is newer than the registry's latest, never offered); cached 10 min (`refresh=1` skips it); 403 when remote; 503 before the app list is known |
+| POST | `/api/media/update` | `{apps: [name, …]}` (1–10 different names) → 202 `{ok, action}` (kind `media-update`); 400 bad body; 409 "Check for updates again" unless each app is `update` in a check at most 10 min old with its pin unchanged; 409 with the lock reason; 403 when remote |
+| POST | `/api/host/reboot` | 202 `{ok, action}` (kind `reboot`, already `done`); 409 `Busy` while any action runs, the helper's `busy`/`too-soon` message, or the uptime lock; 403 when remote |
 | GET | `/api/push/devices` | `{"devices": [{id, label, created}]}` |
 | DELETE | `/api/push/devices/:id` | `{ok, removed, devices}`; 404 unknown id |
 | GET / PUT | `/api/settings` | the settings view (below); PUT takes a partial patch, 400 with the reason |
@@ -135,8 +138,8 @@ exempt.
 enabled:
 - A request through Cloudflare (`Cf-Ray`) needs a valid `Cf-Access-Jwt-Assertion` (RS256, audience, issuer,
   expiry) and is `remote`. Without one it gets 403.
-- `remote` gets 403 on `update` and `gate/rerun`. The summary then shows those actions locked with
-  "Only available on the tailnet".
+- `remote` gets 403 on `update`, `gate/rerun`, `media/updates`, `media/update` and `host/reboot`. The summary
+  then shows those actions locked with "Only available on the tailnet".
 
 ### Action steps
 
@@ -149,6 +152,35 @@ Every action has steps, then ends with `done` or `failed`:
 | stop | `stopping` |
 | update | the helper's `pulling` → `recreating` → `waiting-health` |
 | gate re-run | `requested` (trigger created) → `running` (`bootgate-retry.service` picked it up) |
+| media-update | per app: `{step: "app", app, index, total, from, to}` (index 1-based, from/to are versions), the helper's `pulling` → `pinning` → `recreating` → `waiting-health` (or `rolling-back`), each with `app`, then `{step: "app-done", app}` or `{step: "app-failed", app, rolledBack}` |
+| reboot | `requested` → `scheduled` |
+
+Step events carry their extra fields on the SSE stream and in the JSON snapshot (`{step, …, at}`).
+
+**Media update** (§11.7.2): the apps run one at a time, in the order asked, with the helper's `set-pin` and the
+pin from the check, and the first failure ends the action:
+- Done: "Updated 2 apps: Sonarr 4.0.20.3014-ls7, Jellyfin 12.4ubu2604-ls61".
+- Failed: "Sonarr failed at waiting-health: <helper message>. Already updated: Jellyfin 12.4ubu2604-ls61. Not
+  started: Radarr." (or "No other app was changed."). Helper text is redacted and loses any URL.
+- The check cache is dropped when it ends, so the next update needs a new check.
+- It counts as an update for §11.2 Concurrency: a per-app update and a media update exclude each other (409
+  "Another update is running (…)"), and an app inside a running media update is `Busy` for every other action.
+
+**Reboot:** the helper call happens before the 202, so its `busy`/`too-soon` refusal is a 409 and leaves no
+action behind. It is logged at warning level. Once a reboot is scheduled, every new action gets 409 "The host
+is restarting." (until the box goes down, or 5 min after the scheduled time).
+
+**Registry client** (`src/registry.js`, unprivileged, Node `fetch`): Docker Hub for names without a registry host
+(`library/` for single names), `lscr.io` as-is (it answers with a ghcr.io token challenge). Anonymous Bearer
+tokens from the challenge (https realm on a public host name only), cached per scope until `expires_in`, at most 300 s. HTTPS on every hop:
+redirects are followed by the client (at most 5, never to an IP literal, `localhost` or a private-only name
+such as `.local`, `.internal` or `.ts.net`), and the bearer is never sent to another origin (the blob
+CDN). 15 s per request, body caps 1 MiB (manifests) and 2 MiB (config). Lookup: `manifests/latest` (digest
+header = sha256 of the body) → the `linux/amd64` manifest → the config's `org.opencontainers.image.version`
+label → `HEAD manifests/<version>` must return the same digest. Errors are short reasons with no URL or
+token. At most 3 lookups run in parallel. An app is `current` when the pin's digest is the index digest or
+the amd64 manifest digest. It is `ahead` when the registry's latest is older than the pin (leading dotted
+numbers, then the `-lsN` build; when the order can't be told, a different digest is `update`).
 
 A failed retry writes no gate history, so the re-run's outcome is the service finishing plus the gate status
 afterwards:
@@ -204,6 +236,7 @@ push:    {devices: [{id, label, created}], storeError, alertsAvailable,
 subscriptions: [{key, name, date, daysLeft, remindOn, reminderDue, reminded}]
 settings: {thresholds: {diskWarnPct, backupMaxAgeH}}
 links:   {runbooks: [{title, url}]}                       [] unless runbook_base_url + runbooks are configured
+hostActions: {reboot: {lock}, mediaUpdate: {lock, running: <action id>|null}}         §11.7.2; lock: null or the reason
 issues:  [{severity: fail|warn, text, target: drive|apps|media|alerts|backups|settings, app?}]   fail first
 ```
 
@@ -230,6 +263,12 @@ issues:  [{severity: fail|warn, text, target: drive|apps|media|alerts|backups|se
 - **`apps[].stoppedReason`:** `gate` when the status is `held`. `docker-down` when the status is `unknown`
   because docker.service isn't active and the gate isn't holding it. `intentional` when it was stopped on
   purpose (or paused). Otherwise `null`, including when the helper is unreachable.
+- **`hostActions`** (§11.7.2), first reason that applies:
+  - both: "Only available on the tailnet" (remote), "The host is restarting." (a reboot is scheduled), `Busy`
+    (any action runs or is being checked);
+  - media only: the gate's held reason, "Docker isn't running." (or "Can't reach the Docker helper.");
+  - both: "The box just started. Try again in N min." while `/proc/uptime` is below 600 s.
+  The same reasons are enforced when the POST arrives, from fresh state.
 - **`links.runbooks`:** built from `runbook_base_url` (plain `https://` only) and `runbooks` (`{title, path}`,
   where the path is a relative `.md` file with no `..`, `.`, leading `/` or scheme; an optional `#anchor` is
   allowed).
@@ -290,6 +329,8 @@ connection, carrying only the fields the op accepts.
 | `last-pull` | – | `{last_pull, ...}` | backups |
 | `disk-split` | – | `{sizes: {tv, movies, downloads}, computed_at, stale}` | drive; the helper runs `du` only when the drive is verified, else returns its stale cache |
 | `boots` | – | `{boots: [{boot_id, first_entry, last_entry}]}` | box uptime |
+| `reboot` | – | `{scheduled_in}`; refused `too-soon` / `busy` / `failed` | `POST /api/host/reboot` (not a Docker op: works while Docker is held) |
+| `set-pin` | `name, pin` | stream: header `{name, from, to}`, steps `pulling → pinning → recreating → waiting-health → done`, or `rolling-back` then `failed` (`failed_step, code, message, rolled_back`) | `POST /api/media/update`; never cancelled from here |
 
 ## Data files (`DASHBOARD_DATA_DIR`)
 
@@ -354,6 +395,9 @@ it must be started through `spawnServer` (`test/helpers/spawn.js`). That helper 
 
 The suite covers:
 - every endpoint and guard;
+- the registry client against a fake registry (`test/helpers/registry.js`, no network): challenge and token
+  cache, index → amd64 → config label, digest and tag mismatches, timeouts and size caps, Docker Hub;
+- the media update and reboot actions and `hostActions` (`test/host-actions.test.js`);
 - the five scenarios (normal day, bad night, clean start, one app down, Docker inactive), plus media-lost
   and an unreachable helper;
 - the forecast math and reminder timing;

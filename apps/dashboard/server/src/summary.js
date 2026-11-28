@@ -1,7 +1,8 @@
 // The summary: every collector's output assembled into one document (GET /api/summary, SSE /api/events).
 //
 // Cadence (config `intervals`, seconds): core 10 (gate, host, docker/apps, backups, alerts, push, drive, uptime
-// read), media 30, disk split 3600, boots 600, last-pull 600. Each refresh rebuilds the document; its content
+// read), media 30, disk split 3600, boots 600, last-pull 600. `hostActions` (§11.7.2) is rebuilt on every publish
+// from the live action state, so a starting or finishing action shows at once. Each refresh rebuilds the document; its content
 // hash (everything except generatedAt) is the ETag and the SSE change detector: listeners get `summary` when
 // the hash changed and `tick` (freshness only) when it didn't.
 import { createHash } from 'node:crypto';
@@ -11,6 +12,7 @@ import { collectBackups } from './collectors/backups.js';
 import { collectDrive } from './collectors/drive.js';
 import { collectGate, failuresByMonth, nextRetry, readBootId, readGateStatus } from './collectors/gate.js';
 import { collectHost } from './collectors/host.js';
+import { hostActionsFor } from './host-actions.js';
 import { buildIssues } from './issues.js';
 import { reminderDue } from './reminders.js';
 import { computeBoxUptime } from './uptime.js';
@@ -34,6 +36,10 @@ export function forAccess(summary, access) {
     access,
     apps: summary.apps.map((a) => ({ ...a, locks: { ...a.locks, update: TAILNET_ONLY } })),
     gate: { ...summary.gate, canRerun: false, rerunLock: TAILNET_ONLY },
+    hostActions: summary.hostActions && {
+      reboot: { ...summary.hostActions.reboot, lock: TAILNET_ONLY },
+      mediaUpdate: { ...summary.hostActions.mediaUpdate, lock: TAILNET_ONLY },
+    },
   };
 }
 
@@ -149,6 +155,10 @@ export function createSummaryService({
     void _now;
     const { _usage, ...drive } = c.drive;
     void _usage;
+    const { _uptimeSec, ...host } = c.host;
+    const hs = actions.hostState?.() ?? { busy: false, restarting: false, mediaRunning: null };
+    // A running media update blocks a gate re-run (the server refuses it with 409 Busy).
+    if (hs.mediaRunning && gate.canRerun) Object.assign(gate, { canRerun: false, rerunLock: 'Busy' });
     const mediaPart = slow.media ?? emptyMedia(c.apps);
     const summary = {
       schema: SCHEMA_VERSION,
@@ -160,7 +170,7 @@ export function createSummaryService({
       docker: { state: c.dockerState },
       gate,
       apps: c.apps,
-      host: c.host,
+      host,
       drive: { ...drive, split: slow.split },
       backups: c.backups,
       uptime: c.uptime,
@@ -169,6 +179,14 @@ export function createSummaryService({
       subscriptions: c.subscriptions,
       settings: { thresholds: { ...settings.get().thresholds } },
       links: { runbooks: cfg.runbookLinks ?? [] },
+      hostActions: hostActionsFor({
+        busy: hs.busy,
+        restarting: hs.restarting,
+        uptimeSec: _uptimeSec,
+        gateStatus: c.gateStatus,
+        dockerState: c.dockerState,
+        mediaRunning: hs.mediaRunning,
+      }),
       issues: [],
     };
     summary.issues = buildIssues(summary, { now: c.at, timeZone });
@@ -323,6 +341,8 @@ export function createSummaryService({
     },
     current: () => current,
     core: () => core,
+    // What the deployed compose files declare (the helper's last ps, or its copy on disk); null if never known.
+    declared: () => declared,
     onUpdate(fn) {
       listeners.add(fn);
       return () => listeners.delete(fn);

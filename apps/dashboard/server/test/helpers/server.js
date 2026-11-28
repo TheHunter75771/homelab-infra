@@ -18,6 +18,11 @@ export function anchoredClock(start = NOW) {
   return () => start + (Date.now() - t0);
 }
 
+// The default registry for in-process dashboards: no network in tests, ever.
+export async function noNetworkRegistry() {
+  throw new Error('no network in tests');
+}
+
 export async function startDashboard(t, scenario = 'normal', opts = {}) {
   const helper = await startFakeHelper(t, { ...helperFor(scenario), ...(opts.helper ?? {}) });
   const host = buildHost(t, scenario, { helperSocket: helper.socketPath, ...(opts.host ?? {}) });
@@ -37,6 +42,8 @@ export async function startDashboard(t, scenario = 'normal', opts = {}) {
     access: opts.access,
     actionOptions: { pollMs: 20, healthTimeoutMs: 2000, rerunPickupMs: 1500, rerunTimeoutMs: 2000, ...(opts.actionOptions ?? {}) },
     dockerOptions: opts.dockerOptions,
+    registryFetch: opts.registryFetch ?? noNetworkRegistry,
+    registryOptions: opts.registryOptions,
     appOptions: opts.appOptions,
   });
   await new Promise((resolve) => dash.server.listen(0, '127.0.0.1', resolve));

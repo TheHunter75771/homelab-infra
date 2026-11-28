@@ -1172,6 +1172,15 @@
   "links": {
     "runbooks": []
   },
+  "hostActions": {
+    "reboot": {
+      "lock": null
+    },
+    "mediaUpdate": {
+      "lock": "Held by the boot gate until the media drive is back.",
+      "running": null
+    }
+  },
   "issues": [
     {
       "severity": "fail",

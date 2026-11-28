@@ -10,20 +10,23 @@ Protocol (apps/dashboard/server/src/helper/client.js speaks it)
             Send it with write(), never end(): a half-closed socket reads as "client gone".
   unary     one line, then the helper closes:
             {"ok": true, "op": OP, "data": DATA} or {"ok": false, "error": {"code": CODE, "message": TEXT}}
-  streams   logs and update: first {"ok": true, "op": OP, "stream": true, ...} (or the error line
+  streams   logs, update and set-pin: first {"ok": true, "op": OP, "stream": true, ...} (or the error line
             above, when the request is refused), then one event per line,
               {"type": "line", "ts": RFC3339|null, "text": TEXT, "stream": "stdout"|"stderr"}
-              {"type": "step", "step": pulling|recreating|waiting-health|done|failed, "at": ISO, ...}
-              {"type": "output", "text": TEXT}   (compose progress during an update)
+              {"type": "step", "step": pulling|pinning|recreating|waiting-health|rolling-back|done|failed,
+               "at": ISO, ...}   (pinning and rolling-back only in set-pin)
+              {"type": "output", "text": TEXT}   (pull/compose progress during an update or set-pin)
             and always last {"type": "end", "ok": BOOL, "reason": TEXT, "message"?: TEXT}.
-            Closing the client side cancels a log stream; an update always runs to its end.
+            Closing the client side cancels a log stream; an update or set-pin always runs to its end.
 
 Rules
   - Only the dashboard user may connect (SO_PEERCRED uid check); everyone else, root included,
     gets "forbidden".
-  - Exactly these operations exist: ps, logs, start, stop, restart, update, docker-state,
-    last-pull, disk-split, boots. No exec, build, arbitrary paths, other containers, or image
-    and volume management.
+  - Exactly these operations exist: ps, logs, start, stop, restart, update, set-pin, reboot,
+    docker-state, last-pull, disk-split, boots (CONTRACTS §11.2, §11.7.1). No exec, build,
+    arbitrary paths, other containers, or image and volume management. set-pin rewrites exactly
+    one image: line of one deployed compose file (to a pin of the same repository, by digest) and
+    the helper's own pin record; reboot only schedules `systemctl reboot` through systemd-run.
   - Docker is touched only after `systemctl is-active docker.service` prints "active", checked
     again before every docker command: touching the socket would start Docker and so re-run
     the boot gate.
@@ -85,6 +88,17 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-_]")
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 ACCEPTED_RE = re.compile(r"^Accepted \S+ for (?P<user>\S+) from (?P<addr>\S+) port (?P<port>\d+)\b")
 DISCONNECTED_RE = re.compile(r"^Disconnected from user (?P<user>\S+) (?P<addr>\S+) port (?P<port>\d+)\b")
+# set-pin (CONTRACTS §11.7.1): <repo>:<tag>@sha256:<64 hex>, the repo checked against the current pin.
+MAX_PIN_LEN = 512
+PIN_TAG = r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"
+PIN_DIGEST = r"@sha256:[0-9a-f]{64}"
+PIN_SHAPE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:-]{0,255}:" + PIN_TAG + PIN_DIGEST + r"\Z")
+MAX_PINS_BYTES = 256 * 1024
+REBOOT_UNIT = "homelab-dashboard-reboot"
+REBOOT_EXISTS_RE = re.compile(r"already (?:exists|loaded)", re.IGNORECASE)
+REBOOT_UNITS = (f"{REBOOT_UNIT}.timer", f"{REBOOT_UNIT}.service")
+# is-active states that mean a reboot is already on its way (anything else is stale or absent).
+REBOOT_PENDING_STATES = frozenset({"active", "activating", "reloading", "refreshing"})
 
 # The whole operation surface. Each op lists the request fields it accepts and their types.
 OPS: dict[str, dict[str, type]] = {
@@ -94,6 +108,8 @@ OPS: dict[str, dict[str, type]] = {
     "stop": {"name": str},
     "restart": {"name": str},
     "update": {"name": str},
+    "set-pin": {"name": str, "pin": str},
+    "reboot": {},
     "docker-state": {},
     "last-pull": {},
     "disk-split": {},
@@ -105,8 +121,9 @@ REQUIRED: dict[str, frozenset[str]] = {
     "stop": frozenset({"name"}),
     "restart": frozenset({"name"}),
     "update": frozenset({"name"}),
+    "set-pin": frozenset({"name", "pin"}),
 }
-STREAM_OPS = frozenset({"logs", "update"})
+STREAM_OPS = frozenset({"logs", "update", "set-pin"})
 # A start, restart or update of an app in a gate-held stack needs the boot gate status "ok".
 GATED_OPS = frozenset({"start", "restart", "update"})
 
@@ -164,6 +181,13 @@ class Config:
     du_timeout: float = 1800
     disk_split_ttl: float = 86400
     poll_seconds: float = 1.0
+    # Host actions (CONTRACTS §11.7.1).
+    reboot_min_uptime: float = 600
+    reboot_delay: int = 10
+    systemd_run: str = "/usr/bin/systemd-run"
+    proc_uptime: str = "/proc/uptime"
+    pin_stacks: tuple[str, ...] = ("media",)
+    state_dir: str = "/var/lib/homelab-dockerctl"
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> Config:
@@ -173,7 +197,7 @@ class Config:
             raise ValueError(f"unknown config keys: {', '.join(unknown)}")
         values: dict[str, Any] = {}
         for key, value in raw.items():
-            if key in ("media_dirs", "held_stacks"):
+            if key in ("media_dirs", "held_stacks", "pin_stacks"):
                 if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
                     raise ValueError(f"{key} must be a list of strings")
                 value = tuple(value)
@@ -186,13 +210,21 @@ class Config:
         if not isinstance(self.allowed_uid, int) or isinstance(self.allowed_uid, bool) or self.allowed_uid <= 0:
             raise ValueError("allowed_uid must be a positive integer (never root)")
         for key in ("stacks_dir", "media_mount", "bootgate_status_file", "cache_dir", "docker", "systemctl",
-                    "journalctl", "du", "nice", "ionice"):
+                    "journalctl", "du", "nice", "ionice", "systemd_run", "proc_uptime", "state_dir"):
             if not os.path.isabs(getattr(self, key)):
                 raise ValueError(f"{key} must be an absolute path")
         if not all(DIR_NAME_RE.match(d) for d in self.media_dirs):
             raise ValueError("media_dirs must be plain directory names")
         if not all(STACK_RE.match(s) for s in self.held_stacks):
             raise ValueError("held_stacks must be stack names")
+        if not all(STACK_RE.match(s) for s in self.pin_stacks):
+            raise ValueError("pin_stacks must be stack names")
+        if isinstance(self.reboot_delay, bool) or not isinstance(self.reboot_delay, int) \
+                or not 1 <= self.reboot_delay <= 3600:
+            raise ValueError("reboot_delay must be an integer number of seconds between 1 and 3600")
+        if isinstance(self.reboot_min_uptime, bool) or not isinstance(self.reboot_min_uptime, (int, float)) \
+                or self.reboot_min_uptime < 0:
+            raise ValueError("reboot_min_uptime must be a number of seconds, 0 or more")
         if not USER_RE.match(self.backup_pull_user):
             raise ValueError("backup_pull_user is not a valid user name")
         if not DIR_NAME_RE.match(self.media_sentinel.lstrip(".")):
@@ -672,12 +704,18 @@ def validate_request(raw: bytes) -> dict[str, Any]:
         req.setdefault("follow", False)
         if "since" in req and not SINCE_RE.match(req["since"]):
             raise OpError("bad-request", "since must be unix seconds, a duration like 10m, or an RFC 3339 time")
+    if op == "set-pin":
+        # The shape only; the repository is checked against the current pin in op_set_pin.
+        if len(req["pin"]) > MAX_PIN_LEN:
+            raise OpError("bad-request", f"pin longer than {MAX_PIN_LEN} characters")
+        if not PIN_SHAPE_RE.match(req["pin"]):
+            raise OpError("bad-request", "pin must be <repository>:<tag>@sha256:<64 hex>")
     return req
 
 
 def describe(req: dict[str, Any]) -> str:
     parts = [f"op={req['op']}"]
-    for key in ("name", "tail", "follow", "since"):
+    for key in ("name", "tail", "follow", "since", "pin"):
         if key in req:
             parts.append(f"{key}={str(req[key]).lower() if isinstance(req[key], bool) else req[key]}")
     return " ".join(parts)
@@ -695,6 +733,8 @@ class Helper:
             "stop": self.op_action,
             "restart": self.op_action,
             "update": self.op_update,
+            "set-pin": self.op_set_pin,
+            "reboot": self.op_reboot,
             "docker-state": self.op_docker_state,
             "last-pull": self.op_last_pull,
             "disk-split": self.op_disk_split,
@@ -1147,6 +1187,346 @@ class Helper:
             if now >= deadline:
                 return False, f"not healthy after {self.cfg.health_timeout:g} s", None, None
             self.sys.sleep(self.cfg.health_poll_seconds)
+
+    # ---- reboot (CONTRACTS §11.7.1)
+
+    def _uptime(self) -> float:
+        try:
+            words = Path(self.cfg.proc_uptime).read_text(encoding="ascii").split()
+            return float(words[0])
+        except (OSError, ValueError, IndexError) as exc:
+            raise OpError("failed", "cannot read the uptime") from exc
+
+    def _held_lock(self) -> str | None:
+        """The name of a lock some helper instance holds right now, or None. Each lock file is
+        tried with a non-blocking exclusive flock and released at once."""
+        locks = os.path.join(self.cfg.cache_dir, "locks")
+        try:
+            dir_fd = os.open(locks, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except FileNotFoundError:
+            return None  # no action has ever run
+        except OSError as exc:
+            raise OpError("failed", f"cannot read the lock directory ({exc.strerror or exc})") from exc
+        try:
+            for entry in sorted(os.listdir(dir_fd)):
+                if not entry.endswith(".lock"):
+                    continue
+                try:
+                    fd = os.open(entry, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:  # a symlink (ELOOP) or anything else odd: treat as busy, never follow
+                    raise OpError("busy", f"lock {clean_log(entry, 80)} cannot be checked") from exc
+                try:
+                    if not stat.S_ISREG(os.fstat(fd).st_mode):
+                        continue
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        return entry[: -len(".lock")]
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(fd)
+        finally:
+            os.close(dir_fd)
+        return None
+
+    def op_reboot(self, _req: dict[str, Any]) -> dict[str, Any]:
+        uptime = self._uptime()
+        if uptime < self.cfg.reboot_min_uptime:
+            wait = max(1, int(-(-(self.cfg.reboot_min_uptime - uptime) // 60)))
+            raise OpError("too-soon", f"the box just started; try again in {wait} min")
+        held = self._held_lock()
+        if held is not None:
+            raise OpError("busy", f"an action is running ({clean_log(held, 80)})")
+        # Only an active timer (or a reboot already running) means "already scheduled". A failed or
+        # inactive leftover would make systemd-run say "already loaded" forever, so it is reset first.
+        res = self.sys.run([self.cfg.systemctl, "is-active", *REBOOT_UNITS], self.cfg.command_timeout)
+        states = [line.strip() for line in res.out.splitlines() if line.strip()]
+        if any(state in REBOOT_PENDING_STATES for state in states):
+            raise OpError("busy", "a reboot is already scheduled")
+        self.sys.run([self.cfg.systemctl, "reset-failed", *REBOOT_UNITS], self.cfg.command_timeout)  # rc ignored
+        delay = int(self.cfg.reboot_delay)
+        argv = [self.cfg.systemd_run, f"--unit={REBOOT_UNIT}", "--collect",
+                "--description=Reboot requested from the dashboard",
+                f"--on-active={delay}s", "--timer-property=AccuracySec=1s", "/usr/bin/systemctl", "reboot"]
+        res = self.sys.run(argv, self.cfg.command_timeout)
+        if res.rc != 0:
+            if REBOOT_EXISTS_RE.search(res.err):
+                raise OpError("busy", "a reboot is already scheduled")
+            first = (res.err.strip().splitlines() or [""])[0]
+            raise OpError("failed", clean_log(f"systemd-run exited {res.rc}: {first}", 300))
+        self.log.warning(f"reboot scheduled in {delay} s")
+        return {"scheduled_in": delay}
+
+    # ---- set-pin (CONTRACTS §11.7.1)
+
+    @staticmethod
+    def _pin_repo(pin: str) -> str:
+        """The repository of an image ref: the part before its :tag and @digest."""
+        ref = pin.split("@", 1)[0]
+        slash = ref.rfind("/")
+        colon = ref.rfind(":")
+        return ref[:colon] if colon > slash else ref
+
+    @staticmethod
+    def _pin_tag(pin: str) -> str:
+        ref = pin.split("@", 1)[0]
+        colon = ref.rfind(":")
+        return ref[colon + 1:] if colon > ref.rfind("/") else ref
+
+    def _pin_target(self, name: str) -> Declared:
+        decl = next((d for d in self.declared() if d.name == name and d.watch), None)
+        if decl is None:
+            raise OpError("not-allowed", f"{name} is not a watched app in a deployed compose file")
+        if decl.stack not in self.cfg.pin_stacks:
+            raise OpError("not-allowed", f"{name} is in the {decl.stack} stack; only {', '.join(self.cfg.pin_stacks)} "
+                                         "apps can be moved to a new version here")
+        if decl.local_build:
+            raise OpError("local-image", f"{name} is built on the host; a deploy updates it, not the dashboard")
+        if not decl.pinned:
+            raise OpError("not-allowed", f"{name} has no image in its compose file")
+        return decl
+
+    def _check_new_pin(self, current: str, pin: str) -> None:
+        if len(pin) > MAX_PIN_LEN:
+            raise OpError("bad-request", f"pin longer than {MAX_PIN_LEN} characters")
+        if pin == current:
+            raise OpError("already-pinned", "the app already runs that pin")
+        repo = self._pin_repo(current)
+        if not re.match("^" + re.escape(repo) + ":" + PIN_TAG + PIN_DIGEST + r"\Z", pin):
+            raise OpError("bad-request", f"pin must be {repo}:<tag>@sha256:<64 hex>")
+
+    def _read_trusted(self, path: Path, limit: int) -> tuple[bytes, os.stat_result]:
+        """A root-owned regular file's bytes (never through a symlink) and its stat."""
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != self.cfg.trusted_owner_uid or st.st_mode & 0o022:
+                raise OpError("failed", f"{path.name} is not a root-owned file that only root can write")
+            if st.st_size > limit:
+                raise OpError("failed", f"{path.name} is too large")
+            chunks, size = [], 0
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > limit:
+                    raise OpError("failed", f"{path.name} is too large")
+                chunks.append(chunk)
+            return b"".join(chunks), st
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _repin_compose(data: bytes, old: str, new: str) -> bytes | None:
+        """data with the one `image: <old>` line (quoted or not) changed to <new>, keeping its
+        indentation, quoting and any trailing comment. None unless exactly one line matches."""
+        pattern = re.compile(rb"(?P<pre>[ ]*image:[ \t]+)(?P<q>[\"']?)" + re.escape(old.encode())
+                             + rb"(?P=q)(?P<post>(?:[ \t]+#.*)?[ \t]*)")
+        lines = data.splitlines(keepends=True)
+        hits = []
+        for i, line in enumerate(lines):
+            body = line.rstrip(b"\r\n")
+            m = pattern.fullmatch(body)
+            if m:
+                hits.append((i, m, line[len(body):]))
+        if len(hits) != 1:
+            return None
+        i, m, eol = hits[0]
+        lines[i] = m["pre"] + m["q"] + new.encode() + m["q"] + m["post"] + eol
+        return b"".join(lines)
+
+    def _atomic_write(self, path: Path, data: bytes, mode: int, gid: int) -> None:
+        """Write data to path via <name>.tmp-<pid> in the same directory (O_EXCL|O_NOFOLLOW): mode,
+        owner trusted_owner_uid, fsync, rename, fsync the directory. Never a half-written file."""
+        tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)  # a leftover from a killed run with the same pid (unlink never follows a link)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            try:
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(fd, view):]
+                os.fchmod(fd, mode)
+                st = os.fstat(fd)
+                # Root creates its files as root:root already. fchown only when needed: the unit's
+                # SystemCallFilter=~@privileged refuses chown.
+                if (st.st_uid, st.st_gid) != (self.cfg.trusted_owner_uid, gid):
+                    os.fchown(fd, self.cfg.trusted_owner_uid, gid)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.rename(tmp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
+        dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+    def _pins_path(self) -> Path:
+        return Path(self.cfg.state_dir) / "pins.json"
+
+    def _read_pins(self) -> tuple[bytes | None, dict[str, Any]]:
+        """(the exact bytes of pins.json or None when it doesn't exist, the parsed record)."""
+        path = self._pins_path()
+        try:
+            raw, _st = self._read_trusted(path, MAX_PINS_BYTES)
+        except FileNotFoundError:
+            return None, {"version": 1, "pins": {}}
+        except OSError as exc:
+            raise OpError("failed", f"the pin record is unreadable ({exc.strerror or exc})") from exc
+        try:
+            record = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise OpError("failed", "the pin record is not valid JSON") from exc
+        if not (isinstance(record, dict) and record.get("version") == 1 and isinstance(record.get("pins"), dict)):
+            raise OpError("failed", "the pin record has an unknown format")
+        return raw, record
+
+    def _restore_pins(self, raw: bytes | None) -> None:
+        path = self._pins_path()
+        if raw is None:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(path)
+            return
+        self._atomic_write(path, raw, 0o644, os.getgid())
+
+    def op_set_pin(self, req: dict[str, Any], reply: Reply, _conn: socket.socket) -> str:
+        name, pin = req["name"], req["pin"]
+        decl = self._pin_target(name)
+        self._check_new_pin(decl.pinned, pin)
+        self.lookup(name)  # a watched container Docker knows, as for update
+        self.check_gate(decl.stack)
+        with self.lock("media-pins", "a media app update"), self.lock(f"container-{name}", f"an action on {name}"):
+            # Read again under the locks: what is checked here is exactly what gets rewritten.
+            decl = self._pin_target(name)
+            self._check_new_pin(decl.pinned, pin)
+            compose_path = Path(decl.compose_file)
+            try:
+                original, st = self._read_trusted(compose_path, MAX_COMPOSE_BYTES)
+            except OSError as exc:
+                raise OpError("failed", f"cannot read the compose file ({exc.strerror or exc})") from exc
+            rewritten = self._repin_compose(original, decl.pinned, pin)
+            if rewritten is None:
+                raise OpError("failed", "compose file doesn't match its pin")
+            pins_raw, pins = self._read_pins()
+            # From here on the run goes to the end even if the client disconnects.
+            reply.start_stream("set-pin", name=name, **{"from": decl.pinned, "to": pin})
+            ok, message = self._set_pin(decl, pin, reply, compose_path, original, rewritten,
+                                        stat.S_IMODE(st.st_mode), st.st_gid, pins_raw, pins)
+            if ok:
+                self.log.info(f"set-pin {name}: {clean_log(self._pin_tag(decl.pinned), 140)} -> "
+                              f"{clean_log(self._pin_tag(pin), 140)}")
+                reply.end(True, "done")
+            else:
+                self.log.warning(f"set-pin {name} failed: {clean_log(message)}")
+                reply.end(False, "failed", message)
+        return "ok" if ok else "failed"
+
+    def _set_pin(self, decl: Declared, pin: str, reply: Reply, compose_path: Path, original: bytes,
+                 rewritten: bytes, mode: int, gid: int, pins_raw: bytes | None,
+                 pins: dict[str, Any]) -> tuple[bool, str]:
+        """pulling -> pinning -> recreating -> waiting-health -> done, or failed (with a rollback
+        when anything at or after pinning went wrong). Returns (ok, message)."""
+        compose = ["compose", "--ansi", "never", "--progress", "plain", "-f", decl.compose_file]
+        up = [*compose, "up", "--detach", "--no-deps", "--no-build", "--pull", "never", decl.service]
+
+        def emit(text: str) -> None:
+            if text.strip():
+                reply.event({"type": "output", "text": text})
+
+        step = "pulling"
+        why, code = "", ""
+        try:
+            self._step(reply, "pulling", image=pin)
+            rc, why = self.run_streamed(["pull", pin], self.cfg.pull_timeout, emit)
+            if rc != 0:
+                self._step(reply, "failed", failed_step=step, code="pull-failed", message=why)
+                return False, f"{step}: {why}"
+        except OpError as exc:
+            self._step(reply, "failed", failed_step=step, code=exc.code, message=exc.message)
+            return False, f"{step}: {exc.message}"
+
+        # Nothing has changed until here. From pinning on, a failure rolls back.
+        try:
+            step, code = "pinning", "pin-failed"
+            self._step(reply, step)
+            key = f"{decl.stack}/{decl.service}"
+            prior = pins["pins"].get(key)
+            previous = decl.pinned
+            if isinstance(prior, dict) and prior.get("image") == decl.pinned and isinstance(prior.get("previous"), str):
+                previous = prior["previous"]  # keep the repo's pin from before the first dashboard update
+            record = {"version": 1, "pins": {**pins["pins"], key: {
+                "image": pin, "previous": previous, "at": iso_utc(self.sys.time())}}}
+            # The record first: a crash between the two writes leaves the record ahead of the compose
+            # file, which role stacks treats as "repo behind" and renders the host pin (never a silent
+            # rollback). The reverse order would leave a new pin with no record.
+            Path(self.cfg.state_dir).mkdir(mode=0o755, parents=True, exist_ok=True)
+            self._atomic_write(self._pins_path(), (json.dumps(record, indent=2, sort_keys=True) + "\n").encode(),
+                               0o644, os.getgid())
+            self._atomic_write(compose_path, rewritten, mode, gid)
+            after = next((d for d in self.declared() if d.name == decl.name), None)
+            if after is None or after.pinned != pin or not self._trusted(compose_path):
+                raise OpError("pin-failed", "the rewritten compose file doesn't read back with the new pin")
+            step, code = "recreating", "recreate-failed"
+            self._step(reply, step)
+            rc, why = self.run_streamed(up, self.cfg.up_timeout, emit)
+            if rc != 0:
+                raise OpError(code, why)
+            step, code = "waiting-health", "health-failed"
+            self._step(reply, step)
+            ok, why, image, health = self._wait_health(decl.name)
+            if not ok:
+                raise OpError(code, why)
+        except OpError as exc:
+            code, why = exc.code, exc.message
+        except OSError as exc:
+            why = f"{exc.strerror or exc}"
+        except Exception as exc:  # noqa: BLE001 - whatever broke after pinning, the rollback still runs
+            why = f"internal error ({type(exc).__name__})"
+        else:
+            self._step(reply, "done", image=image, health=health)
+            return True, ""
+
+        rolled_back, result = self._roll_back(decl, reply, compose_path, original, mode, gid, pins_raw, up, emit)
+        message = f"{why}; {result}"
+        self._step(reply, "failed", failed_step=step, code=code, message=message, rolled_back=rolled_back)
+        return False, f"{step}: {message}"
+
+    def _roll_back(self, decl: Declared, reply: Reply, compose_path: Path, original: bytes, mode: int, gid: int,
+                   pins_raw: bytes | None, up: list[str], emit: Callable[[str], None]) -> tuple[bool, str]:
+        """Restore the exact compose bytes and pin record, recreate, wait for health."""
+        self._step(reply, "rolling-back", image=decl.pinned)
+        problems = []
+        try:
+            self._atomic_write(compose_path, original, mode, gid)
+        except OSError as exc:
+            problems.append(f"the compose file was not restored ({exc.strerror or exc})")
+        try:
+            self._restore_pins(pins_raw)
+        except OSError as exc:
+            problems.append(f"the pin record was not restored ({exc.strerror or exc})")
+        if not problems:
+            try:
+                rc, why = self.run_streamed(up, self.cfg.up_timeout, emit)
+                if rc != 0:
+                    problems.append(f"recreating: {why}")
+                else:
+                    ok, why, _image, _health = self._wait_health(decl.name)
+                    if not ok:
+                        problems.append(f"waiting-health: {why}")
+            except OpError as exc:
+                problems.append(exc.message)
+        if problems:
+            return False, "rollback also failed: " + "; ".join(problems)
+        return True, f"rolled back to {self._pin_tag(decl.pinned)}"
 
     def op_last_pull(self, _req: dict[str, Any]) -> dict[str, Any]:
         user = self.cfg.backup_pull_user

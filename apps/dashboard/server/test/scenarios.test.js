@@ -25,6 +25,7 @@ test('normal day: everything healthy, drive forecast, backups, media tiles, no i
   assert.equal(s.access, 'tailnet');
   assert.deepEqual(s.server, { name: 'testhost', version: '2.0.0', timeZone: 'UTC' });
   assert.deepEqual(s.links, { runbooks: [] }, 'no runbook config -> empty list');
+  assert.deepEqual(s.hostActions, { reboot: { lock: null }, mediaUpdate: { lock: null, running: null } }, '§11.7.2');
   assert.ok(s.apps.every((a) => a.stoppedReason === null));
   assert.equal(s.gate.status, 'ok');
   assert.match(s.gate.line, /^Drive found, checked and mounted at \/media \(Oct 21 06:01\)\. Apps released\.$/);
@@ -77,6 +78,7 @@ test('bad night: gate failed after a power-cycle, Docker held, every app held, d
   const s = r.json;
   assert.equal(s.gate.status, 'failed');
   assert.equal(s.gate.line, 'Media drive missing since 02:31 after a power-cycle. 8 apps held. Retrying every 5 min.');
+  assert.deepEqual(s.hostActions, { reboot: { lock: null }, mediaUpdate: { lock: 'Held by the boot gate until the media drive is back.', running: null } }, 'a reboot stays possible');
   assert.equal(s.gate.since, '2026-10-24T02:31:00.000Z');
   assert.equal(s.gate.powercycled, true);
   assert.equal(s.gate.nextRetryAt, new Date(Math.floor((Date.parse('2026-10-24T14:08:00Z') + 222_000) / 1000) * 1000).toISOString());

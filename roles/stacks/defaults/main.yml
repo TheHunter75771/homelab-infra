@@ -79,3 +79,19 @@ stacks_mem_limits:
 
 # docker compose up --wait: fail the run if a container is not healthy within this many seconds.
 stacks_compose_wait_timeout: 300
+
+# Host image pins (docs/CONTRACTS.md §11.7.4). The dashboard's root helper can move a media app to a newer
+# image on the host and records it here; tasks/host_pins.yml merges it with versions.yml before the media
+# compose file is rendered, so a run never silently rolls an app back (filter_plugins/host_pins.py).
+stacks_host_pins_file: /var/lib/homelab-dockerctl/pins.json
+# The images keys the media compose file renders, with the app name used in messages.
+stacks_media_apps:
+  jellyfin: Jellyfin
+  sonarr: Sonarr
+  radarr: Radarr
+  prowlarr: Prowlarr
+  sabnzbd: SABnzbd
+  jellyseerr: Jellyseerr
+# -e stacks_drop_host_pins=true: versions.yml wins over every host pin; the entries are removed after the
+# media stack is up and the repo pins are deployed (the way out of a conflict when the repo should win).
+stacks_drop_host_pins: false

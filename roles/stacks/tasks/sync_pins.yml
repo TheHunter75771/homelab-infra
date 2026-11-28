@@ -1,0 +1,91 @@
+---
+# Adopt the host's image pins into versions.yml (docs/CONTRACTS.md §11.7.4), for playbooks/sync-pins.yml.
+# Reads the pin record on the media server (read-only), then edits versions.yml on the CONTROLLER: each
+# matching repo pin is replaced by the host pin, exact old value -> new value, and the old value must occur
+# exactly once. Prints what changed. Never commits; check mode (--check --diff) shows the edit without writing.
+# Needs stacks_sync_pins_versions_file (the playbook sets it).
+
+- name: Sync pins | look for the dashboard's pin record
+  ansible.builtin.stat:
+    path: "{{ stacks_host_pins_file }}"
+    follow: false
+    get_checksum: false
+  register: stacks_sync_stat
+
+- name: Sync pins | the pin record is a regular file
+  ansible.builtin.assert:
+    that: not stacks_sync_stat.stat.exists or stacks_sync_stat.stat.isreg
+    fail_msg: "{{ stacks_host_pins_file }} exists but is not a regular file; nothing was synced."
+    quiet: true
+
+- name: Sync pins | read the pin record
+  ansible.builtin.slurp:
+    src: "{{ stacks_host_pins_file }}"
+  register: stacks_sync_slurp
+  when: stacks_sync_stat.stat.exists
+
+- name: Sync pins | which repo pins the host has moved
+  ansible.builtin.set_fact:
+    stacks_sync_plan: >-
+      {{ (stacks_sync_slurp.content if stacks_sync_stat.stat.exists else None)
+         | stacks_host_pins_sync_plan(images, stacks_media_apps, b64=True) }}
+
+- name: Sync pins | stop - the pin record does not fit versions.yml (nothing was changed)
+  ansible.builtin.fail:
+    msg: "{{ ['playbooks/sync-pins.yml: ' ~ stacks_host_pins_file] + stacks_sync_plan.errors }}"
+  when: stacks_sync_plan.errors | length > 0
+
+- name: Sync pins | WARNING - entries left out
+  ansible.builtin.debug:
+    msg: "{{ stacks_sync_plan.warnings }}"
+  when: stacks_sync_plan.warnings | length > 0
+
+- name: Sync pins | nothing to sync
+  ansible.builtin.debug:
+    msg: nothing to sync (versions.yml already has every pin the host runs)
+  when: stacks_sync_plan.changes | length == 0
+
+- name: Sync pins | versions.yml on the controller
+  when: stacks_sync_plan.changes | length > 0
+  delegate_to: localhost
+  become: false
+  run_once: true
+  block:
+    - name: Sync pins | look at versions.yml
+      ansible.builtin.stat:
+        path: "{{ stacks_sync_pins_versions_file }}"
+        get_checksum: false
+      register: stacks_sync_versions_stat
+
+    - name: Sync pins | versions.yml is there
+      ansible.builtin.assert:
+        that: stacks_sync_versions_stat.stat.exists and stacks_sync_versions_stat.stat.isreg
+        fail_msg: "{{ stacks_sync_pins_versions_file }} is not a regular file; nothing was changed."
+        quiet: true
+
+    - name: Sync pins | read versions.yml
+      ansible.builtin.slurp:
+        src: "{{ stacks_sync_pins_versions_file }}"
+      register: stacks_sync_versions
+
+    - name: Sync pins | replace each old pin (exactly once)
+      ansible.builtin.set_fact:
+        stacks_sync_edit: "{{ stacks_sync_versions.content | b64decode | stacks_replace_once(stacks_sync_plan.changes) }}"
+
+    - name: Sync pins | stop - versions.yml does not match (nothing was changed)
+      ansible.builtin.fail:
+        msg: "{{ stacks_sync_edit.errors }}"
+      when: stacks_sync_edit.errors | length > 0
+
+    - name: Sync pins | write versions.yml
+      ansible.builtin.copy:
+        dest: "{{ stacks_sync_pins_versions_file }}"
+        content: "{{ stacks_sync_edit.text }}"
+        mode: "{{ stacks_sync_versions_stat.stat.mode }}"
+
+    - name: Sync pins | what changed
+      ansible.builtin.debug:
+        msg: >-
+          {{ stacks_sync_plan.changes | map(attribute='line') | list
+             + ['versions.yml was edited, not committed. Review `git diff`, commit it, then run site.yml '
+                ~ '(that run finds the pins in sync and removes them from the host record).'] }}

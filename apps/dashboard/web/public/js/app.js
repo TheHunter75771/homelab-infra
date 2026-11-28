@@ -133,6 +133,33 @@ function Toast({ toast, actions }) {
   </div>`;
 }
 
+// The dialog's list (media-update): real checkbox rows in review, one status row per app in progress.
+function DialogRows({ rows, label, busy, progress, actions }) {
+  return html`<ul class="dlg-rows" aria-label=${label} aria-live=${progress ? 'polite' : undefined}>
+    ${rows.map((r) => {
+      const text = html`<span class="dlg-row-text">
+        <b>${r.label}</b>
+        ${r.versions && html`<span class="mono">${r.versions}</span>`}
+        ${r.note && html`<span class=${`dlg-row-note tc tone-${r.noteTone || 'warn'}`}><${Icon} name="warning" />${r.note}</span>`}
+      </span>`;
+      if (r.checkbox) {
+        return html`<li class="dlg-row" key=${r.key}>
+          <label class="dlg-check">
+            <input type="checkbox" checked=${r.checked} disabled=${busy} onChange=${(e) => actions.toggleMediaApp(r.key, e.currentTarget.checked)} />
+            ${text}
+          </label>
+        </li>`;
+      }
+      return html`<li class="dlg-row" key=${r.key}>
+        <span class="dlg-static">
+          ${text}
+          ${r.status && html`<span class=${`dlg-row-status tc tone-${r.tone || 'idle'}`}><${Icon} name=${r.icon || 'info'} spin=${r.spin} />${r.status}</span>`}
+        </span>
+      </li>`;
+    })}
+  </ul>`;
+}
+
 function Dialog({ dialog, view, actions }) {
   const ref = useRef(null);
   const opener = useRef(null);
@@ -184,17 +211,27 @@ function Dialog({ dialog, view, actions }) {
     if (!open) return;
     const box = ref.current;
     if (box && !box.contains(document.activeElement)) (focusables()[0] || box).focus?.();
-  }, [open, dialog?.phase, dialog?.busy]);
+  }, [open, dialog?.phase, dialog?.busy, dialog?.loading]);
   if (!dialog) return null;
   const app = view?.apps.find((a) => a.name === dialog.app);
-  const c = dialogContent(dialog, { app, gate: view?.gate });
+  const c = dialogContent(dialog, { app, gate: view?.gate, view });
   if (!c) return null;
   const progress = dialog.phase === 'progress';
+  const lines = c.lines || [];
+  const confirmOff = dialog.busy || Boolean(c.confirmReason);
   return html`<div class="backdrop" onClick=${(e) => e.target === e.currentTarget && actions.cancelDialog()}>
-    <div class=${`dialog tone-${c.tone}`} role="dialog" aria-modal="true" aria-labelledby="dlg-title" aria-describedby="dlg-body" ref=${ref} tabindex="-1">
+    <div class=${`dialog tone-${c.tone}${c.rows ? ' wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby="dlg-title" aria-describedby=${lines.length ? 'dlg-body dlg-lines' : 'dlg-body'} aria-busy=${dialog.loading ? 'true' : undefined} ref=${ref} tabindex="-1">
       <div class="dialog-head"><${Icon} name=${c.icon} /><h2 id="dlg-title">${c.title}</h2></div>
       <p class="dialog-body" id="dlg-body">${c.body}</p>
+      ${lines.length > 0 &&
+      html`<ul class="dialog-lines" id="dlg-lines">
+        ${lines.map((l) => html`<li class=${`tone-${l.tone || 'info'}`}><${Icon} name=${l.icon || 'info'} cls="tc" />${l.text}</li>`)}
+      </ul>`}
+      ${c.meta && html`<span class="dialog-meta">${c.meta}</span>`}
+      ${dialog.loading && html`<div class="dialog-loading" role="status"><${Icon} name="circle-notch" spin />Checking…</div>`}
+      ${c.rows && c.rows.length > 0 && html`<${DialogRows} rows=${c.rows} label=${c.rowsLabel} busy=${dialog.busy} progress=${progress} actions=${actions} />`}
       ${progress &&
+      !c.rows &&
       html`<div class="steps" role="list" aria-live="polite">
         ${(c.steps || []).map((label, i) => {
           const done = i < dialog.step;
@@ -208,7 +245,16 @@ function Dialog({ dialog, view, actions }) {
       ${!progress &&
       html`<div class="dialog-actions">
         <${Btn} label="Cancel" onClick=${() => actions.cancelDialog()} reason=${dialog.busy ? 'Working' : null} />
-        <button type="button" class=${`btn toned tone-${c.tone}`} data-autofocus=${c.tone === 'fail' ? undefined : 'true'} disabled=${dialog.busy} onClick=${() => actions.confirm()}>
+        ${c.secondary &&
+        html`<${Btn} icon=${c.secondary.icon} label=${c.secondary.label} reason=${dialog.busy ? 'Working' : c.secondary.reason} onClick=${() => actions.secondary(c.secondary.key)} />`}
+        <button
+          type="button"
+          class=${`btn toned tone-${c.tone}`}
+          data-autofocus=${c.tone === 'fail' || c.rows ? undefined : 'true'}
+          disabled=${confirmOff}
+          title=${confirmOff ? (dialog.busy ? 'Working' : c.confirmReason) : undefined}
+          onClick=${() => actions.confirm()}
+        >
           ${dialog.busy && html`<${Icon} name="circle-notch" spin />`}${c.confirm}
         </button>
       </div>`}

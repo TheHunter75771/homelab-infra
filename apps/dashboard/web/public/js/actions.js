@@ -4,7 +4,7 @@
 
 import { post, del, put, getJSON, streamSSE, parseJSON, appPath, ApiError } from './api.js';
 import { normalizeApp, pendingOutcome, APP_META, gateStatus } from './model.js';
-import { shortImage, fmtCountdown, plural } from './format.js';
+import { shortImage, fmtCountdown, fmtClock, plural } from './format.js';
 import * as pushLib from './push.js';
 
 // Server step names (apps/dashboard/server, "Action steps") -> index in the dialog's step list.
@@ -13,10 +13,166 @@ import * as pushLib from './push.js';
 export const STEP_INDEX = {
   update: { pulling: 0, recreating: 1, 'waiting-health': 2, done: 3 },
   rerun: { requested: 0, running: 1, done: 2 },
+  reboot: { requested: 0, scheduled: 1, done: 2 },
 };
 
-// What a dialog says. `app` is a derived app (deriveApps), `device` a {id,label}.
-export function dialogContent(dialog, { app, gate } = {}) {
+// Media-app updates (CONTRACTS §11.7.2): the helper's per-app steps, as the progress rows say them.
+export const MEDIA_STEP_LABEL = {
+  pulling: 'Pulling',
+  pinning: 'Saving the new version',
+  recreating: 'Recreating',
+  'waiting-health': 'Waiting for health check',
+  'rolling-back': 'Rolling back',
+};
+export const MAJOR_NOTE = 'Major version: read the release notes first';
+// status `ahead` (§11.7.2): the pin is newer than the registry's latest; never offered (a downgrade can break databases)
+export const AHEAD_NOTE = "The pinned version is newer than the registry's latest release.";
+
+// A version for display: the tag of a pin ("lscr.io/x/sonarr:4.0.20-ls7@sha256:…" → "4.0.20-ls7"), or the
+// value itself when it is already a version.
+export function versionOf(v) {
+  if (v && typeof v === 'object') return versionOf(v.version ?? v.pin);
+  const s = String(v ?? '').trim();
+  if (!s) return '';
+  if (!s.includes('@') && !s.includes('/')) return s;
+  const ref = s.split('@')[0];
+  const i = ref.lastIndexOf(':');
+  return i > ref.lastIndexOf('/') ? ref.slice(i + 1) : ref;
+}
+
+// Rows of a GET /api/media/updates answer: [{name, label, status, major, current, latest, message}].
+export function mediaCheckApps(check) {
+  return (Array.isArray(check?.apps) ? check.apps : [])
+    .filter((a) => a && typeof a.name === 'string')
+    .map((a) => ({
+      name: a.name,
+      label: String(a.label || APP_META[a.name]?.label || a.name),
+      status: ['update', 'current', 'ahead', 'deprecated', 'error'].includes(a.status) ? a.status : 'error',
+      major: Boolean(a.major),
+      current: versionOf(a.current),
+      latest: versionOf(a.latest),
+      message: typeof a.message === 'string' ? a.message : '',
+    }));
+}
+
+// What is ticked when a check arrives: every update except the major ones.
+export function defaultSelection(check) {
+  return Object.fromEntries(mediaCheckApps(check).filter((a) => a.status === 'update').map((a) => [a.name, !a.major]));
+}
+
+// The names to send, in the check's order: ticked and still offered as an update.
+export function selectedApps(dialog) {
+  const sel = dialog?.selected || {};
+  return mediaCheckApps(dialog?.check)
+    .filter((a) => a.status === 'update' && sel[a.name])
+    .map((a) => a.name);
+}
+
+// Progress rows of a media update, folded from the action's raw step objects. Pure.
+// row: {name, label, from, to, state: 'waiting'|'running'|'done'|'failed', step, rolledBack}
+export function applyMediaStep(rows, data, labelOf = (n) => APP_META[n]?.label || n) {
+  const list = Array.isArray(rows) ? rows : [];
+  const step = String(data?.step ?? '').toLowerCase();
+  const name = typeof data?.app === 'string' ? data.app : null;
+  if (!name) return list;
+  const i = list.findIndex((r) => r.name === name);
+  const base = i === -1 ? { name, label: labelOf(name), from: '', to: '', state: 'waiting', step: null, rolledBack: false } : list[i];
+  let row = base;
+  if (step === 'app') {
+    row = { ...base, state: 'running', step: null, from: versionOf(data.from) || base.from, to: versionOf(data.to) || base.to, index: Number.isFinite(base.index) ? base.index : Number.isFinite(Number(data.index)) && data.index !== null ? Number(data.index) : undefined };
+  } else if (step === 'app-done') {
+    row = { ...base, state: 'done', step: null };
+  } else if (step === 'app-failed') {
+    row = { ...base, state: 'failed', step: null, rolledBack: Boolean(data.rolledBack ?? data.rolled_back) };
+  } else if (MEDIA_STEP_LABEL[step]) {
+    row = { ...base, state: 'running', step, rolledBack: base.rolledBack || step === 'rolling-back' };
+  } else {
+    return list;
+  }
+  const next = i === -1 ? [...list, row] : list.map((r, j) => (j === i ? row : r));
+  // the server's order (index) when it gave one; arrival order otherwise
+  return next.every((r) => Number.isFinite(r.index)) ? [...next].sort((a, b) => a.index - b.index) : next;
+}
+
+// The text of a progress row's status.
+export function mediaRowStatus(r) {
+  if (r.state === 'done') return 'Updated';
+  if (r.state === 'failed') return r.rolledBack ? 'Failed, rolled back' : 'Failed';
+  if (r.state === 'running') return MEDIA_STEP_LABEL[r.step] || 'Starting';
+  return 'Waiting';
+}
+
+function rebootLines(view) {
+  const lines = [];
+  const jf = view?.media?.tiles?.jellyfin;
+  const watching = jf && jf.state === 'ok' && Array.isArray(jf.sessions) ? jf.sessions.length : 0;
+  if (watching === 1) lines.push({ icon: 'play-circle', tone: 'warn', text: '1 person is watching right now.' });
+  else if (watching > 1) lines.push({ icon: 'play-circle', tone: 'warn', text: `${watching} people are watching right now.` });
+  if (view?.host?.rebootRequired) {
+    const pkgs = (view.host.rebootPackages || []).map(String).filter(Boolean);
+    lines.push({ icon: 'info', tone: 'info', text: pkgs.length ? `Installs the pending updates: ${pkgs.join(', ')}.` : 'Installs the pending updates.' });
+  }
+  return lines;
+}
+
+function mediaUpdateContent(dialog) {
+  if (dialog.phase === 'progress') {
+    const rows = (dialog.progress || []).map((r) => ({
+      key: r.name,
+      label: r.label,
+      versions: r.from && r.to ? `${r.from} → ${r.to}` : r.to || r.from || '',
+      status: mediaRowStatus(r),
+      tone: r.state === 'done' ? 'ok' : r.state === 'failed' ? 'fail' : r.state === 'running' ? 'info' : 'idle',
+      icon: r.state === 'done' ? 'check-circle' : r.state === 'failed' ? 'x-circle' : r.state === 'running' ? 'circle-notch' : 'circle',
+      spin: r.state === 'running',
+    }));
+    return {
+      icon: 'arrow-circle-up',
+      tone: 'info',
+      title: 'Updating media apps…',
+      body: 'One app at a time. Each one is down for about a minute, and it is rolled back if its health check fails. The update stops at the first failure.',
+      rowsLabel: 'Update progress',
+      rows,
+    };
+  }
+  const apps = mediaCheckApps(dialog.check);
+  const sel = dialog.selected || {};
+  const n = selectedApps(dialog).length;
+  let body;
+  if (dialog.loading) body = 'Checking for new stable releases…';
+  else if (dialog.error) body = `Couldn't check for updates: ${String(dialog.error).replace(/\.$/, '')}.`;
+  else if (!apps.length) body = 'No media apps to check.';
+  else if (!apps.some((a) => a.status === 'update')) body = 'Every media app is on its newest stable release.';
+  else body = 'Tick the apps to update. They update one at a time, each is down for about a minute, and a failed health check rolls it back.';
+  const checkedAt = dialog.check?.checkedAt ? new Date(dialog.check.checkedAt) : null;
+  const rows = dialog.loading
+    ? []
+    : apps.map((a) => {
+        const row = { key: a.name, label: a.label, versions: a.status === 'update' ? `${a.current} → ${a.latest}` : a.current };
+        if (a.status === 'update') return { ...row, checkbox: true, checked: Boolean(sel[a.name]), note: a.major ? MAJOR_NOTE : null, noteTone: 'warn' };
+        if (a.status === 'current') return { ...row, status: 'Up to date', tone: 'ok', icon: 'check-circle' };
+        if (a.status === 'ahead') return { ...row, status: a.message || AHEAD_NOTE, tone: 'info', icon: 'info' };
+        if (a.status === 'deprecated') return { ...row, status: a.message || 'This image is no longer maintained.', tone: 'warn', icon: 'warning' };
+        return { ...row, status: a.message || "Couldn't look up the newest release.", tone: 'fail', icon: 'x-circle' };
+      });
+  return {
+    icon: 'arrow-circle-up',
+    tone: 'info',
+    title: 'Media app updates',
+    body,
+    meta: checkedAt && !Number.isNaN(checkedAt.getTime()) && !dialog.loading ? `Checked at ${fmtClock(checkedAt)}` : null,
+    rowsLabel: 'Media apps',
+    rows,
+    confirm: `Update ${plural(n, 'app')}`,
+    confirmReason: dialog.loading ? 'Checking' : n === 0 ? 'Tick at least one app' : null,
+    secondary: { key: 'recheck', label: 'Check again', icon: 'arrows-clockwise', reason: dialog.loading ? 'Checking' : null },
+  };
+}
+
+// What a dialog says. `app` is a derived app (deriveApps), `device` a {id,label}, `view` the built view.
+// Optional extras: `lines` (notes under the body), `rows` (a list: checkboxes in review, status per row in
+// progress), `confirmReason` (disables the confirm button), `secondary` (a second action button).
+export function dialogContent(dialog, { app, gate, view } = {}) {
   if (!dialog) return null;
   const L = app?.label || dialog.label || dialog.app || '';
   switch (dialog.kind) {
@@ -55,6 +211,17 @@ export function dialogContent(dialog, { app, gate } = {}) {
         // CORRECTIONS 3 (amended): only what the server can observe.
         steps: ['Requested', `Checking the drive (detect, verify, mount ${gate?.mountPath || '/media'})`],
       };
+    case 'reboot':
+      return {
+        icon: 'arrows-clockwise',
+        tone: 'fail',
+        title: 'Restart the media server?',
+        body: 'Everything on the box (Jellyfin, requests, downloads and this dashboard) is down for about 2–5 minutes. When it comes back, the boot gate checks the media drive before the apps start.',
+        lines: rebootLines(view),
+        confirm: 'Restart host',
+      };
+    case 'media-update':
+      return mediaUpdateContent(dialog);
     case 'remove':
       return {
         icon: 'bell-slash',
@@ -85,6 +252,8 @@ export function createActions(store, deps = {}) {
   // Wrapped: browsers throw "Illegal invocation" when timer functions are called as methods of another object.
   const timers = deps.timers || { setInterval: (fn, ms) => setInterval(fn, ms), clearInterval: (t) => clearInterval(t) };
   let rerunWatch = null;
+  let mediaFollowing = null; // the media-update action id this page is following
+  const mediaSeen = new Set(); // media-update ids already followed here: never re-followed
 
   const toast = (tone, text, icon) => store.dispatch({ type: 'toast', tone, text, icon });
   const findApp = (name) => (store.getState().summary?.apps || []).map(normalizeApp).find((a) => a.name === name);
@@ -98,7 +267,9 @@ export function createActions(store, deps = {}) {
 
   // Follow /api/actions/:id: `step` events ({step, at}) then one `end` ({state: done|failed, error, detail}).
   // Resolves {verdict: 'done'|'failed'|'ended', error, detail}; 'ended' = closed without a verdict.
-  async function followAction(id, kind, { onStep } = {}) {
+  // onStep gets the STEP_INDEX position; onRaw gets every step object as sent (a media update's per-app
+  // steps carry `app`, and those never decide the verdict: only the action's own done/failed/end do).
+  async function followAction(id, kind, { onStep, onRaw } = {}) {
     let verdict = 'ended';
     let error = null;
     let detail = null;
@@ -114,6 +285,8 @@ export function createActions(store, deps = {}) {
             return;
           }
           const step = String(data.step ?? '').toLowerCase();
+          onRaw?.(data);
+          if (data.app != null && kind === 'media-update') return;
           if (step === 'done') verdict = 'done';
           else if (step === 'failed') verdict = 'failed';
           else if (STEP_INDEX[kind]?.[step] !== undefined) onStep?.(STEP_INDEX[kind][step]);
@@ -185,8 +358,54 @@ export function createActions(store, deps = {}) {
     toast(result === 'timeout' ? 'warn' : 'fail', result === 'timeout' ? `The check hasn't reported back yet.${when}` : `Check failed.${when}`);
   }
 
+  // A media update this page isn't following yet (started on another device, or before a reload): show it.
+  function checkMediaRunning() {
+    const st = store.getState();
+    const id = st.summary?.hostActions?.mediaUpdate?.running;
+    if (!id || typeof id !== 'string' || mediaFollowing || mediaSeen.has(id) || st.dialog) return;
+    followMedia(id, []);
+  }
+
+  async function followMedia(id, rows) {
+    mediaFollowing = id;
+    mediaSeen.add(id);
+    setDialog({ kind: 'media-update', phase: 'progress', busy: false, step: 0, actionId: id, progress: rows });
+    let progress = rows;
+    const { verdict, error, detail } = await followAction(id, 'media-update', {
+      onRaw: (data) => {
+        progress = applyMediaStep(progress, data, label);
+        if (dialogIs('media-update') && store.getState().dialog.actionId === id) patchDialog({ progress });
+      },
+    });
+    mediaFollowing = null;
+    if (dialogIs('media-update') && store.getState().dialog.actionId === id) setDialog(null);
+    if (verdict === 'done') toast('ok', detail || `Updated ${plural(progress.filter((r) => r.state === 'done').length, 'app')}`);
+    else if (verdict === 'failed') toast('fail', error || 'The media update failed');
+    else toast('warn', error ? `Lost the update's progress: ${error}` : "Lost the update's progress. It keeps running on the server.");
+    live.refresh();
+  }
+
+  async function checkMediaUpdates(refresh = false) {
+    const d = store.getState().dialog;
+    if (d && !(d.kind === 'media-update' && d.phase === 'review')) return;
+    if (d?.loading || d?.busy) return; // one check at a time (double taps)
+    if (d) patchDialog({ loading: true, error: null });
+    else setDialog({ kind: 'media-update', phase: 'review', busy: false, step: 0, loading: true, error: null, check: null, selected: {} });
+    try {
+      const { data } = await getJSON(`/api/media/updates${refresh ? '?refresh=1' : ''}`, { timeoutMs: 60000 });
+      if (!dialogIs('media-update') || store.getState().dialog.phase !== 'review') return;
+      patchDialog({ loading: false, error: null, check: data, selected: defaultSelection(data) });
+    } catch (err) {
+      if (dialogIs('media-update') && store.getState().dialog.phase === 'review') patchDialog({ loading: false, error: errText(err) });
+    }
+  }
+
   store.subscribe((state, prev) => {
-    if (state.summary !== prev.summary) checkPending();
+    if (state.summary !== prev.summary) {
+      checkPending();
+      checkMediaRunning();
+    }
+    if (!state.dialog && prev.dialog) checkMediaRunning();
   });
   const sweep = timers.setInterval(checkPending, 5000);
 
@@ -252,11 +471,69 @@ export function createActions(store, deps = {}) {
       if (d && d.phase !== 'progress' && !d.busy) setDialog(null);
     },
 
+    checkMediaUpdates,
+
+    toggleMediaApp(name, on) {
+      const d = store.getState().dialog;
+      if (!d || d.kind !== 'media-update' || d.phase !== 'review' || d.busy) return;
+      patchDialog({ selected: { ...(d.selected || {}), [name]: Boolean(on) } });
+    },
+
+    // The dialog's second button (content.secondary.key).
+    secondary(key) {
+      if (key === 'recheck') return checkMediaUpdates(true);
+      return undefined;
+    },
+
     async confirm() {
       const d = store.getState().dialog;
-      if (!d || d.busy || d.phase !== 'confirm') return;
+      if (!d || d.busy) return;
+      if (d.kind === 'media-update' ? d.phase !== 'review' || d.loading : d.phase !== 'confirm') return;
       const L = label(d.app);
       switch (d.kind) {
+        case 'reboot': {
+          patchDialog({ busy: true });
+          let res;
+          try {
+            res = await post('/api/host/reboot');
+          } catch (err) {
+            setDialog(null);
+            toast('fail', `Couldn't restart the host: ${errText(err)}`);
+            return;
+          }
+          const id = actionId(res);
+          const { verdict, error, detail } = id ? await followAction(id, 'reboot') : { verdict: 'done', detail: res?.detail || null };
+          setDialog(null);
+          if (verdict === 'failed') toast('fail', `Couldn't restart the host${error ? `: ${error.replace(/\.$/, '')}` : ''}`);
+          else toast('ok', detail || 'Restarting in a few seconds. The dashboard is back in a few minutes.', 'arrows-clockwise');
+          live.refresh();
+          return;
+        }
+        case 'media-update': {
+          const names = selectedApps(d);
+          if (!names.length) return;
+          patchDialog({ busy: true, error: null });
+          let res;
+          try {
+            res = await post('/api/media/update', { apps: names });
+          } catch (err) {
+            // stays on the review list: "Check again" is the way out of a stale check (409)
+            if (dialogIs('media-update')) patchDialog({ busy: false });
+            toast('fail', `Couldn't start the update: ${errText(err)}`);
+            return;
+          }
+          live.refresh();
+          const id = actionId(res);
+          const byName = Object.fromEntries(mediaCheckApps(d.check).map((a) => [a.name, a]));
+          const rows = names.map((n, i) => ({ name: n, label: byName[n]?.label || label(n), from: byName[n]?.current || '', to: byName[n]?.latest || '', state: 'waiting', step: null, rolledBack: false, index: i + 1 }));
+          if (!id) {
+            setDialog(null);
+            toast('info', `Updating ${plural(names.length, 'app')}…`, 'arrow-circle-up');
+            return;
+          }
+          await followMedia(id, rows);
+          return;
+        }
         case 'stop': {
           patchDialog({ busy: true });
           const before = findApp(d.app);

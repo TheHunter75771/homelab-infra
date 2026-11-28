@@ -17,6 +17,8 @@ const WRITES = [
   ['POST', '/api/apps/sonarr/restart'],
   ['POST', '/api/apps/sonarr/update'],
   ['POST', '/api/gate/rerun'],
+  ['POST', '/api/media/update'],
+  ['POST', '/api/host/reboot'],
   ['DELETE', `/api/push/devices/${'0'.repeat(16)}`],
   ['PUT', '/api/settings'],
 ];
@@ -47,6 +49,7 @@ test('every write route: missing/wrong X-Homelab -> 403, wrong type -> 415, > 8 
   // nothing above may have acted
   assert.equal(d.helper.dockerCalls().filter((c) => c.op !== 'ps').length, 0);
   assert.equal(fs.existsSync(d.host.path('run/bootgate/rerun')), false);
+  assert.equal(d.helper.calls.filter((c) => c.op === 'reboot').length, 0);
 });
 
 test('guard order: header first, then content type; a body of exactly 8 KB passes', async (t) => {

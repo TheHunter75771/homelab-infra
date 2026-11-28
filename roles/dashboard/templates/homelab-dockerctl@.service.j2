@@ -1,7 +1,8 @@
 # {{ ansible_managed }}
 # One request from the dashboard (started by homelab-dockerctl.socket, connection on stdin).
 # Root, because the Docker socket is root:docker and the journal and media folders need it; but
-# boxed in: no network namespace access, one capability, read-only system, one writable cache.
+# boxed in: no network namespace access, one capability, read-only system except its cache, its
+# pin record and the deployed compose files (set-pin).
 # systemd-analyze security: ~1.0 (OK). What remains is root itself, CAP_DAC_READ_SEARCH (du over
 # media folders an app may have made 0700), AF_UNIX (the Docker socket) and @resources (nice/ionice).
 [Unit]
@@ -19,13 +20,19 @@ SyslogIdentifier=homelab-dockerctl
 Environment=HOMELAB_DOCKERCTL_CONFIG={{ dashboard_dockerctl_config }}
 # The docker CLI's config dir; /root is hidden (ProtectHome) and /tmp is private to this instance.
 Environment=DOCKER_CONFIG=/tmp/docker-config
-# Backstop above the helper's own limits (log follow 30 min, pull 20 min).
+# Backstop above the helper's own limits (log follow 30 min; set-pin worst case pull 20 min +
+# up 5 + health 5 + rollback up 5 + health 5 = 40 min).
 RuntimeMaxSec={{ dashboard_dockerctl_runtime_max }}
 TimeoutStopSec=15s
 UMask=0077
 # Disk-split cache and the per-container action locks, shared by every instance.
 CacheDirectory={{ dashboard_dockerctl_cache_name }}
 CacheDirectoryMode=0700
+# set-pin (CONTRACTS §11.7.1): the pin record /var/lib/homelab-dockerctl/pins.json (0755 root, read
+# by role stacks) and the one image: line it rewrites in a deployed compose file.
+StateDirectory=homelab-dockerctl
+StateDirectoryMode=0755
+ReadWritePaths={{ homelab_stacks_dir }}
 
 NoNewPrivileges=yes
 CapabilityBoundingSet=CAP_DAC_READ_SEARCH

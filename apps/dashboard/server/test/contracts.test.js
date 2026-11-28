@@ -69,10 +69,18 @@ test("the client's ops are exactly the helper's ops", { skip: hHelper === null &
   assert.deepEqual([...streams.matchAll(/"([a-z-]+)"/g)].map((m) => m[1]).sort(), [...STREAM_OPS].sort());
 });
 
+test('§11.7.2 routes: GET /api/media/updates, POST /api/media/update, POST /api/host/reboot', () => {
+  assert.equal(matchRoute('GET', '/api/media/updates').route?.handler, 'mediaUpdates');
+  assert.equal(matchRoute('POST', '/api/media/update').route?.handler, 'mediaUpdate');
+  assert.equal(matchRoute('POST', '/api/host/reboot').route?.handler, 'hostReboot');
+  assert.deepEqual(matchRoute('GET', '/api/host/reboot').allowed, ['POST']);
+  assert.deepEqual(matchRoute('POST', '/api/media/updates').allowed.sort(), ['GET', 'HEAD']);
+});
+
 test('README documents the API, the summary schema and the helper protocol', () => {
   const readme = read('README.md');
   for (const heading of ['## HTTP API', '## Summary schema', '## Configuration', '## Helper protocol']) assert.ok(readme.includes(heading), heading);
-  for (const route of ['/api/summary', '/api/events', '/api/apps/:name/logs', '/api/actions/:id', '/api/gate/rerun', '/api/push/devices', '/api/settings']) {
+  for (const route of ['/api/summary', '/api/events', '/api/apps/:name/logs', '/api/actions/:id', '/api/gate/rerun', '/api/push/devices', '/api/settings', '/api/media/updates', '/api/media/update', '/api/host/reboot']) {
     assert.ok(readme.includes(route), route);
   }
   for (const v of Object.keys(ENV_KEYS)) assert.ok(readme.includes(v), `${v} documented`);

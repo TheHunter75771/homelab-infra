@@ -152,7 +152,15 @@ class RunIsReadOnly(unittest.TestCase):
     def test_the_helper_unit(self) -> None:
         text = (TEMPLATES / "homelab-dockerctl@.service.j2").read_text()
         self.assertRegex(text, r"(?m)^ReadOnlyPaths=/run$")
-        self.assertNotRegex(text, r"(?m)^ReadWritePaths=")
+        # CONTRACTS §11.7.1: set-pin writes the deployed compose files and nothing else outside its
+        # own cache and state directories; nothing under /run becomes writable.
+        self.assertEqual(re.findall(r"(?m)^ReadWritePaths=(.*)$", text), ["{{ homelab_stacks_dir }}"])
+        self.assertRegex(text, r"(?m)^StateDirectory=homelab-dockerctl$")
+        self.assertRegex(text, r"(?m)^StateDirectoryMode=0755$")
+        for line in ("PrivateNetwork=yes", "CapabilityBoundingSet=CAP_DAC_READ_SEARCH", "NoNewPrivileges=yes",
+                     "ProtectSystem=strict", "SystemCallFilter=~@privileged", "RestrictAddressFamilies=AF_UNIX"):
+            with self.subTest(line=line):
+                self.assertRegex(text, rf"(?m)^{re.escape(line)}$")
 
 
 # The real worst case on the helper socket in one 2 s window: 8 log streams opened together
@@ -244,6 +252,9 @@ class Rendered(unittest.TestCase):
         self.assertEqual(cfg.backup_pull_user, "backuppull")
         self.assertEqual(cfg.cache_dir, "/var/cache/homelab-dockerctl")
         self.assertEqual(cfg.follow_max_seconds, 1800)
+        self.assertEqual(cfg.pin_stacks, ("media",))
+        self.assertEqual(cfg.state_dir, "/var/lib/homelab-dockerctl")
+        self.assertEqual((cfg.reboot_min_uptime, cfg.reboot_delay), (600, 10))
 
     def test_a_renamed_key_would_be_caught(self) -> None:
         text = (TEMPLATES / "dockerctl.json.j2").read_text().replace("'allowed_uid':", "'allowed_user':")
@@ -263,6 +274,8 @@ class Rendered(unittest.TestCase):
         max_conn = int(re.search(r"^MaxConnections=(\d+)$", socket_unit, re.MULTILINE).group(1))
         self.assertGreaterEqual(max_conn, 32, "CONTRACTS §11.2: 8 log streams + an update + refreshes")
         self.assertRegex(service, r"(?m)^ReadOnlyPaths=/run$")
+        self.assertIn("ReadWritePaths=/srv/homelab/stacks\n", service)
+        self.assertIn("StateDirectory=homelab-dockerctl\n", service)
 
     def test_the_rendered_flood_protection_and_recovery(self) -> None:
         sock = directives(self.render("homelab-dockerctl.socket.j2"))

@@ -30,8 +30,8 @@ const ROUTES = [
 // What each scenario must show somewhere on a given route (spot checks of the designed states).
 const EXPECT = {
   normal: {
-    '': ['All systems normal', '8 apps healthy · drive 34%', '2.64 TB free', 'Nightly OK', '8 / 8 healthy', 'Box uptime'],
-    apps: ['Update to 6.1.1.10360-ls303', 'Pinned version 6.1.1.10360-ls303 is newer than the running image'],
+    '': ['All systems normal', '8 apps healthy · drive 34%', '2.64 TB free', 'Nightly OK', '8 / 8 healthy', 'Box uptime', 'Restart host'],
+    apps: ['Update to 6.1.1.10360-ls303', 'Pinned version 6.1.1.10360-ls303 is newer than the running image', 'Media app updates', 'Check for updates'],
     drive: ['Next check', 'next boot', 'Full around', 'Gate history', 'powercycle', 'A re-run only acts when it has failed or been lost.'],
     media: ['Arrival (2016)', 'Direct play', '912 / 1000 API calls today', 'Requests · 2 pending', 'Usenet provider', 'Edit dates in Settings'],
     alerts: ['Media drive back', 'Resolved', '3 subscribed', 'Sends a push to 3 devices.', 'sonarr crashed and restarted', 'Resolved · recovered on its own'],
@@ -74,10 +74,11 @@ const EXPECT = {
     alerts: ['Rehearsal mode: only test devices receive drill pushes. This test goes to every device.'],
   },
   remote: {
-    '': ['Remote'],
-    apps: ['Update is only available on the tailnet.'],
+    '': ['Remote', 'Only available on the tailnet.'],
+    apps: ['Update is only available on the tailnet.', 'Check for updates'],
     drive: ['Only available on the tailnet'],
   },
+  'just-booted': { '': ['Reboot needed', 'Restart host', 'The box just started. Try again in 7 min.'], apps: ['Media app updates'] },
   // What the real server sends for its own scenarios (test/server-summaries).
   'real-normal': { '': ['1 issue', 'Usenet provider renews in 5 days.'], drive: ['Full around Jan 7, 2028'] },
   'real-bad-night': { '': ['Media drive failed after a power-cycle. 8 apps held.', 'Reboot needed'], apps: ['Held by gate'] },
@@ -478,6 +479,131 @@ test('settings: thresholds and renewal dates save in the server\'s shape', async
     await b.until(() => b.text('.toast-wrap').includes('Renewal added'));
     assert.ok(fake.settings.subscriptions.some((s) => s.name === 'Indexer D' && s.date === '2027-01-15'));
     await b.until(() => b.text().includes('Indexer D'));
+    assert.deepEqual(b.errors, []);
+  } finally {
+    await b.close();
+  }
+});
+
+// --- host restart and media-app updates (CONTRACTS §11.7.3) ---------------------------------------
+
+test('restart host: confirm dialog with the watching line, fail tone, then the server\'s toast', async () => {
+  fake.setScenario('normal');
+  const b = await openApp({ base, hash: '#/', width: 390 });
+  try {
+    await b.until(() => b.button('Restart host') && !b.button('Restart host').disabled, 'enabled button');
+    b.click(b.button('Restart host'));
+    await b.until(() => b.$('[role="dialog"]'), 'dialog');
+    assert.equal(b.text('#dlg-title'), 'Restart the media server?');
+    assert.match(b.text('#dlg-body'), /down for about 2–5 minutes/);
+    assert.equal(b.text('#dlg-lines'), '1 person is watching right now.');
+    assert.ok(b.$('.dialog.tone-fail'));
+    assert.equal(b.$('[role="dialog"]').getAttribute('aria-describedby'), 'dlg-body dlg-lines');
+    b.click(b.button('Restart host', b.$('[role="dialog"]')));
+    await b.until(() => b.text('.toast-wrap').includes('Restarting in 10 s. The dashboard is back in a few minutes.'), 'toast');
+    assert.equal(b.$('[role="dialog"]'), null);
+    assert.ok(fake.requests.includes('POST /api/host/reboot'));
+    assert.deepEqual(b.errors, []);
+  } finally {
+    await b.close();
+  }
+});
+
+test('restart host: locked with the server\'s reason line when the box just started', async () => {
+  fake.setScenario('just-booted');
+  const b = await openApp({ base, hash: '#/', width: 1440 });
+  try {
+    await b.until(() => b.button('Restart host'), 'button');
+    assert.equal(b.button('Restart host').disabled, true);
+    assert.equal(b.button('Restart host').getAttribute('title'), 'The box just started. Try again in 7 min.');
+    assert.ok(b.text('.tile .reason').includes('The box just started. Try again in 7 min.'));
+    assert.deepEqual(b.errors, []);
+  } finally {
+    await b.close();
+  }
+});
+
+// linkedom has no `checked` property, so Preact writes the attribute there; a browser has both.
+const isChecked = (input) => input.checked === true || (input.checked === undefined && input.hasAttribute('checked'));
+const tick = (b, input, on) => {
+  input.checked = on;
+  input.dispatchEvent(new b.window.Event('change', { bubbles: true }));
+};
+
+test('media updates: review rows with real checkboxes, untick, progress per app, success toast', async () => {
+  fake.setScenario('normal');
+  const b = await openApp({ base, hash: '#/apps', width: 390 });
+  try {
+    await b.until(() => b.button('Check for updates') && !b.button('Check for updates').disabled, 'card');
+    b.click(b.button('Check for updates'));
+    await b.until(() => b.$$('.dlg-row').length === 7, 'review rows');
+    assert.equal(b.text('#dlg-title'), 'Media app updates');
+    // linkedom doesn't reflect input.type to the attribute, so select by structure
+    const boxes = b.$$('.dlg-check input');
+    assert.equal(boxes.length, 3, 'only the updates get a checkbox');
+    for (const box of boxes) assert.equal(box.parentNode.tagName, 'LABEL', 'checkbox rows are labels');
+    const row = (name) => b.$$('.dlg-row').find((r) => r.textContent.includes(name));
+    assert.equal(isChecked(row('Jellyfin').querySelector('input')), false, 'major starts unticked');
+    assert.ok(row('Jellyfin').textContent.includes('Major version: read the release notes first'));
+    assert.equal(isChecked(row('Sonarr').querySelector('input')), true);
+    assert.equal(row('Radarr').querySelector('input'), null);
+    assert.ok(row('Radarr').textContent.includes('Up to date'));
+    assert.ok(row('Jellyseerr').textContent.includes('This image is no longer maintained.'));
+    assert.ok(row('Prowlarr').textContent.includes("The registry didn't answer in time."));
+    assert.equal(row('Bazarr').querySelector('input'), null, 'ahead: no checkbox');
+    assert.ok(row('Bazarr').textContent.includes("Pinned 1.5.2-ls90 is newer than the registry's latest (1.5.1-ls88)."));
+    assert.ok(b.button('Update 2 apps'));
+    tick(b, row('SABnzbd').querySelector('input'), false);
+    await b.until(() => b.button('Update 1 app'), 'count follows the ticks');
+    tick(b, row('Sonarr').querySelector('input'), false);
+    await b.until(() => b.button('Update 0 apps')?.disabled, 'disabled at 0');
+    assert.ok(b.button('Update 0 apps').getAttribute('title'));
+    tick(b, row('Sonarr').querySelector('input'), true);
+    await b.until(() => b.button('Update 1 app') && !b.button('Update 1 app').disabled);
+    b.click(b.button('Update 1 app'));
+    await b.until(() => b.text('#dlg-title') === 'Updating media apps…', 'progress phase');
+    assert.equal(b.button('Cancel'), undefined, 'no cancel while it runs');
+    await b.until(() => b.text('.toast-wrap').includes('Updated 1 app: Sonarr 4.0.20.3014-ls7'), 'toast');
+    assert.equal(b.$('[role="dialog"]'), null);
+    assert.ok(fake.requests.includes('POST /api/media/update'));
+    assert.deepEqual(b.errors, []);
+  } finally {
+    await b.close();
+  }
+});
+
+test('media updates: Check again, a failed app is rolled back and the failure is toasted', async () => {
+  fake.setScenario('normal');
+  fake.setMediaFail('sonarr');
+  const before = fake.requests.length;
+  const b = await openApp({ base, hash: '#/apps', width: 1440 });
+  try {
+    await b.until(() => b.button('Check for updates') && !b.button('Check for updates').disabled);
+    b.click(b.button('Check for updates'));
+    await b.until(() => b.button('Check again') && b.$$('.dlg-row').length === 7, 'review');
+    b.click(b.button('Check again'));
+    const checks = () => fake.requests.slice(before).filter((r) => r === 'GET /api/media/updates').length;
+    await b.until(() => checks() >= 2 && !b.$('.dialog[aria-busy="true"]') && b.button('Update 2 apps') && !b.button('Update 2 apps').disabled, 'checked again');
+    b.click(b.button('Update 2 apps'));
+    await b.until(() => b.text('.toast-wrap').includes('Sonarr failed its health check and was rolled back'), 'fail toast').catch((err) => {
+      throw new Error(`${err.message}\n--- page text ---\n${b.text().slice(0, 1500)}\n${fake.requests.slice(-6).join('\n')}`);
+    });
+    assert.deepEqual(b.errors, []);
+  } finally {
+    fake.setMediaFail(null);
+    await b.close();
+  }
+});
+
+test('media updates: one already running when the page loads is shown and followed', async () => {
+  fake.setScenario('normal');
+  fake.startMediaUpdateElsewhere(['radarr']);
+  const b = await openApp({ base, hash: '#/apps', width: 390 });
+  try {
+    await b.until(() => b.text('#dlg-title') === 'Updating media apps…', 'progress dialog on load');
+    await b.until(() => b.text('.dlg-rows').includes('Radarr'), 'row from the replayed steps');
+    await b.until(() => b.text('.toast-wrap').includes('Updated 1 app'), 'toast');
+    assert.equal(b.$('[role="dialog"]'), null);
     assert.deepEqual(b.errors, []);
   } finally {
     await b.close();

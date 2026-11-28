@@ -1,0 +1,48 @@
+---
+# Host image pins (docs/CONTRACTS.md §11.7.4): read the dashboard's pin record and merge it with versions.yml
+# BEFORE anything touches the media stack. Changes nothing on the host (check-mode safe); the record is cleaned
+# up only after a successful `up` (host_pins_cleanup.yml). Rules (filter_plugins/host_pins.py):
+#   repo pin == host pin        synced: render it, the entry is removed after the stack is up
+#   repo pin == entry.previous  repo behind: render the HOST pin (no rollback), warn
+#   anything else               conflict: fail here, the stack is not touched
+#   -e stacks_drop_host_pins=true   the repo wins: render the repo pin, the entry is removed after the stack is up
+# Sets stacks_host_pins (the merge result); the media compose template renders stacks_host_pins.images.
+
+- name: Host pins | look for the dashboard's pin record
+  ansible.builtin.stat:
+    path: "{{ stacks_host_pins_file }}"
+    follow: false
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: stacks_host_pins_stat
+
+- name: Host pins | the pin record is a regular file
+  ansible.builtin.assert:
+    that: not stacks_host_pins_stat.stat.exists or stacks_host_pins_stat.stat.isreg
+    fail_msg: >-
+      {{ stacks_host_pins_file }} exists but is not a regular file (a symlink, a directory, ...). Role stacks
+      will not guess which image pins the host runs; the media stack was not touched. Look at it by hand.
+    quiet: true
+
+- name: Host pins | read the pin record
+  ansible.builtin.slurp:
+    src: "{{ stacks_host_pins_file }}"
+  register: stacks_host_pins_slurp
+  when: stacks_host_pins_stat.stat.exists
+
+- name: Host pins | merge with versions.yml
+  ansible.builtin.set_fact:
+    stacks_host_pins: >-
+      {{ (stacks_host_pins_slurp.content if stacks_host_pins_stat.stat.exists else None)
+         | stacks_host_pins_merge(images, stacks_media_apps, drop=stacks_drop_host_pins | bool, b64=True) }}
+    stacks_host_pins_checksum: "{{ stacks_host_pins_stat.stat.checksum | default('') }}"
+
+- name: Host pins | stop - the pin record does not fit versions.yml (the media stack was not touched)
+  ansible.builtin.fail:
+    msg: "{{ ['Role stacks: ' ~ stacks_host_pins_file] + stacks_host_pins.errors }}"
+  when: stacks_host_pins.errors | length > 0
+
+- name: Host pins | WARNING - host image pins
+  ansible.builtin.debug:
+    msg: "{{ stacks_host_pins.warnings }}"
+  when: stacks_host_pins.warnings | length > 0

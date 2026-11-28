@@ -1207,6 +1207,15 @@
   "links": {
     "runbooks": []
   },
+  "hostActions": {
+    "reboot": {
+      "lock": null
+    },
+    "mediaUpdate": {
+      "lock": null,
+      "running": null
+    }
+  },
   "issues": [
     {
       "severity": "warn",

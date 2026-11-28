@@ -28,7 +28,7 @@ x-media-rw: &media_rw
 services:
   jellyfin:
     <<: *common
-    image: "{{ images.jellyfin }}"
+    image: "{{ stacks_host_pins.images.jellyfin }}"
     container_name: jellyfin
     mem_limit: {{ stacks_mem_limits.jellyfin }}
     environment: *lsio_env
@@ -59,7 +59,7 @@ services:
 
   sonarr:
     <<: *common
-    image: "{{ images.sonarr }}"
+    image: "{{ stacks_host_pins.images.sonarr }}"
     container_name: sonarr
     mem_limit: {{ stacks_mem_limits.sonarr }}
     environment: *lsio_env
@@ -77,7 +77,7 @@ services:
 
   radarr:
     <<: *common
-    image: "{{ images.radarr }}"
+    image: "{{ stacks_host_pins.images.radarr }}"
     container_name: radarr
     mem_limit: {{ stacks_mem_limits.radarr }}
     environment: *lsio_env
@@ -95,7 +95,7 @@ services:
 
   prowlarr:
     <<: *common
-    image: "{{ images.prowlarr }}"
+    image: "{{ stacks_host_pins.images.prowlarr }}"
     container_name: prowlarr
     mem_limit: {{ stacks_mem_limits.prowlarr }}
     environment: *lsio_env
@@ -112,7 +112,7 @@ services:
 
   sabnzbd:
     <<: *common
-    image: "{{ images.sabnzbd }}"
+    image: "{{ stacks_host_pins.images.sabnzbd }}"
     container_name: sabnzbd
     mem_limit: {{ stacks_mem_limits.sabnzbd }}
     environment: *lsio_env
@@ -131,7 +131,7 @@ services:
 
   jellyseerr:
     <<: *common
-    image: "{{ images.jellyseerr }}"
+    image: "{{ stacks_host_pins.images.jellyseerr }}"
     container_name: jellyseerr
     mem_limit: {{ stacks_mem_limits.jellyseerr }}
     environment:

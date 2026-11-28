@@ -13,7 +13,8 @@ from unittest import mock
 
 from fakes import DOCKER, Env, dockerctl
 
-CONTRACT_OPS = {"ps", "logs", "start", "stop", "restart", "update", "docker-state", "last-pull", "disk-split", "boots"}
+CONTRACT_OPS = {"ps", "logs", "start", "stop", "restart", "update", "set-pin", "reboot", "docker-state", "last-pull",
+                "disk-split", "boots"}
 
 
 class PeerCredentials(unittest.TestCase):

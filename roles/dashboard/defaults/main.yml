@@ -99,7 +99,7 @@ dashboard_dockerctl_socket: /run/homelab-dockerctl.sock
 dashboard_dockerctl_config: "{{ dashboard_config_dir }}/dockerctl.json"
 dashboard_dockerctl_cache_name: homelab-dockerctl   # CacheDirectory= -> /var/cache/homelab-dockerctl
 dashboard_dockerctl_max_connections: 32         # CONTRACTS §11.2: 8 log streams + 1 update + refreshes, with headroom
-dashboard_dockerctl_runtime_max: 40min              # backstop above the 30 min follow limit
+dashboard_dockerctl_runtime_max: 50min              # backstop above the 30 min follow and the 40 min set-pin worst case
 # Flood protection on the helper socket. The real peak is about 23 connections in a 2 s window:
 # 8 log streams opened together (8 x docker-state + logs = 16), one update (docker-state + update
 # = 2), a summary refresh (2-3) and the dashboard's docker-state about once a second (2). Plus the
@@ -123,6 +123,9 @@ dashboard_dockerctl_recover_calendar: "*:0/15"
 # Stacks the boot gate holds when the media drive is lost: start/restart/update of their apps
 # is refused unless the gate status is "ok" (stop is always allowed).
 dashboard_dockerctl_held_stacks:
+  - media
+# Stacks whose apps the dashboard may move to a new pinned version (set-pin, CONTRACTS §11.7.1).
+dashboard_dockerctl_pin_stacks:
   - media
 dashboard_dockerctl_media_dirs:
   - tv

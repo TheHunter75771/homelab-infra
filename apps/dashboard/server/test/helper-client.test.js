@@ -176,3 +176,30 @@ test('typed ops pass their arguments and timeouts', async (t) => {
   }
   await assert.rejects(docker.control('exec', 'sonarr'), /bad op/);
 });
+
+test('§11.7.1 set-pin: docker-state first, {op, name, pin} only, steps and output relayed; reboot is not a Docker op', async (t) => {
+  const h = await startFakeHelper(t);
+  const docker = createDocker({ helper: createHelperClient({ socketPath: h.socketPath }) });
+  const pin = `example/sonarr:1.1.0@sha256:${'b'.repeat(64)}`;
+  const steps = [];
+  const outputs = [];
+  let header = null;
+  const end = await docker.setPin('sonarr', pin, { onStep: (m) => steps.push(m.step), onOutput: (m) => outputs.push(m.text), onStart: (m) => (header = m) });
+  assert.equal(end.ok, true);
+  assert.deepEqual(steps, ['pulling', 'pinning', 'recreating', 'waiting-health', 'done']);
+  assert.equal(outputs.length, 5, "one output per step in the fake");
+  assert.equal(header.to, pin);
+  assert.deepEqual(h.calls.map((c) => c.op), ['docker-state', 'set-pin']);
+  assert.deepEqual(Object.keys(h.calls[1]).filter((k) => k !== 'dockerStateAtCall').sort(), ['name', 'op', 'pin']);
+  // already pinned: refused before the stream
+  await assert.rejects(docker.setPin('sonarr', pin), (e) => e instanceof HelperError && e.code === 'already-pinned');
+
+  h.state.dockerState = 'inactive';
+  const before = h.calls.length;
+  await assert.rejects(docker.setPin('radarr', pin), DockerInactiveError);
+  assert.deepEqual(h.calls.slice(before).map((c) => c.op), ['docker-state'], 'no set-pin while Docker is down');
+  assert.deepEqual(await docker.reboot(), { scheduledIn: 10 });
+  assert.equal(h.calls.at(-1).op, 'reboot');
+  h.state.reboot = { code: 'too-soon', message: 'the box just started; try again in 4 min' };
+  await assert.rejects(docker.reboot(), (e) => e instanceof HelperError && e.code === 'too-soon' && /4 min/.test(e.message));
+});

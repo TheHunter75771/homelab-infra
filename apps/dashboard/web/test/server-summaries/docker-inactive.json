@@ -1146,6 +1146,15 @@
   "links": {
     "runbooks": []
   },
+  "hostActions": {
+    "reboot": {
+      "lock": null
+    },
+    "mediaUpdate": {
+      "lock": "Docker isn't running.",
+      "running": null
+    }
+  },
   "issues": [
     {
       "severity": "fail",

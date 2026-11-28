@@ -765,6 +765,7 @@ export function buildView(summary, { pending = {}, now = Date.now() } = {}) {
       rebootRequired: Boolean(pick(host, 'rebootRequired')),
       rebootPackages: arr(pick(host, 'rebootPackages')),
     },
+    hostActions: hostActionsView(s),
     drive,
     media,
     backups,
@@ -779,6 +780,26 @@ export function buildView(summary, { pending = {}, now = Date.now() } = {}) {
   view.issues = Array.isArray(s.issues) ? serverIssues(s.issues) : deriveIssues(view);
   view.dots = navDots(view);
   return view;
+}
+
+// Host restart and media-app updates (CONTRACTS §11.7.2, summary `hostActions`). The server's locks decide.
+// A server without the field doesn't have the endpoints, so both stay disabled with a reason; remote access
+// is always tailnet-only, whatever the server sent.
+export const HOST_ACTIONS_MISSING = 'Not available on this server version';
+export function hostActionsView(s) {
+  const ha = s?.hostActions && typeof s.hostActions === 'object' ? s.hostActions : null;
+  const remote = s?.access === 'remote';
+  const lockOf = (x) => {
+    if (remote) return 'Only available on the tailnet';
+    if (!ha) return HOST_ACTIONS_MISSING;
+    if (!x || typeof x !== 'object') return HOST_ACTIONS_MISSING;
+    return typeof x.lock === 'string' && x.lock.trim() ? x.lock.trim() : null;
+  };
+  const running = ha?.mediaUpdate?.running;
+  return {
+    reboot: { lock: lockOf(ha?.reboot) },
+    mediaUpdate: { lock: lockOf(ha?.mediaUpdate), running: typeof running === 'string' && running ? running : null },
+  };
 }
 
 export function navDots(view) {

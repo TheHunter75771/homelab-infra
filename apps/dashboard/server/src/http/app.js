@@ -3,7 +3,7 @@ import { ActionError, actionView, APP_ACTIONS } from '../actions.js';
 import { AccessDenied } from '../access.js';
 import { APP_NAME_RE } from '../catalog.js';
 import { DockerInactiveError } from '../helper/client.js';
-import { heldByGate } from '../collectors/apps.js';
+import { heldByGate, TAILNET_ONLY } from '../collectors/apps.js';
 import { readGateStatus } from '../collectors/gate.js';
 import { buildPayload, sendToAll, TEST_MESSAGE } from '../push/sender.js';
 import { StoreCorruptError, StoreFullError, ValidationError, toDevice } from '../push/store.js';
@@ -31,6 +31,9 @@ const ROUTES = [
   ['POST', '/api/apps/:name/:action', 'appAction'],
   ['GET', '/api/actions/:id', 'actionStream', { sse: true }],
   ['POST', '/api/gate/rerun', 'gateRerun'],
+  ['GET', '/api/media/updates', 'mediaUpdates'],
+  ['POST', '/api/media/update', 'mediaUpdate'],
+  ['POST', '/api/host/reboot', 'hostReboot'],
   ['GET', '/api/push/devices', 'devices'],
   ['DELETE', '/api/push/devices/:id', 'deleteDevice'],
   ['GET', '/api/settings', 'getSettings'],
@@ -76,6 +79,7 @@ export function createApp({
   summary,
   actions,
   docker,
+  mediaUpdates,
   settings,
   reminders,
   access,
@@ -408,6 +412,25 @@ export function createApp({
       sendJson(res, 202, { ok: true, action: actionView(a) });
     },
 
+    // CONTRACTS §11.7.2: registry lookups only (no helper call); cached 10 min, ?refresh=1 skips the cache.
+    async mediaUpdates(req, res, { query, access: acc }) {
+      if (acc !== 'tailnet') throw new HttpError(403, TAILNET_ONLY);
+      if (!mediaUpdates) throw new HttpError(503, 'Update checks are not available.');
+      if (!summary.declared?.()) throw new HttpError(503, "The app list isn't known yet. Try again in a moment.");
+      const refresh = ['1', 'true'].includes(query.get('refresh') ?? '');
+      sendJson(res, 200, await mediaUpdates.check({ refresh }), { 'Cache-Control': 'no-store' });
+    },
+
+    async mediaUpdate(req, res, { body, access: acc }) {
+      const a = await actions.startMediaUpdate(body.apps, { access: acc });
+      sendJson(res, 202, { ok: true, action: actionView(a) });
+    },
+
+    async hostReboot(req, res, { access: acc }) {
+      const a = await actions.startReboot({ access: acc });
+      sendJson(res, 202, { ok: true, action: actionView(a) });
+    },
+
     actionStream(req, res, { params }) {
       const a = actions.get(params.id);
       if (!a) throw new HttpError(404, 'no such action');
@@ -419,7 +442,11 @@ export function createApp({
         return sse.end();
       }
       const off = actions.subscribe(a.id, (ev) => {
-        if (ev.type === 'step') sse.send('step', { step: ev.step, at: ev.at });
+        if (ev.type === 'step') {
+          const { type, ...s } = ev;
+          void type;
+          sse.send('step', s);
+        }
         else {
           sse.send('end', { state: ev.state, error: ev.error, detail: ev.detail });
           sse.end();

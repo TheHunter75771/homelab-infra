@@ -9,7 +9,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
-export const DOCKER_OPS = new Set(['ps', 'start', 'stop', 'restart', 'logs', 'update']);
+export const DOCKER_OPS = new Set(['ps', 'start', 'stop', 'restart', 'logs', 'update', 'set-pin']);
 
 export function container(name, overrides = {}) {
   const ref = name === 'wol-relay' ? 'homelab/wol-relay:2026.07' : `example/${name}:1.0.0@sha256:${'a'.repeat(64)}`;
@@ -45,6 +45,12 @@ export function defaultHelperState(overrides = {}) {
     logsFollow: false, // keep the stream open after the tail (until the client closes)
     updateSteps: ['pulling', 'recreating', 'waiting-health', 'done'],
     updateStepMs: 5,
+    // set-pin (§11.7.1): steps per app (default: the success path); a "failed" entry ends it with
+    // {failed_step: the step before, code, message, rolled_back: setPinRolledBack}
+    setPinSteps: {}, // name -> [steps]
+    setPinRolledBack: true,
+    reboot: { scheduled_in: 10 }, // or {code, message} to refuse
+    rebooted: 0,
     fail: {}, // op -> {code, message}
     delay: {}, // op -> ms
     hang: new Set(), // ops that never answer
@@ -133,6 +139,42 @@ export async function startFakeHelper(t, overrides = {}) {
             return; // stays open; tests push more lines via pushLog()
           }
           return sock.end(`${JSON.stringify({ type: 'end', ok: true, reason: 'eof' })}\n`);
+        }
+        case 'reboot': {
+          if (state.reboot.code) return refuse(state.reboot.code, state.reboot.message);
+          state.rebooted += 1;
+          return reply({ scheduled_in: state.reboot.scheduled_in });
+        }
+        case 'set-pin': {
+          const c = state.containers.find((x) => x.name === req.name);
+          if (!c) return refuse('not-allowed', `${req.name} is not a watched container`);
+          if (req.pin === c.pinned) return refuse('already-pinned', 'already on that pin');
+          const from = c.pinned;
+          send({ ok: true, op: 'set-pin', stream: true, name: req.name, from, to: req.pin });
+          const steps = state.setPinSteps[req.name] ?? ['pulling', 'pinning', 'recreating', 'waiting-health', 'done'];
+          let ok = true;
+          let reason = 'done';
+          for (const step of steps) {
+            if (step === 'failed') {
+              const failedStep = steps.filter((x) => x !== 'rolling-back')[steps.filter((x) => x !== 'rolling-back').indexOf('failed') - 1] ?? 'pulling';
+              const rolledBack = steps.includes('rolling-back') ? state.setPinRolledBack : false;
+              const message = rolledBack ? `health check failed; rolled back to ${from.split('@')[0].split(':').pop()}` : 'pull failed: manifest unknown at https://registry.example/v2/x';
+              send({ type: 'step', step: 'failed', at: new Date().toISOString(), failed_step: failedStep, code: 'failed', message, rolled_back: rolledBack });
+              ok = false;
+              reason = message;
+              break;
+            }
+            send({ type: 'step', step, at: new Date().toISOString() });
+            send({ type: 'output', text: `${step}...` });
+            if (step === 'pinning') {
+              c.pinned = req.pin;
+              const d = state.declared?.find((x) => x.name === req.name);
+              if (d) d.pinned = req.pin;
+            }
+            if (step === 'recreating') c.image = req.pin;
+            await new Promise((r) => setTimeout(r, state.updateStepMs));
+          }
+          return sock.end(`${JSON.stringify({ type: 'end', ok, reason })}\n`);
         }
         case 'update': {
           if (!known(req.name)) return refuse('not-allowed', `${req.name} is not a watched container`);

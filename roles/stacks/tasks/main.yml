@@ -3,6 +3,7 @@
 # Order: checks -> layout -> retire push -> network -> media -> edge -> utils. Every compose project is
 # brought up with community.docker.docker_compose_v2 (state present), so a re-run reports changed=0.
 # push-core is retired (§11.5): Dashboard v2 (role dashboard, after this role) serves 127.0.0.1:8085.
+# media.yml first merges the image pins the dashboard moved forward on the host (§11.7.4, tasks/host_pins.yml).
 
 - name: Preflight checks
   ansible.builtin.import_tasks: preflight.yml

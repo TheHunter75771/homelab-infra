@@ -6,7 +6,22 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { SCENARIOS, LOG_LINES } from './fixtures.mjs';
+import { SCENARIOS, LOG_LINES, mediaCheck as baseCheck } from './fixtures.mjs';
+
+// The fixture check plus one `ahead` app (a placeholder name, not one of the fixture containers).
+const mediaCheck = (t) => {
+  const c = baseCheck(t);
+  c.apps.push({
+    name: 'bazarr',
+    label: 'Bazarr',
+    current: { version: '1.5.2-ls90', pin: `example/bazarr:1.5.2-ls90@sha256:${'d'.repeat(64)}` },
+    latest: { version: '1.5.1-ls88', pin: `example/bazarr:1.5.1-ls88@sha256:${'e'.repeat(64)}` },
+    status: 'ahead',
+    major: false,
+    message: "Pinned 1.5.2-ls90 is newer than the registry's latest (1.5.1-ls88).",
+  });
+  return c;
+};
 
 export const PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../public');
 
@@ -39,6 +54,8 @@ export function createFakeApi({ scenario = 'normal', now = () => Date.now(), tic
   let apiError = 0; // the same, for /api/* only (the page itself already loaded or came from the cache)
   const streams = new Set();
   const actions = new Map();
+  let lastCheck = null; // {at, data}: the media-update check a POST /api/media/update must match
+  let mediaFail = null; // app name whose media update fails (and rolls back), for tests
   let settings = {
     thresholds: { diskWarnPct: 90, backupMaxAgeH: 36 },
     subscriptions: (summary.subscriptions || []).map(({ key, name: n, date }) => ({ key, name: n, date })),
@@ -122,7 +139,7 @@ export function createFakeApi({ scenario = 'normal', now = () => Date.now(), tic
     let i = 0;
     const next = () => {
       if (i < steps.length) {
-        const st = { step: steps[i], at: iso(now()) };
+        const st = typeof steps[i] === 'string' ? { step: steps[i], at: iso(now()) } : { ...steps[i], at: iso(now()) };
         a.steps.push(st);
         if (appName && appOf(appName)) mutate(() => (appOf(appName).action = { id, kind, step: st.step }));
         for (const s of streams) if (s.kind === `action:${id}`) sseSend(s.res, 'step', st);
@@ -264,6 +281,58 @@ export function createFakeApi({ scenario = 'normal', now = () => Date.now(), tic
       }));
       return json(res, 202, { ok: true, action: view(a) });
     }
+    if (m === 'GET' && p === '/api/media/updates') {
+      if (summary.access !== 'tailnet') return json(res, 403, { error: 'Only available on the tailnet' });
+      if (!lastCheck || url.searchParams.get('refresh') === '1' || now() - lastCheck.at > 600e3) lastCheck = { at: now(), data: mediaCheck(now()) };
+      return json(res, 200, lastCheck.data);
+    }
+    if (m === 'POST' && p === '/api/media/update') {
+      if (summary.access !== 'tailnet') return json(res, 403, { error: 'Only available on the tailnet' });
+      const names = body.apps;
+      if (!Array.isArray(names) || names.length < 1 || names.length > 10 || !names.every((n) => typeof n === 'string')) return json(res, 400, { error: 'apps must list 1 to 10 app names' });
+      const ha = summary.hostActions || {};
+      if (ha.mediaUpdate?.lock) return json(res, 409, { error: ha.mediaUpdate.lock });
+      if (!lastCheck || now() - lastCheck.at > 600e3) return json(res, 409, { error: 'Check for updates again' });
+      const byName = Object.fromEntries(lastCheck.data.apps.map((x) => [x.name, x]));
+      if (!names.every((n) => byName[n]?.status === 'update')) return json(res, 409, { error: 'Check for updates again' });
+      const steps = [];
+      const done = [];
+      let failedAt = null;
+      names.forEach((n, i) => {
+        if (failedAt) return;
+        const x = byName[n];
+        steps.push({ step: 'app', app: n, index: i + 1, total: names.length, from: x.current.version, to: x.latest.version });
+        for (const st of ['pulling', 'pinning', 'recreating', 'waiting-health']) steps.push({ step: st, app: n });
+        if (n === mediaFail) {
+          steps.push({ step: 'rolling-back', app: n }, { step: 'app-failed', app: n, rolledBack: true });
+          failedAt = x;
+        } else {
+          steps.push({ step: 'app-done', app: n });
+          done.push(`${x.label} ${x.latest.version}`);
+        }
+      });
+      const setLocks = (running, id) =>
+        mutate((s) => {
+          s.hostActions = { reboot: { lock: running ? 'Busy' : null }, mediaUpdate: { lock: running ? 'Busy' : null, running: running ? id : null } };
+        });
+      const a = startAction('media-update', null, steps, () => {
+        lastCheck = null;
+        setLocks(false);
+        if (failedAt) {
+          return { ok: false, error: `${failedAt.label} failed its health check and was rolled back to ${failedAt.current.version}.${done.length ? ` Already updated: ${done.join(', ')}.` : ''}` };
+        }
+        return { ok: true, detail: `Updated ${done.length} app${done.length === 1 ? '' : 's'}: ${done.join(', ')}` };
+      });
+      setLocks(true, a.id);
+      return json(res, 202, { ok: true, action: view(a) });
+    }
+    if (m === 'POST' && p === '/api/host/reboot') {
+      if (summary.access !== 'tailnet') return json(res, 403, { error: 'Only available on the tailnet' });
+      const lock = summary.hostActions?.reboot?.lock;
+      if (lock) return json(res, 409, { error: lock });
+      const a = startAction('reboot', null, ['requested', 'scheduled'], () => ({ ok: true, detail: 'Restarting in 10 s. The dashboard is back in a few minutes.' }));
+      return json(res, 202, { ok: true, action: view(a) });
+    }
     if (m === 'GET' && p === '/api/push/devices') return json(res, 200, { devices: summary.push?.devices || [] });
     mm = /^\/api\/push\/devices\/([A-Za-z0-9_.-]+)$/.exec(p);
     if (m === 'DELETE' && mm) {
@@ -368,6 +437,26 @@ export function createFakeApi({ scenario = 'normal', now = () => Date.now(), tic
       return new Promise((resolve) => server.close(() => resolve()));
     },
     setScenario,
+    setMediaFail(n) {
+      mediaFail = n || null;
+    },
+    // Start a media update as another device would (for the "follow a running update on load" test).
+    startMediaUpdateElsewhere(names = ['sonarr']) {
+      lastCheck = { at: now(), data: mediaCheck(now()) };
+      // long enough (about 40 steps) for a page opened afterwards to catch it running
+      const steps = names.flatMap((n, i) => [
+        { step: 'app', app: n, index: i + 1, total: names.length, from: '1.0.0', to: '1.0.1' },
+        ...Array.from({ length: 40 }, () => ({ step: 'pulling', app: n })),
+        { step: 'recreating', app: n },
+        { step: 'app-done', app: n },
+      ]);
+      const a = startAction('media-update', null, steps, () => {
+        mutate((s) => (s.hostActions = { reboot: { lock: null }, mediaUpdate: { lock: null, running: null } }));
+        return { ok: true, detail: `Updated ${names.length} app${names.length === 1 ? '' : 's'}` };
+      });
+      mutate((s) => (s.hostActions = { reboot: { lock: 'Busy' }, mediaUpdate: { lock: 'Busy', running: a.id } }));
+      return a.id;
+    },
     setDown(v) {
       down = Boolean(v);
       if (down) for (const s of streams) s.res.destroy();

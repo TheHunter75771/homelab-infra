@@ -1,0 +1,30 @@
+---
+# Adopt the media-app image pins the dashboard moved forward on the host (docs/CONTRACTS.md §11.7.4).
+# The dashboard's "Update media apps" records each new pin in /var/lib/homelab-dockerctl/pins.json on the
+# media server. This playbook reads that record (read-only on the host) and, on the controller, replaces
+# each matching pin in inventory/group_vars/all/versions.yml (exact old value -> new value; each old value
+# must occur exactly once). It prints what changed and never commits.
+#   .venv/bin/ansible-playbook playbooks/sync-pins.yml --check --diff   # show the edit, write nothing
+#   .venv/bin/ansible-playbook playbooks/sync-pins.yml
+# Then review `git diff`, commit versions.yml, and run site.yml: role stacks finds the pins in sync and
+# removes them from the host record once the media stack is up.
+- name: Adopt the host's image pins into versions.yml
+  hosts: media_servers
+  become: true
+  gather_facts: false
+  vars:
+    stacks_sync_pins_versions_file: "{{ playbook_dir }}/../inventory/group_vars/all/versions.yml"
+  tasks:
+    - name: Sync pins | one media server per run
+      ansible.builtin.assert:
+        that: ansible_play_hosts_all | length == 1
+        fail_msg: >-
+          This play targets {{ ansible_play_hosts_all | length }} media servers, but versions.yml holds one pin per
+          app. Pick the one whose pins to adopt with --limit.
+        quiet: true
+      run_once: true
+
+    - name: Sync pins | read the host's record and edit versions.yml
+      ansible.builtin.include_role:
+        name: stacks
+        tasks_from: sync_pins.yml

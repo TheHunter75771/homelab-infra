@@ -1067,6 +1067,23 @@ p {
 .chip-reboot {
   align-self: flex-start;
 }
+.tile-action {
+  display: flex;
+  margin-top: 4px;
+}
+.media-updates-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.media-updates-text {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-2);
+  margin: 0;
+}
 .ov-row {
   display: grid;
   grid-template-columns: 1.1fr 1.3fr 1fr;
@@ -2274,6 +2291,119 @@ p {
 .step.current {
   color: var(--text);
 }
+/* dialog extras (CONTRACTS §11.7.3): note lines, the media-update list */
+.dialog.wide {
+  max-width: 480px;
+  max-height: calc(100dvh - 24px);
+  overflow-y: auto;
+}
+@media (max-width: 899px) {
+  .dialog.wide {
+    max-width: none;
+  }
+}
+.dialog-lines {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+}
+.dialog-lines li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--text);
+}
+.dialog-lines .icon {
+  font-size: 16px;
+  flex: none;
+  margin-top: 2px;
+}
+.dialog-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+.dialog-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-2);
+}
+.dlg-rows {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-radius: var(--r-sm);
+  background: var(--deep);
+}
+.dlg-check,
+.dlg-static {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+}
+.dlg-check {
+  cursor: pointer;
+}
+.dlg-check:hover {
+  background: var(--tint-hover);
+}
+.dlg-check input {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.dlg-check input:disabled {
+  cursor: not-allowed;
+}
+.dlg-static {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.dlg-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  font-size: 14px;
+}
+.dlg-row-text .mono {
+  font-size: 12px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.dlg-row-note,
+.dlg-row-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.dlg-row-status {
+  font-size: 13px;
+  margin-left: auto;
+  text-align: right;
+}
+.dlg-row-note .icon,
+.dlg-row-status .icon {
+  font-size: 15px;
+  flex: none;
+}
+
 .toast-wrap {
   position: fixed;
   left: 16px;

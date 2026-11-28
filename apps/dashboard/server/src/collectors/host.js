@@ -49,11 +49,18 @@ export function statfsTimed(p, { timeoutMs = 3000, statfs = nodeFs.promises.stat
   return Promise.race([pending, timeout]).finally(() => clearTimeout(timer));
 }
 
+// /proc/uptime's first field (seconds since boot), or null when unreadable.
+export function readUptimeSeconds(procDir) {
+  const v = Number.parseFloat(String(readText(path.join(procDir, 'uptime')) ?? '').split(/\s+/)[0]);
+  return Number.isFinite(v) && v >= 0 ? v : null;
+}
+
+// `_uptimeSec` is internal (summary.hostActions); the summary strips it before publishing.
 export async function collectHost({ cfg, now = Date.now(), statfs }) {
   const proc = cfg.procDir;
   const load = parseLoadavg(readText(path.join(proc, 'loadavg')));
   const mem = parseMeminfo(readText(path.join(proc, 'meminfo')));
-  const uptimeSec = Number.parseFloat(String(readText(path.join(proc, 'uptime')) ?? '').split(/\s+/)[0]);
+  const uptimeSec = readUptimeSeconds(proc);
   let root = null;
   try {
     root = statfsUsage(await statfsTimed(cfg.rootPath, { statfs }));
@@ -74,5 +81,6 @@ export async function collectHost({ cfg, now = Date.now(), statfs }) {
     bootedAt: Number.isFinite(uptimeSec) ? new Date(Math.round((now - uptimeSec * 1000) / 60_000) * 60_000).toISOString() : null,
     rebootRequired,
     rebootPackages: pkgs ? [...new Set(pkgs.split('\n').map((s) => s.trim()).filter(Boolean))].sort() : [],
+    _uptimeSec: uptimeSec,
   };
 }

@@ -1,6 +1,6 @@
 import { html, Icon, Chip, Btn, Reason, hrefFor, useId } from '../ui.js';
 import { fmtUptime, shortImage, plural } from '../format.js';
-import { openHref, DOCKER_DOWN_UNKNOWN } from '../model.js';
+import { openHref, DOCKER_DOWN_UNKNOWN, MEDIA_STACK } from '../model.js';
 
 export const HELD_REASON = 'Held by the boot gate until the media drive is back.';
 export const TAILNET_ONLY = 'Only available on the tailnet';
@@ -96,9 +96,41 @@ export function AppCard({ app, ctx, actions }) {
   </article>`;
 }
 
+// The "Check for updates" lock: paused first, then the server's hostActions lock.
+export function mediaUpdateLock(view, ctx = {}) {
+  return ctx.paused || view.hostActions?.mediaUpdate?.lock || null;
+}
+
+// Above the grid (CONTRACTS §11.7.3): moves the media apps to their newest stable release, after a review.
+export function MediaUpdatesCard({ view, ctx, actions }) {
+  const noteId = useId('mupd');
+  const lock = mediaUpdateLock(view, ctx);
+  const running = Boolean(view.hostActions?.mediaUpdate?.running);
+  return html`<section class="card media-updates" aria-labelledby="mupd-title">
+    <div class="media-updates-head">
+      <span class="label" id="mupd-title"><${Icon} name="arrow-circle-up" />Media app updates</span>
+      ${running && html`<${Chip} tone="info" icon="circle-notch" spin label="Updating" />`}
+    </div>
+    <p class="media-updates-text">Looks for new stable releases of the media apps. You pick which ones to update, then they update one at a time.</p>
+    <div class="actions">
+      <${Btn}
+        icon="arrows-clockwise"
+        label="Check for updates"
+        reason=${lock}
+        lock=${lock === TAILNET_ONLY}
+        describedBy=${lock ? noteId : undefined}
+        onClick=${() => actions.checkMediaUpdates()}
+      />
+    </div>
+    ${lock && html`<${Reason} id=${noteId} text=${/[.!]$/.test(lock) ? lock : `${lock}.`} />`}
+  </section>`;
+}
+
 export function Apps({ view, ctx, actions }) {
   if (!view.apps.length) {
     return html`<div class="card"><span class="empty">No containers reported yet. The list comes from the host's Docker helper.</span></div>`;
   }
-  return html`<div class="app-grid">${view.apps.map((a) => html`<${AppCard} key=${a.name} app=${a} ctx=${ctx} actions=${actions} />`)}</div>`;
+  const hasMedia = view.apps.some((a) => MEDIA_STACK.has(a.name) || a.stack === 'media');
+  return html`${hasMedia && html`<${MediaUpdatesCard} view=${view} ctx=${ctx} actions=${actions} />`}
+    <div class="app-grid">${view.apps.map((a) => html`<${AppCard} key=${a.name} app=${a} ctx=${ctx} actions=${actions} />`)}</div>`;
 }

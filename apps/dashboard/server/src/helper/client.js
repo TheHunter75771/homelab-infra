@@ -7,16 +7,20 @@
 //   unary   : {"ok": true, "op": OP, "data": {...}}  |  {"ok": false, "error": {"code": CODE, "message": TEXT}}
 //   stream  : first line {"ok": true, "op": OP, "stream": true, ...} (or the error line above), then one JSON
 //             event per line ({"type": "line" | "step" | "output", ...}), always ending with
-//             {"type": "end", "ok": BOOL, "reason": TEXT, "message"?: TEXT}. Closing our side cancels a stream.
+//             {"type": "end", "ok": BOOL, "reason": TEXT, "message"?: TEXT}. Closing our side cancels a stream
+//             (except set-pin: the helper finishes it, rollback included, whoever is listening).
+// §11.7.1 adds `reboot` (unary, no fields -> {scheduled_in}; refused with too-soon | busy | failed) and
+// `set-pin {name, pin}` (stream: pulling -> pinning -> recreating -> waiting-health -> done, or rolling-back and a
+// `failed` step with failed_step, code, message, rolled_back).
 //
 // The hard rule (ADR 0013): no Docker operation is sent unless a fresh `docker-state` says "active". Touching the
 // Docker socket while docker.service is down would socket-activate Docker and re-run the boot gate. The helper
 // enforces the same rule; the dashboard never relies on that alone.
 import net from 'node:net';
 
-export const UNARY_OPS = new Set(['ps', 'start', 'stop', 'restart', 'docker-state', 'last-pull', 'disk-split', 'boots']);
-export const STREAM_OPS = new Set(['logs', 'update']);
-export const DOCKER_OPS = new Set(['ps', 'start', 'stop', 'restart', 'logs', 'update']);
+export const UNARY_OPS = new Set(['ps', 'start', 'stop', 'restart', 'docker-state', 'last-pull', 'disk-split', 'boots', 'reboot']);
+export const STREAM_OPS = new Set(['logs', 'update', 'set-pin']);
+export const DOCKER_OPS = new Set(['ps', 'start', 'stop', 'restart', 'logs', 'update', 'set-pin']);
 const MAX_LINE_BYTES = 1024 * 1024;
 
 export class HelperError extends Error {
@@ -237,6 +241,28 @@ export function createDocker({ helper, reuseMs = 1000, clock = () => Date.now() 
     async update(name, { onStep, signal } = {}) {
       await guard({ fresh: true });
       return helper.stream('update', { name }, { onItem: (m) => m.type === 'step' && onStep?.(m), signal, timeout: 30 * 60_000 });
+    },
+
+    // §11.7.1 set-pin: move one media app to `pin` (repo:tag@sha256:…). onStep gets {step, at, ...} (the last one is
+    // "done" or "failed" with failed_step, code, message, rolled_back); onOutput gets {text}; onStart the header
+    // {name, from, to}. Never aborted from here: the helper finishes (or rolls back) on its own.
+    async setPin(name, pin, { onStep, onOutput, onStart } = {}) {
+      await guard({ fresh: true });
+      return helper.stream('set-pin', { name, pin }, {
+        onStart,
+        onItem: (m) => {
+          if (m.type === 'step') onStep?.(m);
+          else if (m.type === 'output') onOutput?.(m);
+        },
+        timeout: 45 * 60_000,
+      });
+    },
+
+    // §11.7.1 reboot: not a Docker op (it works while Docker is held). -> {scheduledIn} (seconds)
+    async reboot() {
+      const d = await helper.request('reboot', {}, { timeout: 30_000 });
+      const n = Number(d?.scheduled_in);
+      return { scheduledIn: Number.isFinite(n) && n >= 0 ? n : null };
     },
 
     // onLine gets {ts, text}; `flow` gets pause()/resume() (backpressure)

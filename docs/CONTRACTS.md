@@ -284,6 +284,146 @@ Design: `docs/design/handoff/README.md` (high fidelity), corrected by `docs/desi
 | B, C, E | the changes in §11.5 within their existing roles |
 | Lead | contract, versions, site.yml, ADRs, CI wiring, retiring `apps/push-core/` once D has migrated it |
 
+### 11.7 Host restart and media-app updates (Lead, 2026-11-28)
+Two new dashboard actions, both **tailnet-only** (403 for `remote`) and both behind a confirm dialog:
+**Restart host** (reboot the media server) and **Update media apps** (move the media-stack apps to the newest
+stable release of their image). The owner chose "real updates" (2026-11-28): the dashboard may move a pin forward,
+the host remembers it, and Ansible never silently rolls it back.
+
+**Amends §11.2 "Never":** the helper still never runs exec, build or arbitrary paths. It gains exactly two
+operations, `reboot` and `set-pin`. `set-pin` may rewrite one `image:` line of one deployed compose file and
+the helper's own pin record. The helper **still has no network** (`PrivateNetwork=yes` stays): registry
+lookups run in the dashboard server (unprivileged), and the helper only pulls by digest, so Docker verifies
+the content whatever the server asked for.
+
+#### 11.7.1 Helper (module H)
+- **`reboot`** (unary, no fields):
+  - Refused with `too-soon` when `/proc/uptime` is below `reboot_min_uptime` (config, default 600 s).
+  - Refused with `busy` when any lock file under `<cache_dir>/locks/` is held (try `flock LOCK_EX|LOCK_NB`
+    on each, release at once), i.e. while any start/stop/restart/update/set-pin runs.
+  - Schedules the reboot so the reply gets out first:
+    `systemd-run --collect --unit=homelab-dashboard-reboot --description="Reboot requested from the dashboard"
+    --on-active=<reboot_delay>s --timer-property=AccuracySec=1s /usr/bin/systemctl reboot` (argv, timeout;
+    `reboot_delay` config, default 10). An **active** `homelab-dashboard-reboot.timer` → `busy` ("a reboot is
+    already scheduled"). A leftover inactive or failed unit is cleared first with `systemctl reset-failed`, so a
+    failed reboot never blocks the next one (review M1). Other non-zero exits → `failed`.
+  - Reply data: `{"scheduled_in": <reboot_delay>}`. Logged at warning level ("reboot scheduled").
+  - `systemd-run` path is config `systemd_run` (default `/usr/bin/systemd-run`).
+- **`set-pin {name, pin}`** (stream):
+  - `name`: a watched container declared in a deployed compose file whose stack is in `pin_stacks`
+    (config, default `["media"]`), not a local build, with a pinned image. Else `not-allowed`/`local-image`.
+  - `pin` must match `^<repo>:<tag>@sha256:<64 hex>$` where `<repo>` is **exactly** the repository of the
+    current pin (the part before its `:tag` / `@digest`) and `<tag>` is `[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}`.
+    Max length 512. Equal to the current pin → `already-pinned`. Else `bad-request`.
+  - The compose file must contain the current pin as an `image:` value (quoted or not) on **exactly one**
+    line. Else `failed` ("compose file doesn't match its pin"), nothing changed.
+  - Gate: `check_gate(stack)` as for `update`. Locks: `media-pins` (global) and `container-<name>`, both
+    held for the whole run. A client that goes away never stops it.
+  - Header: `{"ok":true,"op":"set-pin","stream":true,"name","from":<old pin>,"to":<new pin>}`.
+  - Steps (`{"type":"step","step",...,"at"}`): `pulling` (`docker pull <pin>`, pull_timeout) →
+    `pinning` (record the pin in `pins.json` **first**, then rewrite the compose line: a crash in between
+    leaves the record ahead, which Ansible renders as "repo behind", never as a rollback; review L2) → `recreating` (same compose `up` argv as `update`)
+    → `waiting-health` (same `_wait_health`) → `done`. `output` events as for `update`.
+  - Failure before `pinning`: step `failed` (`failed_step`, `code`, `message`), nothing changed.
+  - Failure at or after `pinning`: step `rolling-back`, restore the exact previous compose bytes and pin record,
+    run the same `up`, wait for health; then step `failed` with `rolled_back: true|false` and a message
+    ("rolled back to <old tag>" or "rollback also failed: …"). Never leaves a half-written file.
+  - Compose rewrite: read bytes, replace that one line keeping its indentation, write `compose.yaml.tmp-<pid>`
+    in the same directory (O_EXCL|O_NOFOLLOW), copy the original mode, owner root, fsync, `rename`, fsync the
+    directory. The file must still pass `_trusted` afterwards.
+  - **Pin record** `/var/lib/homelab-dockerctl/pins.json` (dir 0755 root via `StateDirectory=`, file 0644,
+    atomic write): `{"version":1,"pins":{"<stack>/<service>":{"image":<new pin>,"previous":<old pin>,"at":ISO}}}`.
+    `previous` keeps the pin that was there before the **first** dashboard update for that service (the
+    repo's pin), so a second update doesn't lose it. A rollback restores the record to its exact prior state.
+  - Unit (`homelab-dockerctl@.service`): add `ReadWritePaths={{ homelab_stacks_dir }}` and
+    `StateDirectory=homelab-dockerctl` + `StateDirectoryMode=0755`. Everything else stays.
+
+#### 11.7.2 Dashboard server (module D)
+- **Registry client** `src/registry.js` (Node `fetch`, no new npm deps):
+  - Parses a pin into registry host, repository, tag, digest. No dot/colon/`localhost` in the first path part
+    → Docker Hub (`registry-1.docker.io`, `library/` prefix for single names). `lscr.io` is queried as-is (it
+    answers the v2 API with a ghcr.io token challenge).
+  - Anonymous Bearer auth from the `WWW-Authenticate` challenge (realm must be `https://`). Tokens cached per
+    scope until `expires_in`. HTTPS only, 15 s timeout per request, body caps (manifest 1 MiB, config 2 MiB).
+  - `latest(pin, channel='latest')`: GET `manifests/<channel>` (Accept: OCI index, Docker list, OCI manifest,
+    Docker v2). Digest = `Docker-Content-Digest`, checked against sha256 of the body. For an index, take the
+    `linux/amd64` entry's manifest, then its config blob → label `org.opencontainers.image.version`. Then
+    HEAD `manifests/<version>` must return the same digest. Result `{version, digest, pin: "<repo as pinned>:<version>@<digest>"}`.
+    Any mismatch or missing label → an error with a short reason.
+- **Which apps:** the helper's `ps.declared` entries with `stack === "media"`, not `local_build`, with a pin.
+- **`GET /api/media/updates`** (tailnet-only; `?refresh=1` skips the cache; results cached 10 min):
+  `{checkedAt, apps:[{name, label, current:{version, pin}, latest:{version, pin}|null, status, major, message}]}`.
+  - `status`: `update` (newer digest), `current` (same digest as the pin), `deprecated` (latest version
+    contains `deprecated`: never offered, message says the image is no longer maintained), `error`
+    (lookup failed; `message` says why, no URLs or tokens).
+  - `ahead` (review L1): the pinned version is newer than the registry's `latest` (compared by the leading
+    dotted numbers, then the linuxserver `-lsN` build). Never offered: a downgrade can break app databases.
+  - `major`: the first numeric part of the version differs (`10.11.9…` → `12.4…`).
+  - At most 3 lookups in parallel.
+- **`POST /api/media/update`** body `{apps:[name,…]}` (1–10 names, each must be `status: update` in a check
+  at most 10 min old, else 409 "Check for updates again"): one action, kind `media-update`, app `null`. It runs
+  the apps one at a time with the helper's `set-pin` and the checked pin, and **stops at the first failure**.
+  - Action steps (on the existing `GET /api/actions/:id` stream): `{step:"app", app, index, total, from, to}`,
+    then the helper's steps for that app (`pulling | pinning | recreating | waiting-health | rolling-back`)
+    each with `app`, then `{step:"app-done", app}` or `{step:"app-failed", app, rolledBack}`.
+  - End: `done` with detail "Updated N apps: Sonarr 4.0.20.3014-ls7, …", or `failed` with the reason and
+    what already finished. The check cache is dropped when it ends.
+  - Counts as an update for §11.2 Concurrency: a per-app update and a media update exclude each other (409).
+- **`POST /api/host/reboot`** (tailnet-only): 409 while any action runs (app, gate re-run, media update) or
+  while the helper says `busy`/`too-soon` (its message is the reason). Else action kind `reboot`, steps
+  `requested` → `scheduled` → end `done` with detail "Restarting in 10 s. The dashboard is back in a few
+  minutes." Logged at warning level.
+- **Summary addition** `hostActions`:
+  `{reboot:{lock: string|null}, mediaUpdate:{lock: string|null, running: <action id>|null}}`. Locks use the
+  existing wording: `Only available on the tailnet` for remote; `Busy` while an action runs;
+  `The box just started. Try again in N min.` when uptime < 600 s; the media lock also carries the gate's
+  held reason and "Docker isn't running."
+
+#### 11.7.3 Web (module G)
+- **Overview → Host tile:** a "Restart host" button (icon `arrows-clockwise`, tone fail, disabled with the
+  `hostActions.reboot.lock` reason line). Confirm dialog kind `reboot`: title "Restart the media server?",
+  body: everything on the box (Jellyfin, requests, downloads, this dashboard) is down for about 2–5 minutes,
+  the boot gate checks the media drive before apps start; plus "N people are watching right now." when
+  Jellyfin has sessions, plus "Installs the pending updates: <pkgs>" when `rebootRequired`. Confirm label
+  "Restart host". After success: a toast with the server's detail; the offline screen covers the downtime.
+- **Apps screen:** a card above the grid, "Media app updates", button "Check for updates" (disabled with
+  `hostActions.mediaUpdate.lock`). It opens dialog kind `media-update`:
+  - phase `review`: one row per app: label, `current → latest` version, a checkbox for `status: update`.
+    Ticked by default except `major` (unticked, with "Major version: read the release notes first").
+    `current` rows say "Up to date", `deprecated`/`error` rows show their message, no checkbox. Confirm
+    "Update N apps" (disabled at 0). "Check again" re-runs with `refresh=1`.
+  - phase `progress`: per-app row with its current step (Pulling, Saving the new version, Recreating,
+    Waiting for health check, Rolling back) and a done/failed mark.
+  - End: toast `ok` with the detail, or `fail` with the reason. A media update running when the page loads
+    (`running`) is followed again.
+- Reduced motion, focus handling and 44 px targets as in §11.4. Tests: unit tests for the dialog content and
+  the step mapping; smoke fixtures gain `hostActions` and the new dialog renders without errors.
+
+#### 11.7.4 Ansible (module C, role `stacks`) and Lead
+- **Host pins win over silence, never over the repo by surprise.** Before rendering `media/compose.yaml`,
+  the role reads `/var/lib/homelab-dockerctl/pins.json` (if present). For each `media/<service>` entry it
+  finds the `images` key whose value has the same repository:
+  - repo pin == host pin → the entry is **synced**; it is removed from `pins.json` after the stack is up.
+  - repo pin == the entry's `previous` → the repo hasn't caught up: **render the host pin** (no rollback)
+    and print a warning naming the app and `ansible-playbook playbooks/sync-pins.yml`.
+  - anything else (the repo moved on its own) → **fail** before touching the stack, naming the app, both
+    pins, and the two ways out: `playbooks/sync-pins.yml` (adopt the host pin) or
+    `-e stacks_drop_host_pins=true` (the repo wins; the entry is removed and the repo pin deployed).
+- **`playbooks/sync-pins.yml`** (Lead): reads `pins.json` from the media server and replaces each matching
+  pin in `inventory/group_vars/all/versions.yml` on the controller (exact old value → new value, one line
+  each). Prints what changed. It never commits.
+- Tests: a check-mode-safe test of the merge rules (synced / repo behind / conflict / drop) with fixture
+  files; `yamllint` and `ansible-lint` stay clean.
+
+#### 11.7.5 Ownership
+| Module | Owns in 11.7 |
+|---|---|
+| H host | `roles/dashboard/files/homelab-dockerctl/` (ops + tests), `roles/dashboard/templates/homelab-dockerctl@.service.j2`, `dockerctl.json.j2`, `roles/dashboard/defaults/main.yml` |
+| D server | `apps/dashboard/server/` |
+| G web | `apps/dashboard/web/` |
+| C stacks | `roles/stacks/` (pins merge + tests) and `playbooks/sync-pins.yml` |
+| Lead | this section, CI wiring, the deploy |
+
 ## 12. ai-box: the AI host (build started 2026-10-26)
 Plan: the 2nd HP desktop (EliteDesk 800 G2 DM: i5-6500 4C/4T, 8 GB, 500 GB HDD, **no GPU slot**) runs the
 LLM front door, Open WebUI and (later) the Household Calendar. It **borrows the gaming PC's GPU** under Noah's

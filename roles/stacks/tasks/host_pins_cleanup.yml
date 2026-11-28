@@ -1,0 +1,54 @@
+---
+# Host image pins (docs/CONTRACTS.md §11.7.4), after the media stack is up and healthy: take the synced and
+# dropped entries out of the dashboard's pin record. Entries that are still ahead of the repo stay. With no
+# entries left the file is deleted. Runs only when host_pins.yml found something to remove, so a run with
+# nothing to do reports changed=0.
+# The helper may have recorded a new pin while this run was deploying. The record is re-checked first and left
+# alone if it changed: the next run sorts it out, and nothing the helper wrote is ever overwritten.
+
+- name: Host pins | look at the pin record again before cleaning it up
+  ansible.builtin.stat:
+    path: "{{ stacks_host_pins_file }}"
+    follow: false
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: stacks_host_pins_restat
+  when: stacks_host_pins.remove | length > 0
+
+- name: Host pins | the record is unchanged since it was read
+  ansible.builtin.set_fact:
+    stacks_host_pins_unchanged: >-
+      {{ stacks_host_pins_restat.stat.exists | default(false)
+         and stacks_host_pins_restat.stat.isreg | default(false)
+         and stacks_host_pins_restat.stat.checksum | default('') == stacks_host_pins_checksum }}
+  when: stacks_host_pins.remove | length > 0
+
+- name: Host pins | WARNING - the pin record changed during this run (left as it is)
+  ansible.builtin.debug:
+    msg:
+      - "{{ stacks_host_pins_file }} changed while this run was deploying (the dashboard updated an app?)."
+      - "It was left as it is. Re-run site.yml to clean up: {{ stacks_host_pins.remove | join(', ') }}."
+  when:
+    - stacks_host_pins.remove | length > 0
+    - not stacks_host_pins_unchanged | bool
+
+- name: Host pins | synced or dropped entries are removed (the others stay)
+  ansible.builtin.copy:
+    dest: "{{ stacks_host_pins_file }}"
+    content: "{{ stacks_host_pins.content }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - stacks_host_pins.remove | length > 0
+    - stacks_host_pins_unchanged | bool
+    - not stacks_host_pins.delete
+
+- name: Host pins | no entries left, the pin record is removed
+  ansible.builtin.file:
+    path: "{{ stacks_host_pins_file }}"
+    state: absent
+  when:
+    - stacks_host_pins.remove | length > 0
+    - stacks_host_pins_unchanged | bool
+    - stacks_host_pins.delete

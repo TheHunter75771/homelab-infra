@@ -27,6 +27,7 @@ _SPEC.loader.exec_module(dockerctl)
 DOCKER = "/usr/bin/docker"
 SYSTEMCTL = "/usr/bin/systemctl"
 JOURNALCTL = "/usr/bin/journalctl"
+SYSTEMD_RUN = "/usr/bin/systemd-run"
 
 
 def cid(n: int) -> str:
@@ -83,6 +84,7 @@ class FakeProc:
         """err_output=None: stderr merged into stdout; bytes: a separate stderr pipe with that content."""
         self.argv = argv
         self._writers: list[int] = []
+        self._exited = threading.Event()
         self.stdout = self._pipe(output)
         self.stderr = self._pipe(err_output) if err_output is not None else None
         FakeProc._next_pid += 1
@@ -92,17 +94,35 @@ class FakeProc:
         if not hang:
             self.exit(rc)
 
+    # Small outputs are written at once. Larger ones are fed from a thread: a pipe can be as small
+    # as one page when the user is over fs.pipe-user-pages-soft, and a blocking write would hang.
+    _INLINE_BYTES = 4096
+
     def _pipe(self, data: bytes):
         r, w = os.pipe()
-        if data:
-            os.write(w, data)
-        self._writers.append(w)
+        if len(data) <= self._INLINE_BYTES:
+            if data:
+                os.write(w, data)
+            self._writers.append(w)
+        else:
+            threading.Thread(target=self._feed, args=(w, data), daemon=True).start()
         return os.fdopen(r, "rb", buffering=0)
+
+    def _feed(self, w: int, data: bytes) -> None:
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(w, view):]
+        except OSError:  # the reader closed early
+            pass
+        self._exited.wait()  # EOF only once the "process" has exited, as for the inline pipes
+        os.close(w)
 
     def exit(self, rc: int) -> None:
         for w in self._writers:
             os.close(w)
         self._writers = []
+        self._exited.set()
         self.returncode = rc
 
     def poll(self) -> int | None:
@@ -141,6 +161,16 @@ class FakeSystem:
         self.du_rc = 0
         self.on_spawn = None  # callback(argv) run before a spawn returns
         self.pending_health: dict[str, list] = {}  # health statuses inspect returns after an "up"
+        # set-pin: `docker pull <ref>`, and per-"up" scripts (popped in order; empty = the fields above).
+        self.image_pull_output = b"4.0.20: Pulling from linuxserver/sonarr\nStatus: Downloaded newer image\n"
+        self.image_pull_rc = 0
+        self.up_rcs: list[int] = []
+        self.health_after_ups: list[list] = []
+        # reboot: systemd-run is never really run; this records and answers it.
+        self.systemd_run_rc = 0
+        self.reboot_unit_states: dict[str, str] = {}  # systemctl is-active answers for the reboot units
+        self.reset_failed_rc = 0
+        self.systemd_run_err = ""
 
     # ---- clock
 
@@ -181,6 +211,12 @@ class FakeSystem:
     def run(self, argv: list[str], timeout: float) -> dockerctl.Result:
         self.calls.append(list(argv))
         prog = argv[0]
+        if prog == SYSTEMCTL and argv[1] == "is-active" and argv[2].startswith("homelab-dashboard-reboot."):
+            states = [self.reboot_unit_states.get(unit, "inactive") for unit in argv[2:]]
+            active = any(s == "active" for s in states)
+            return dockerctl.Result(0 if active else 3, "".join(s + "\n" for s in states), "")
+        if prog == SYSTEMCTL and argv[1] == "reset-failed":
+            return dockerctl.Result(self.reset_failed_rc, "", "")
         if prog == SYSTEMCTL:
             state = self.docker_state
             return dockerctl.Result(0 if state == "active" else 3, f"{state}\n" if state else "", "")
@@ -203,6 +239,8 @@ class FakeSystem:
             if "--list-boots" in argv:
                 return dockerctl.Result(0, self.boots_output, "")
             return dockerctl.Result(self.journal_rc, self.journal_output, "")
+        if prog == SYSTEMD_RUN:
+            return dockerctl.Result(self.systemd_run_rc, "", self.systemd_run_err)
         if prog.endswith("ionice"):
             return dockerctl.Result(self.du_rc, self.du_output, "")
         raise AssertionError(f"unexpected command {argv}")
@@ -218,16 +256,20 @@ class FakeSystem:
                             err_output=self.logs_err if split_stderr else None)
         elif argv[1] == "compose" and "pull" in argv:
             proc = FakeProc(argv, self.pull_output, self.pull_rc)
+        elif argv[1] == "pull":
+            proc = FakeProc(argv, self.image_pull_output, self.image_pull_rc)
         elif argv[1] == "compose" and "up" in argv:
-            proc = FakeProc(argv, self.up_output, self.up_rc)
-            if self.up_rc == 0:
+            up_rc = self.up_rcs.pop(0) if self.up_rcs else self.up_rc
+            health = self.health_after_ups.pop(0) if self.health_after_ups else self.health_after_up
+            proc = FakeProc(argv, self.up_output, up_rc)
+            if up_rc == 0:
                 service = argv[-1]
                 c = self.containers[service]
                 c["Id"] = cid(900 + len(self.procs))
                 c["Config"]["Image"] = IMAGES.get(service, c["Config"]["Image"])
                 c["State"]["Status"] = self.state_after_up
                 c["State"]["Running"] = self.state_after_up == "running"
-                self.pending_health = {service: list(self.health_after_up)}
+                self.pending_health = {service: list(health)}
         else:
             raise AssertionError(f"unexpected spawn {argv}")
         self.procs.append(proc)
@@ -265,12 +307,17 @@ class Env:
         self.status = root / "bootgate-status"
         self.set_gate(gate)
         self.cache = root / "cache"
+        self.state = root / "state"
+        self.uptime = root / "uptime"
+        self.uptime.write_text("86400.52 170000.10\n")
         cfg = {
             "allowed_uid": os.getuid() if allowed_uid is None else allowed_uid,
             "stacks_dir": str(self.stacks),
             "media_mount": str(self.media),
             "bootgate_status_file": str(self.status),
             "cache_dir": str(self.cache),
+            "state_dir": str(root / "state"),
+            "proc_uptime": str(root / "uptime"),
             "trusted_owner_uid": os.getuid(),
             "request_timeout": 2,
             "send_timeout": 2,

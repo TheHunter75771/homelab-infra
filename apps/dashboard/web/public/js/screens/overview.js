@@ -1,4 +1,4 @@
-import { html, Icon, Chip, Bar, hrefFor } from '../ui.js';
+import { html, Icon, Chip, Bar, Btn, Reason, hrefFor, useId } from '../ui.js';
 import {
   healthBanner,
   appsSummary,
@@ -76,8 +76,15 @@ function DriveTile({ view }) {
   </a>`;
 }
 
-function HostTile({ view }) {
+// The Restart host button's lock: paused (backend unreachable) first, then the server's hostActions lock.
+export function rebootLock(view, ctx = {}) {
+  return ctx.paused || view.hostActions?.reboot?.lock || null;
+}
+
+function HostTile({ view, ctx, actions }) {
   const h = view.host;
+  const noteId = useId('reboot');
+  const lock = rebootLock(view, ctx);
   const rows = [
     ['Load', fmtLoad(h.load)],
     ['RAM', fmtMem(h.memUsed, h.memTotal)],
@@ -88,6 +95,18 @@ function HostTile({ view }) {
     <span class="label"><${Icon} name="cpu" />Host</span>
     ${rows.map(([k, v]) => html`<span class="kv"><span>${k}</span><span>${v}</span></span>`)}
     ${h.rebootRequired && html`<span class="chip-reboot"><${Chip} tone="warn" icon="arrows-clockwise" label="Reboot needed" /></span>`}
+    <span class="tile-action">
+      <${Btn}
+        icon="arrows-clockwise"
+        label="Restart host"
+        danger
+        reason=${lock}
+        lock=${lock === 'Only available on the tailnet'}
+        describedBy=${lock ? noteId : undefined}
+        onClick=${() => actions?.ask('reboot')}
+      />
+    </span>
+    ${lock && html`<${Reason} id=${noteId} text=${/[.!]$/.test(lock) ? lock : `${lock}.`} />`}
   </div>`;
 }
 
@@ -274,12 +293,12 @@ function NowPlayingStrip({ view }) {
   </a>`;
 }
 
-export function Overview({ view }) {
+export function Overview({ view, ctx, actions }) {
   return html`<${HealthBanner} view=${view} />
     <${GateRow} view=${view} />
     <div class="tiles">
       <${DriveTile} view=${view} />
-      <${HostTile} view=${view} />
+      <${HostTile} view=${view} ctx=${ctx} actions=${actions} />
       <${BackupsTile} view=${view} />
       <${UptimeTile} view=${view} />
       <${AppsTile} view=${view} />

@@ -301,6 +301,7 @@ export function normal(now) {
     },
     subscriptions: subs.map((s) => ({ ...s, daysLeft: Math.round((Date.parse(`${s.date}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / D), remindOn: addDays(s.date, -7), reminderDue: false, reminded: false })),
     settings: { thresholds: { diskWarnPct: 90, backupMaxAgeH: 36 } },
+    hostActions: { reboot: { lock: null }, mediaUpdate: { lock: null, running: null } },
     links: {
       runbooks: [
         { title: 'Failed boot gate', url: 'https://example.org/runbooks/failed-boot-gate.md' },
@@ -338,6 +339,7 @@ export function badNight(now) {
   };
   s.apps = NAMES.map((n) => app(n, now, { status: 'held', noPs: true }));
   s.drive = { ...s.drive, mounted: false, stale: true, lastKnownAt: iso(now - D) };
+  s.hostActions = { reboot: { lock: null }, mediaUpdate: { lock: HELD, running: null } };
   s.media = heldMedia();
   s.backups = { ...s.backups, lastOk: iso(now - 11 * H) };
   s.push.alerts = [
@@ -366,6 +368,7 @@ export function mediaLost(now) {
     history: [{ ...s.gate.history[0], events: [ev(iso(lostAt), 'media-lost', '/media dropped: I/O errors on sdb', null), ...s.gate.history[0].events] }, ...s.gate.history.slice(1)],
   };
   s.apps = NAMES.map((n) => (META[n].mediaGated ? app(n, now, { status: 'held', state: 'exited' }) : app(n, now)));
+  s.hostActions = { reboot: { lock: null }, mediaUpdate: { lock: HELD, running: null } };
   s.drive = { ...s.drive, mounted: false, stale: true, lastKnownAt: iso(lostAt) };
   s.media = heldMedia();
   s.push.alerts = [{ ts: iso(lostAt), title: 'Media drive lost', body: 'Media drive lost; media apps stopped.', tag: 'bootgate', delivered: 3, failed: 0, state: 'active' }, ...s.push.alerts];
@@ -379,6 +382,7 @@ export function dockerDown(now) {
   const s = normal(now);
   s.docker = { state: 'inactive' };
   s.apps = NAMES.map((n) => app(n, now, { status: 'unknown', noPs: true }));
+  s.hostActions = { reboot: { lock: null }, mediaUpdate: { lock: DOCKER_DOWN, running: null } };
   s.media = heldMedia([]);
   const label = { jellyfin: 'Jellyfin', sabnzbd: 'SABnzbd', jellyseerr: 'Jellyseerr', prowlarr: 'Prowlarr', sonarr: 'Sonarr', radarr: 'Radarr' };
   for (const n of Object.keys(label)) s.media[n] = { state: 'unknown', message: `${label[n]}'s state is unknown.` };
@@ -447,6 +451,27 @@ export function troubled(now) {
   return s;
 }
 
+// The answer of GET /api/media/updates (CONTRACTS §11.7.2) the fake API serves: one of each status.
+export function mediaCheck(now) {
+  const repo = (name) => {
+    const ref = PINNED[name].split('@')[0];
+    return ref.slice(0, ref.lastIndexOf(':'));
+  };
+  const pin = (name, version) => `${repo(name)}:${version}@sha256:${'c'.repeat(64)}`;
+  const cur = (name) => ({ version: tagOf(PINNED[name]), pin: PINNED[name] });
+  return {
+    checkedAt: iso(now),
+    apps: [
+      { name: 'jellyfin', label: 'Jellyfin', current: cur('jellyfin'), latest: { version: '12.0.1ubu2404-ls1', pin: pin('jellyfin', '12.0.1ubu2404-ls1') }, status: 'update', major: true, message: null },
+      { name: 'jellyseerr', label: 'Jellyseerr', current: cur('jellyseerr'), latest: { version: '2.7.3-deprecated', pin: pin('jellyseerr', '2.7.3-deprecated') }, status: 'deprecated', major: false, message: 'This image is no longer maintained.' },
+      { name: 'prowlarr', label: 'Prowlarr', current: cur('prowlarr'), latest: null, status: 'error', major: false, message: "The registry didn't answer in time." },
+      { name: 'radarr', label: 'Radarr', current: cur('radarr'), latest: cur('radarr'), status: 'current', major: false, message: null },
+      { name: 'sabnzbd', label: 'SABnzbd', current: cur('sabnzbd'), latest: { version: '5.0.4-ls256', pin: pin('sabnzbd', '5.0.4-ls256') }, status: 'update', major: false, message: null },
+      { name: 'sonarr', label: 'Sonarr', current: cur('sonarr'), latest: { version: '4.0.20.3014-ls7', pin: pin('sonarr', '4.0.20.3014-ls7') }, status: 'update', major: false, message: null },
+    ],
+  };
+}
+
 export const SCENARIOS = {
   normal,
   bad: badNight,
@@ -457,6 +482,13 @@ export const SCENARIOS = {
   sab: sabDown,
   troubled,
   rehearsal: (now) => ({ ...normal(now), rehearsal: true }),
+  // Booted 3 minutes ago: the restart is refused until the box has been up 10 min (CONTRACTS §11.7.1).
+  'just-booted': (now) => {
+    const s = normal(now);
+    s.host = { ...s.host, bootedAt: iso(now - 3 * 60e3), rebootRequired: true, rebootPackages: ['linux-image-generic', 'libc6'] };
+    s.hostActions = { reboot: { lock: 'The box just started. Try again in 7 min.' }, mediaUpdate: { lock: null, running: null } };
+    return s;
+  },
   remote: (now) => {
     const s = normal(now);
     return {
@@ -464,6 +496,7 @@ export const SCENARIOS = {
       access: 'remote',
       apps: s.apps.map((a) => ({ ...a, locks: { ...a.locks, update: 'Only available on the tailnet' } })),
       gate: { ...s.gate, canRerun: false, rerunLock: 'Only available on the tailnet' },
+      hostActions: { reboot: { lock: 'Only available on the tailnet' }, mediaUpdate: { lock: 'Only available on the tailnet', running: null } },
     };
   },
 };

@@ -303,7 +303,7 @@ jobs:
         run: |
           pip install pydantic==2.14.1 langchain-core==1.7.0
           python3 -m unittest discover -s apps/finance-tools/tests -t apps/finance-tools -v
-      - name: jellyfin network preset
+      - name: stacks role tests (jellyfin network preset, host image pins)
         run: python3 -m unittest discover -s roles/stacks/tests -v
       - name: tailscale serve config
         run: ANSIBLE_VAULT_PASSWORD_FILE=/tmp/vault-pass ansible-playbook -i localhost, -c local roles/tailscale_serve/tests/test_serve_config.yml
